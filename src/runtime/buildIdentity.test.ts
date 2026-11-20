@@ -346,6 +346,49 @@ describe("the build SHA is written at build time, never committed", () => {
       expect(info.reason).toBe("head_unreadable");
     });
 
+    it("a corrupt .git/HEAD is head_unreadable, not not_a_repository, though git calls it 'not a git repository' (Codex, #502)", () => {
+      const dir = tmp();
+      const git = (...a: string[]) => execFileSync("git", a, { cwd: dir, stdio: "pipe" });
+      git("init", "-q");
+      git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "x");
+      fs.writeFileSync(path.join(dir, ".git", "HEAD"), "garbage\n");
+      expect(() => git("rev-parse", "--git-dir")).toThrow();
+      const info = run(dir);
+      expect(info.gitSha).toBeNull();
+      expect(info.reason).toBe("head_unreadable");
+    });
+
+    it("repository metadata is found the way git finds it: in a parent folder, or at $GIT_DIR", () => {
+      const repo = tmp();
+      const git = (...a: string[]) => execFileSync("git", a, { cwd: repo, stdio: "pipe" });
+      git("init", "-q");
+      git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "x");
+      fs.writeFileSync(path.join(repo, ".git", "HEAD"), "garbage\n");
+      const sub = path.join(repo, "client");
+      fs.mkdirSync(sub);
+      expect(run(sub).reason).toBe("head_unreadable");
+
+      const elsewhere = tmp();
+      const unreadable = path.join(tmp(), "not-a-git-dir");
+      fs.mkdirSync(unreadable);
+      expect(run(elsewhere, { ...process.env, GIT_DIR: unreadable }).reason).toBe("head_unreadable");
+    });
+
+    it("the log line names an unreadable status as unknown, never as uncommitted changes (Codex, #502)", () => {
+      const dir = tmp();
+      const git = (...a: string[]) => execFileSync("git", a, { cwd: dir, stdio: "pipe" });
+      git("init", "-q");
+      git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "x");
+      fs.writeFileSync(path.join(dir, ".git", "index"), "not an index");
+      const out = execFileSync(process.execPath, [script], { cwd: dir, stdio: "pipe" }).toString();
+      expect(out).toContain("status_unreadable");
+      expect(out).not.toContain("uncommitted changes");
+      fs.writeFileSync(path.join(dir, ".git", "index"), "");
+      fs.rmSync(path.join(dir, ".git", "index"));
+      fs.writeFileSync(path.join(dir, "b.ts"), "export const b = 1;\n");
+      expect(execFileSync(process.execPath, [script], { cwd: dir, stdio: "pipe" }).toString()).toContain("uncommitted changes");
+    });
+
     it("a dirty tree says dirty, and an unreadable status says so, never 'clean'", () => {
       const dirty = tmp();
       const git = (cwd: string, ...a: string[]) => execFileSync("git", a, { cwd, stdio: "pipe" });

@@ -79,10 +79,25 @@ function dirtiness() {
   return status.length > 0 ? "dirty" : null;
 }
 
+/**
+ * Whether repository metadata is on disk at all: $GIT_DIR when it is set,
+ * otherwise a `.git` in this directory or any parent (the walk git itself does).
+ * Read from the filesystem, not from git, because git refuses a repository it
+ * cannot parse (a corrupt .git/HEAD reads "not a git repository") and that
+ * must not be reported as a build that was never given .git (Codex, #502).
+ */
+function gitMetadataPresent() {
+  if (process.env.GIT_DIR) return fs.existsSync(process.env.GIT_DIR);
+  for (let dir = process.cwd(); ; dir = path.dirname(dir)) {
+    if (fs.existsSync(path.join(dir, ".git"))) return true;
+    if (path.dirname(dir) === dir) return false;
+  }
+}
+
 /** Why HEAD could not be read: the first of the three checks that fails. */
 function whyNoSha() {
   if (git(["--version"]) === null) return "git_unavailable";
-  if (git(["rev-parse", "--git-dir"]) === null) return "not_a_repository";
+  if (!gitMetadataPresent()) return "not_a_repository";
   return "head_unreadable";
 }
 
@@ -115,7 +130,9 @@ function main(out = path.join(process.cwd(), "build-info.json")) {
     fs.writeFileSync(out, JSON.stringify(info));
     console.log(
       info.dirty
-        ? `[build-info] workspace has uncommitted changes on ${info.baseShaFull.slice(0, 7)} (${info.reason}); build SHA reported as unknown`
+        ? info.reason === "status_unreadable"
+          ? `[build-info] git status could not run on ${info.baseShaFull.slice(0, 7)}, so the workspace state is unknown (status_unreadable); build SHA reported as unknown`
+          : `[build-info] workspace has uncommitted changes on ${info.baseShaFull.slice(0, 7)} (dirty); build SHA reported as unknown`
         : `[build-info] ${info.gitSha ?? `unknown sha (${info.reason})`} traceable=${info.traceable}`,
     );
     return true;
