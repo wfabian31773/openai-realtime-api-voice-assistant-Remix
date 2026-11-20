@@ -11,11 +11,10 @@
  * RULE THREE, the corpus (every npx-outreach contact dialled or texted from
  * v246's first call, 2026-11-16 22:55 UTC, to 2026-11-20 02:30 UTC: 14):
  *
- *   CAf256c21807735a19e196154c7064ff5a  2026-11-19 13:20 Pacific. The patient's
- *     visit had been kept that day; the cache built for 2026-11-19 still read
- *     them Lapsed. Dialled (no answer) and texted a minute later.
- *     Read-only on the Console, 2026-11-20: on main's list for 11-19, off the
- *     guarded one.
+ *   CAf256c21807735a19e196154c7064ff5a  2026-11-19 13:20 Pacific. A kept visit
+ *     on the day the cache was built for, so the row still read Lapsed; the
+ *     contact was dialled and then texted. Read-only on the Console,
+ *     2026-11-20: on main's list for 11-19, off the guarded one.
  *
  * The other 13 had no kept visit since the build and stay on the list. On the
  * list built for 2026-11-19, 2 of the 320 New and Lapsed rows were this shape.
@@ -71,8 +70,8 @@ describe("the dial re-checks with the same statement", () => {
       return { rows: [] };
     });
     await reader.list("2026-11-19");
-    // CAf256c21807735a19e196154c7064ff5a's appointment, read at its dial.
-    expect(await reader.current("16bb9a35-70fc-45fc-9572-ded2a956febf", "2026-11-19")).toBeNull();
+    // A synthetic appointment id, read at its dial.
+    expect(await reader.current("00000000-0000-4000-8000-000000000252", "2026-11-19")).toBeNull();
     expect(seen).toHaveLength(2);
     for (const q of seen) {
       expect(q.text).toContain(GUARD);
