@@ -2002,9 +2002,20 @@ import { callEnvironment } from "./callRecord";
  * 2026-11-06..19 to Optical. A request that also describes a symptom stays in
  * Technicians. Above main's v252 (#498, `6e08bf0`), which it contains; v245 is
  * #488 on its open branch. No migration.
+ * On main since #499 (`1035254`).
+ *
+ * v254 — A SYMPTOM THE CALLER SAID KEEPS A GLASSES REQUEST IN TECHNICIANS
+ * (2026-11-20). #499 merged before the fix for its safety-direction review
+ * finding: v253's symptom veto read only the model's sentence (drafted on the
+ * call or read from the recording), and a sentence can leave out a symptom
+ * the caller said. The same three tests now run over the caller's own lines,
+ * and a match keeps the request in Technicians. Agent lines are not read. The
+ * 5 corpus calls' real caller lines carry no symptom, so no rescue is lost.
+ * Above main's v253 (#499, `1035254`), which it contains; v245 is #488 on its
+ * open branch. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v253-a-tech-line-glasses-request-files-in-optical-20261120";
+  "voice-runtime-v254-a-symptom-the-caller-said-keeps-glasses-in-tech-20261120";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
