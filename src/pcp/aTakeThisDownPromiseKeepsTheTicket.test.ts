@@ -168,6 +168,33 @@ describe('what counts', () => {
     ).toBe(true);
   });
 
+  it('a promise cut short before the call-back clause still counts (Codex P1 on #497)', () => {
+    expect(
+      toldTheCallerItWasRecorded(
+        "AGENT: I'm not able to put you through from this line, but I'll take this down and the [interrupted]",
+        [],
+      ),
+    ).toBe(true);
+    expect(
+      toldTheCallerItWasRecorded("AGENT: I'm not able to put you through from this line, but I will take this down", []),
+    ).toBe(true);
+    expect(
+      toldTheCallerItWasRecorded('AGENT: I\u2019m not able to put you through from this line, but I\u2019ll take this down and', []),
+    ).toBe(true);
+  });
+
+  it('an offer cut short is still an offer and does not count', () => {
+    expect(
+      toldTheCallerItWasRecorded("AGENT: I'm not able to pull that up right now, but I can take this down for the team [interrupted]", []),
+    ).toBe(false);
+  });
+
+  it('a line cut before "take this down" carries no claim and does not count', () => {
+    expect(
+      toldTheCallerItWasRecorded("AGENT: I'm not able to put you through from this line, but I'll [interrupted]", []),
+    ).toBe(false);
+  });
+
   it('the no-transfer ask promises nothing and does not count', () => {
     expect(toldTheCallerItWasRecorded(`AGENT: ${NO_TRANSFER_ASK_LINE}`, ['PCP-90001'])).toBe(false);
   });
