@@ -1969,9 +1969,20 @@ import { callEnvironment } from "./callRecord";
  * a request leaves PCP Support, on the intake's own budget, and files with the
  * gap written when it does not come. Above main's v249 (#495, `cadcf4a`); v245
  * is #488 on its open branch. No migration.
+ * On main since #496 (`b7a4e12`).
+ *
+ * v252 — A PATIENT SEEN TODAY IS NOT CALLED (2026-11-20). NPX outreach calls
+ * New and Lapsed patients only (v246). The Console's hourly list counts kept
+ * visits before the day it is built for, so a Lapsed patient seen today is
+ * still Lapsed on today's list: CAf256c21807735a19e196154c7064ff5a was dialled
+ * and texted on 2026-11-19, the day their visit was kept, 1 of the 14 NPX
+ * contacts touched since v246 (2 of the 320 rows on that day's list). The
+ * list read and the dial's re-check now leave out a patient with a visit kept
+ * since the day the list was built for. Above main's v250 (#496, `b7a4e12`);
+ * v251 is #497 and v245 is #488 on their open branches. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v250-a-patients-request-leaving-pcp-support-asks-their-dob-20261119";
+  "voice-runtime-v252-a-patient-seen-today-is-not-called-20261120";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
