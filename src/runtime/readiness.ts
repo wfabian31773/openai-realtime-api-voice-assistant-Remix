@@ -1992,9 +1992,19 @@ import { callEnvironment } from "./callRecord";
  * list read and the dial's re-check now leave out a patient with a visit kept
  * since the day the list was built for. Above main's v251 (#497, `0300838`),
  * which it contains; v245 is #488 on its open branch. No migration.
+ * On main since #498 (`6e08bf0`).
+ *
+ * v253 — A TECH-LINE GLASSES REQUEST SWEPT AT TEARDOWN FILES IN OPTICAL
+ * (2026-11-20). The teardown sweep files in the lane's own department and
+ * runs no router, while the in-call tech tool sends eyewear to Optical (v202).
+ * On the tech line only, the sweep now takes the router's Optical verdict for
+ * the drafted or heard request; staff had moved 4 of the 5 such tickets of
+ * 2026-11-06..19 to Optical. A request that also describes a symptom stays in
+ * Technicians. Above main's v252 (#498, `6e08bf0`), which it contains; v245 is
+ * #488 on its open branch. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v252-a-patient-seen-today-is-not-called-20261120";
+  "voice-runtime-v253-a-tech-line-glasses-request-files-in-optical-20261120";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

@@ -55,6 +55,9 @@ import { classifySurgeryRequest, surgeryReasonById } from "../tools/surgeryTaxon
 import { classifyOptical, classificationByReasonId } from "../tools/opticalTaxonomy";
 import { sanitizeForSms } from "../services/gsm7";
 import { NAME_SCAFFOLDING } from "./nameScaffolding";
+import { detectCrossQueue, type QueueRedirect } from "../tools/queueRouting";
+import { hasClinicalComplaint } from "../tools/requestClassification";
+import { CALLER_SYMPTOM } from "../services/symptomCorroboration";
 
 /** The lanes this runs on. Each is a queue whose department is its routing. */
 const DEPARTMENT_BY_SLUG: Record<string, number> = {
@@ -553,6 +556,60 @@ export const SWEPT_TICKET_DESCRIPTION =
  */
 export const TEARDOWN_UNASSIGNED_EXIT_DEPARTMENTS: ReadonlySet<number> = new Set([1, 2]);
 
+/**
+ * v253: A TECH-LINE REQUEST ABOUT GLASSES OR CONTACT LENSES FILES IN OPTICAL.
+ *
+ * The sweep files in the lane's own department and runs no router, while the
+ * tech line's own `file_tech_ticket` runs `detectCrossQueue` and sends
+ * eyewear and contact lenses to Optical (v202). So a caller who asked the
+ * tech line for new glasses and hung up before anything was filed landed in
+ * Technicians, and a staffer moved it. Measured, swept tech-line tickets
+ * that carried a real request, 2026-11-06..19 (126): the router names Optical
+ * on 5, and staff had moved 4 of them to Optical (VA-84905, VA-87031,
+ * VA-87480, VA-87722) and the fifth to Medical Records (VA-81636, a records
+ * request, moved either way).
+ *
+ * ONLY THE OPTICAL VERDICT, AND ONLY ON THE TECH LINE. The same router over
+ * the same tickets also names the HVA Hub on 3, and staff left all 3 in
+ * Technicians; on the surgery and optical lines its verdicts moved 10 of 36
+ * tickets to where staff took them and 19 to where staff did not, so the
+ * rest of the router stays off the sweep. The request read is the model's
+ * drafted request or the sentence read from the recording, never a taxonomy
+ * label or the placeholder.
+ *
+ * A REQUEST THAT ALSO CARRIES A CLINICAL COMPLAINT STAYS IN TECHNICIANS
+ * (github-actions on #499): "my glasses broke and I have eye pain" reads as
+ * eyewear to the router, whose clinical guard does not cover the tech line,
+ * and a symptom must reach clinical triage. None of the 5 corpus tickets
+ * carries one, so this costs no rescue.
+ *
+ * AND THE SYMPTOM TEST IS THE CALLER-SYMPTOM LEXICON THE AFTER-HOURS GATE
+ * ALREADY READS (github-actions on #499, round 2): "I need a new eyeglass
+ * prescription and suddenly started seeing double" carried no word
+ * `hasClinicalComplaint` knows, so it went to Optical. `CALLER_SYMPTOM`
+ * (`symptomCorroboration.ts`) adds floaters, flashes, a curtain or shadow,
+ * itching, watering, redness, injury and "double vision"; the one shape no
+ * list in the repo has is "seeing double", added here. `hasClinicalComplaint`
+ * is mirrored by the ticketing app and is not widened. None of the 5 corpus
+ * tickets matches either, so this costs no rescue.
+ */
+const SEES_DOUBLE = /\b(?:seeing|see|sees|saw) double\b|\bveo doble\b/;
+
+function describesASymptom(request: string): boolean {
+  const text = request.toLowerCase().replace(/[’‘]/g, "'");
+  return hasClinicalComplaint(request) || CALLER_SYMPTOM.test(text) || SEES_DOUBLE.test(text);
+}
+
+export function sweptTechRequestForOptical(slug: string, request: string | undefined): QueueRedirect | null {
+  if (slug !== "tech" || !request) return null;
+  if (describesASymptom(request)) return null;
+  const redirect = detectCrossQueue(request, DEPARTMENT_BY_SLUG.tech!);
+  return redirect?.departmentId === 1 ? redirect : null;
+}
+
+export const SWEPT_TO_OPTICAL_NOTE =
+  `FILED IN OPTICAL at teardown: the request is about glasses or contact lenses, which the tech line's own filing sends to Optical.`;
+
 export type SweepReasonSource = "captured" | "drafted" | "summary" | "transcript" | "placeholder";
 
 export interface SweepReason {
@@ -935,19 +992,24 @@ export function buildSweptTicket(
   input: SweepInput,
   decision: Extract<SweepDecision, { file: true }>,
 ): SweptTicket {
-  const departmentId = DEPARTMENT_BY_SLUG[input.slug]!;
+  const homeDepartmentId = DEPARTMENT_BY_SLUG[input.slug]!;
   const callerSaid = decision.callerSaid;
   const readFromRecording =
     !input.draftedRequest?.trim() && input.requestFromRecording?.trim() ? input.requestFromRecording.trim() : undefined;
   const sentenceDescribes = readFromRecording;
-  const reason = resolveSweepReason({
-    departmentId,
+  const toOptical = sweptTechRequestForOptical(input.slug, input.draftedRequest?.trim() || readFromRecording);
+  const departmentId = toOptical ? toOptical.departmentId : homeDepartmentId;
+  const homeReason = resolveSweepReason({
+    departmentId: homeDepartmentId,
     capturedReason: input.capturedReason,
     summary: input.summary,
     callerSaid,
     draftedRequest: input.draftedRequest,
     toolEvents: input.toolEvents,
   });
+  const reason: SweepReason = toOptical
+    ? { requestTypeId: toOptical.requestTypeId, requestReasonId: toOptical.requestReasonId, source: homeReason.source }
+    : homeReason;
   const infoOnly = looksInfoOnly(input);
   const callerDob = callerDobFields(input);
   return {
@@ -1013,6 +1075,7 @@ export function buildSweptTicket(
       (callerDob ? `${CALLER_DOB_NOTE}\n` : "") +
       (readFromRecording ? `${REQUEST_FROM_RECORDING_NOTE} ${readFromRecording}\n` : "") +
       (infoOnly ? `${INFO_ONLY_NOTE}\n` : "") +
+      (toOptical ? `${SWEPT_TO_OPTICAL_NOTE}\n` : "") +
       `Call back on ${input.callerPhone}. Call reference ${input.callSid}.\n` +
       `What the caller said: ${callerSaid}`,
     // Not "medium". Nobody has looked at this request yet and the caller has
