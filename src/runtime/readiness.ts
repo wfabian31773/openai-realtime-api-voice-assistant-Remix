@@ -1969,9 +1969,21 @@ import { callEnvironment } from "./callRecord";
  * a request leaves PCP Support, on the intake's own budget, and files with the
  * gap written when it does not come. Above main's v249 (#495, `cadcf4a`); v245
  * is #488 on its open branch. No migration.
+ * On main since #496 (`b7a4e12`).
+ *
+ * v251 — A PROMISED CALLBACK KEEPS ITS TICKET (2026-11-20). The hang-up
+ * withdrawal (v100) keeps a PCP ticket the caller was told about (v102): a
+ * ticket number read back, or the refused transfer's "I've taken this down".
+ * It did not read the no-transfer promise the done-intake reply hands the
+ * model, "I'll take this down and the right team will call you back"
+ * (`NO_TRANSFER_LINE`), so 14 of the 40 PCP hang-up withdrawals of
+ * 2026-11-05..19 removed a ticket the caller had just been promised a
+ * callback on. The promise now counts; an offer and the no-transfer ask do
+ * not. Above main's v250 (#496, `b7a4e12`); v245 is #488 on its open branch.
+ * No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v250-a-patients-request-leaving-pcp-support-asks-their-dob-20261119";
+  "voice-runtime-v251-a-promised-callback-keeps-its-ticket-20261120";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
