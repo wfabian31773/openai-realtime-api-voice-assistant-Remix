@@ -42,14 +42,22 @@ export interface BuildIdentity {
   voiceModel: string | null;
 }
 
+/**
+ * build-info.json as this process first read it. The SHA and the health
+ * block's diagnostic both come from this ONE read, so /voice/health can never
+ * pair a null SHA with a clean build record, or a SHA with a failure reason,
+ * from a file replaced in between (Codex, #502). Read once per process.
+ */
+let snapshot: Partial<BuildInfo> | undefined;
+function buildSnapshot(read: () => Partial<BuildInfo>): Partial<BuildInfo> {
+  if (snapshot === undefined) snapshot = read();
+  return snapshot;
+}
+
 /** The build SHA this process was built from, or null. Read once. */
-let cachedSha: string | null | undefined;
-export function deployedBuildSha(read: () => { gitSha: string | null } = getBuildInfo): string | null {
-  if (cachedSha === undefined) {
-    const sha = read().gitSha;
-    cachedSha = typeof sha === "string" && /^[0-9a-f]{7,40}$/.test(sha) ? sha : null;
-  }
-  return cachedSha;
+export function deployedBuildSha(read: () => Partial<BuildInfo> = getBuildInfo): string | null {
+  const sha = buildSnapshot(read).gitSha;
+  return typeof sha === "string" && /^[0-9a-f]{7,40}$/.test(sha) ? sha : null;
 }
 
 /**
@@ -66,18 +74,14 @@ export interface DeployedBuild {
   dirty: boolean | null;
   traceable: boolean | null;
 }
-let cachedBuild: DeployedBuild | undefined;
 export function deployedBuild(read: () => Partial<BuildInfo> = getBuildInfo): DeployedBuild {
-  if (cachedBuild === undefined) {
-    const b = read();
-    cachedBuild = {
-      builtAt: b.builtAt ?? null,
-      reason: b.reason ?? null,
-      dirty: b.dirty ?? null,
-      traceable: b.traceable ?? null,
-    };
-  }
-  return cachedBuild;
+  const b = buildSnapshot(read);
+  return {
+    builtAt: b.builtAt ?? null,
+    reason: b.reason ?? null,
+    dirty: b.dirty ?? null,
+    traceable: b.traceable ?? null,
+  };
 }
 
 export function runtimeBuildIdentity(voiceModel: string | null | undefined): BuildIdentity {
@@ -200,6 +204,5 @@ export async function stampBuildIdentity(
 
 /** Test seam only. */
 export function _resetBuildIdentityForTests(): void {
-  cachedSha = undefined;
-  cachedBuild = undefined;
+  snapshot = undefined;
 }

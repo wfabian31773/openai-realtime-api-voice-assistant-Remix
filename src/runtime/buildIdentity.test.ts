@@ -462,6 +462,19 @@ describe("the build SHA is written at build time, never committed", () => {
       ).toEqual({ builtAt: "2026-11-20T14:04:00.000Z", reason: "not_a_repository", dirty: null, traceable: null });
     });
 
+    it("the SHA and the build block come from ONE read, so a file replaced in between cannot split them (Codex, #502)", () => {
+      _resetBuildIdentityForTests();
+      expect(deployedBuildSha(() => ({ gitSha: null, builtAt: "2026-11-20T14:04:00.000Z", reason: "git_unavailable" }))).toBeNull();
+      // The file now reads clean with a SHA; the health block must still describe the read the SHA came from.
+      expect(deployedBuild(() => ({ gitSha: "abc1234", builtAt: "2026-11-20T15:00:00.000Z", reason: null }))).toEqual({
+        builtAt: "2026-11-20T14:04:00.000Z", reason: "git_unavailable", dirty: null, traceable: null,
+      });
+      _resetBuildIdentityForTests();
+      deployedBuild(() => ({ gitSha: "abc1234", builtAt: "2026-11-20T15:00:00.000Z", reason: null }));
+      expect(deployedBuildSha(() => ({ gitSha: null, reason: "git_unavailable" }))).toBe("abc1234");
+      _resetBuildIdentityForTests();
+    });
+
     it("the build block is read once per process, like the SHA, and the test seam reads it again", () => {
       const first = deployedBuild(() => ({ builtAt: "2026-11-20T14:04:00.000Z", reason: "git_unavailable" }));
       expect(deployedBuild(() => ({ builtAt: null, reason: null })).reason).toBe("git_unavailable");
