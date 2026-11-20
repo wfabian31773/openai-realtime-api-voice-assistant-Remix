@@ -15,6 +15,7 @@ import {
   _resetBuildIdentityForTests,
   createColumnCheck,
   deployedBuildSha,
+  deployedBuild,
   oldCoreBuildIdentity,
   runtimeBuildIdentity,
   stampBuildIdentity,
@@ -313,7 +314,81 @@ describe("the build SHA is written at build time, never committed", () => {
 
   it("a missing file reads as null on every field", () => {
     expect(getBuildInfo(path.join(tmp(), "build-info.json"))).toEqual({
-      builtAt: null, gitSha: null, gitShaFull: null, traceable: null, dirty: null,
+      builtAt: null, gitSha: null, gitShaFull: null, traceable: null, dirty: null, reason: null,
+    });
+  });
+
+  describe("every null SHA says why (v255: buildSha read null on every publish from v144 to v254)", () => {
+    const run = (dir: string, env: NodeJS.ProcessEnv = process.env) => {
+      execFileSync(process.execPath, [script], { cwd: dir, stdio: "pipe", env });
+      return getBuildInfo(path.join(dir, "build-info.json"));
+    };
+
+    it("no git executable at all: git_unavailable, with the build time still written", () => {
+      const info = run(tmp(), { ...process.env, PATH: "" });
+      expect(info.gitSha).toBeNull();
+      expect(info.reason).toBe("git_unavailable");
+      expect(info.builtAt).not.toBeNull();
+    });
+
+    it("git runs but there is no repository (a build not given .git): not_a_repository", () => {
+      const dir = tmp();
+      const info = run(dir, { ...process.env, GIT_DIR: path.join(dir, "no-such-git") });
+      expect(info.gitSha).toBeNull();
+      expect(info.reason).toBe("not_a_repository");
+    });
+
+    it("a repository with no commit has no readable HEAD: head_unreadable", () => {
+      const dir = tmp();
+      execFileSync("git", ["init", "-q"], { cwd: dir, stdio: "pipe" });
+      const info = run(dir);
+      expect(info.gitSha).toBeNull();
+      expect(info.reason).toBe("head_unreadable");
+    });
+
+    it("a dirty tree says dirty, and an unreadable status says so, never 'clean'", () => {
+      const dirty = tmp();
+      const git = (cwd: string, ...a: string[]) => execFileSync("git", a, { cwd, stdio: "pipe" });
+      git(dirty, "init", "-q");
+      git(dirty, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "x");
+      fs.writeFileSync(path.join(dirty, "b.ts"), "export const b = 1;\n");
+      expect(run(dirty).reason).toBe("dirty");
+
+      const broken = tmp();
+      git(broken, "init", "-q");
+      git(broken, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "x");
+      fs.writeFileSync(path.join(broken, ".git", "index"), "not an index");
+      expect(run(broken).reason).toBe("status_unreadable");
+    });
+
+    it("a clean commit carries no reason", () => {
+      const dir = tmp();
+      const git = (...a: string[]) => execFileSync("git", a, { cwd: dir, stdio: "pipe" });
+      git("init", "-q");
+      git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "x");
+      const info = run(dir);
+      expect(info.gitSha).toMatch(/^[0-9a-f]{7}$/);
+      expect(info.reason).toBeNull();
+    });
+
+    it("a reason the file carries that is not one of ours reads as null", () => {
+      const out = path.join(tmp(), "build-info.json");
+      fs.writeFileSync(out, JSON.stringify({ builtAt: "2026-11-20T14:04:00Z", gitSha: null, reason: "<script>" }));
+      expect(getBuildInfo(out).reason).toBeNull();
+    });
+
+    it("/voice/health's build block: the file's time and reason, or all null when the file never reached the process", () => {
+      expect(
+        deployedBuild(() => ({ builtAt: "2026-11-20T14:04:00.000Z", gitSha: null, reason: "not_a_repository", dirty: null, traceable: null })),
+      ).toEqual({ builtAt: "2026-11-20T14:04:00.000Z", reason: "not_a_repository", dirty: null, traceable: null });
+    });
+
+    it("the build block is read once per process, like the SHA, and the test seam reads it again", () => {
+      const first = deployedBuild(() => ({ builtAt: "2026-11-20T14:04:00.000Z", reason: "git_unavailable" }));
+      expect(deployedBuild(() => ({ builtAt: null, reason: null })).reason).toBe("git_unavailable");
+      _resetBuildIdentityForTests();
+      expect(deployedBuild(() => ({ builtAt: null, reason: null }))).toEqual({ builtAt: null, reason: null, dirty: null, traceable: null });
+      expect(first.builtAt).toBe("2026-11-20T14:04:00.000Z");
     });
   });
 

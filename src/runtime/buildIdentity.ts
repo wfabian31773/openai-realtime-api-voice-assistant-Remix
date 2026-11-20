@@ -29,7 +29,7 @@
  *
  * It never throws and never blocks a call: every caller fires it and forgets.
  */
-import { getBuildInfo } from "../../server/buildInfo";
+import { getBuildInfo, type BuildInfo, type BuildShaReason } from "../../server/buildInfo";
 import { VOICE_RUNTIME_DEPLOY_MARKER } from "./readiness";
 
 export const OLD_CORE_MARKER = "old-core";
@@ -50,6 +50,34 @@ export function deployedBuildSha(read: () => { gitSha: string | null } = getBuil
     cachedSha = typeof sha === "string" && /^[0-9a-f]{7,40}$/.test(sha) ? sha : null;
   }
   return cachedSha;
+}
+
+/**
+ * What /voice/health says about the build beside its SHA (v255). From v144 to
+ * v254 every publish read buildSha null and nothing said why. `builtAt` null
+ * means the running process could not read build-info.json at all (the build
+ * did not write it, or it did not reach the deployment); `builtAt` set with a
+ * `reason` means the build ran and git could not name the commit, and the
+ * reason says which way. Read once, like the SHA.
+ */
+export interface DeployedBuild {
+  builtAt: string | null;
+  reason: BuildShaReason | null;
+  dirty: boolean | null;
+  traceable: boolean | null;
+}
+let cachedBuild: DeployedBuild | undefined;
+export function deployedBuild(read: () => Partial<BuildInfo> = getBuildInfo): DeployedBuild {
+  if (cachedBuild === undefined) {
+    const b = read();
+    cachedBuild = {
+      builtAt: b.builtAt ?? null,
+      reason: b.reason ?? null,
+      dirty: b.dirty ?? null,
+      traceable: b.traceable ?? null,
+    };
+  }
+  return cachedBuild;
 }
 
 export function runtimeBuildIdentity(voiceModel: string | null | undefined): BuildIdentity {
@@ -173,4 +201,5 @@ export async function stampBuildIdentity(
 /** Test seam only. */
 export function _resetBuildIdentityForTests(): void {
   cachedSha = undefined;
+  cachedBuild = undefined;
 }

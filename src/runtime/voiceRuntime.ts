@@ -263,7 +263,7 @@ import type { TransferTwilioOps } from "./warmTransfer";
 import { resolveAppDomain } from "../config/environment";
 import { callEnvironment } from "./callRecord";
 import { loadGrokRuntimeVoiceConfig } from "./config";
-import { runtimeBuildIdentity, stampBuildIdentity, deployedBuildSha, type BuildIdentity } from "./buildIdentity";
+import { runtimeBuildIdentity, stampBuildIdentity, deployedBuildSha, deployedBuild, type BuildIdentity } from "./buildIdentity";
 import { openRuntimeCall, persistRuntimeCall, type CallLogInsert, type RuntimeCallIdentity } from "./callRecord";
 import { identityForRow } from "./runtimeIdentity";
 import { identityStoreProbe, rememberVerifiedIdentity } from "../tools/verifiedIdentity";
@@ -832,6 +832,10 @@ export function mountVoiceRuntime(
       // (written by the deployment build). null = unknown, never a guess.
       // Compare with call_logs.build_sha on calls after a publish.
       buildSha: deployedBuildSha(),
+      // Why buildSha is null, when it is (v255): builtAt null = the process
+      // could not read build-info.json; a reason = the build ran and git
+      // could not name the commit. Fields only, nothing secret.
+      build: deployedBuild(),
       // The cached prefix every lane shares. Reported so a change in the
       // fleet's cache-hit rate can be attributed to a prefix change rather
       // than guessed at — which is the whole reason the constant exists,

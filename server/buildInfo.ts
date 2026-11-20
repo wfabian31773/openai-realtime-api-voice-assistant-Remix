@@ -19,7 +19,16 @@ export interface BuildInfo {
   traceable?: boolean | null;
   /** True when the build ran from a workspace with uncommitted changes; then the SHA is null. */
   dirty?: boolean | null;
+  /**
+   * Why the SHA is null, as the build saw it (v255): git_unavailable,
+   * not_a_repository, head_unreadable, dirty or status_unreadable. null when
+   * the SHA was read, or when the file itself could not be read.
+   */
+  reason?: BuildShaReason | null;
 }
+
+export const BUILD_SHA_REASONS = ['git_unavailable', 'not_a_repository', 'head_unreadable', 'dirty', 'status_unreadable'] as const;
+export type BuildShaReason = (typeof BUILD_SHA_REASONS)[number];
 
 export function getBuildInfo(file: string = path.join(process.cwd(), 'build-info.json')): BuildInfo {
   try {
@@ -31,8 +40,9 @@ export function getBuildInfo(file: string = path.join(process.cwd(), 'build-info
       gitShaFull: str(j.gitShaFull),
       traceable: typeof j.traceable === 'boolean' ? j.traceable : null,
       dirty: typeof j.dirty === 'boolean' ? j.dirty : null,
+      reason: (BUILD_SHA_REASONS as readonly string[]).includes(j.reason) ? (j.reason as BuildShaReason) : null,
     };
   } catch {
-    return { builtAt: null, gitSha: null, gitShaFull: null, traceable: null, dirty: null };
+    return { builtAt: null, gitSha: null, gitShaFull: null, traceable: null, dirty: null, reason: null };
   }
 }
