@@ -254,6 +254,40 @@ describe('sweptTechRequestForOptical', () => {
     expect(sweptTechRequestForOptical('tech', 'Question about contact lenses; the eye is red and painful.')).toBeNull();
   });
 
+  // github-actions on #499 (head cc93940), round 2, a P1: a sight change said
+  // without a word hasClinicalComplaint knows. The veto now also reads the
+  // after-hours gate's caller-symptom lexicon, and "seeing double".
+  it('keeps a glasses request with a sudden sight change in Technicians', () => {
+    expect(sweptTechRequestForOptical('tech',
+      'I need a new eyeglass prescription and suddenly started seeing double.')).toBeNull();
+    expect(sweptTechRequestForOptical('tech', 'Needs new glasses; sees double since this morning.')).toBeNull();
+    expect(sweptTechRequestForOptical('tech', 'Wants new glasses and reports double vision.')).toBeNull();
+    expect(sweptTechRequestForOptical('tech', 'Needs new glasses and has been seeing flashes and floaters.')).toBeNull();
+    expect(sweptTechRequestForOptical('tech', 'Contact lens question; a shadow came over her vision.')).toBeNull();
+    expect(sweptTechRequestForOptical('tech', 'Question about contact lenses, the eye is itchy and watering.')).toBeNull();
+    expect(sweptTechRequestForOptical('tech', 'Necesita lentes nuevos y veo doble desde ayer.')).toBeNull();
+    // Read in any case, and with a curly apostrophe.
+    expect(sweptTechRequestForOptical('tech', 'Seeing double since this morning, needs new glasses.')).toBeNull();
+    expect(sweptTechRequestForOptical('tech', 'Needs new glasses and can\u2019t see out of the left eye.')).toBeNull();
+  });
+
+  it('the wider veto still lets an ordinary glasses request through', () => {
+    expect(sweptTechRequestForOptical('tech', 'Wants a second pair of glasses, double-checking the price.')?.departmentId).toBe(1);
+    expect(sweptTechRequestForOptical('tech', 'Needs new reading glasses to see better up close.')?.departmentId).toBe(1);
+  });
+
+  it('a swept glasses request that sees double files in Technicians', async () => {
+    const row: Row = {
+      sid: 'CA00000000000000000000000000000c02', ticket: 'synthetic',
+      says: ['Yes.', 'I need new glasses and all of a sudden I see double.'],
+      reads: 'I need a new eyeglass prescription and suddenly started seeing double.',
+    };
+    const { out, f } = await sweep(row);
+    expect(out.filed).toBe(true);
+    expect(f.calls[0].departmentId).toBe(3);
+    expect(String(f.calls[0].staffNote)).not.toContain(SWEPT_TO_OPTICAL_NOTE);
+  });
+
   it('none of the 5 corpus requests carries a complaint, so the guard costs no rescue', () => {
     for (const row of TO_OPTICAL) {
       expect(sweptTechRequestForOptical('tech', row.reads)?.departmentId).toBe(1);

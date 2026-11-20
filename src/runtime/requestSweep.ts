@@ -57,6 +57,7 @@ import { sanitizeForSms } from "../services/gsm7";
 import { NAME_SCAFFOLDING } from "./nameScaffolding";
 import { detectCrossQueue, type QueueRedirect } from "../tools/queueRouting";
 import { hasClinicalComplaint } from "../tools/requestClassification";
+import { CALLER_SYMPTOM } from "../services/symptomCorroboration";
 
 /** The lanes this runs on. Each is a queue whose department is its routing. */
 const DEPARTMENT_BY_SLUG: Record<string, number> = {
@@ -581,10 +582,27 @@ export const TEARDOWN_UNASSIGNED_EXIT_DEPARTMENTS: ReadonlySet<number> = new Set
  * eyewear to the router, whose clinical guard does not cover the tech line,
  * and a symptom must reach clinical triage. None of the 5 corpus tickets
  * carries one, so this costs no rescue.
+ *
+ * AND THE SYMPTOM TEST IS THE CALLER-SYMPTOM LEXICON THE AFTER-HOURS GATE
+ * ALREADY READS (github-actions on #499, round 2): "I need a new eyeglass
+ * prescription and suddenly started seeing double" carried no word
+ * `hasClinicalComplaint` knows, so it went to Optical. `CALLER_SYMPTOM`
+ * (`symptomCorroboration.ts`) adds floaters, flashes, a curtain or shadow,
+ * itching, watering, redness, injury and "double vision"; the one shape no
+ * list in the repo has is "seeing double", added here. `hasClinicalComplaint`
+ * is mirrored by the ticketing app and is not widened. None of the 5 corpus
+ * tickets matches either, so this costs no rescue.
  */
+const SEES_DOUBLE = /\b(?:seeing|see|sees|saw) double\b|\bveo doble\b/;
+
+function describesASymptom(request: string): boolean {
+  const text = request.toLowerCase().replace(/[’‘]/g, "'");
+  return hasClinicalComplaint(request) || CALLER_SYMPTOM.test(text) || SEES_DOUBLE.test(text);
+}
+
 export function sweptTechRequestForOptical(slug: string, request: string | undefined): QueueRedirect | null {
   if (slug !== "tech" || !request) return null;
-  if (hasClinicalComplaint(request)) return null;
+  if (describesASymptom(request)) return null;
   const redirect = detectCrossQueue(request, DEPARTMENT_BY_SLUG.tech!);
   return redirect?.departmentId === 1 ? redirect : null;
 }
