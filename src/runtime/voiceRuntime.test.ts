@@ -39,7 +39,7 @@ import { DEFAULT_ATTEMPT_CAPS, DEFAULT_CALLING_WINDOW } from "./outbound/calling
 import { LiveCallRegistry } from "../plugin/liveSessions";
 import { directCallInstructions, SI_ASSISTANT_DIRECT_GREETING } from "../agents/siAssistantAgent";
 import { CallSessionRegistry } from "./sessionRegistry";
-import { deployedBuildSha } from "./buildIdentity";
+import { deployedBuildSha, deployedBuild } from "./buildIdentity";
 import { VOICE_RUNTIME_DEPLOY_MARKER } from "./readiness";
 import { transferDestinationStatus, transferUnavailableReason } from "./runtimeTransfer";
 import type { GrokServerEvent } from "./wireTypes";
@@ -625,6 +625,9 @@ describe("one whole call, end to end, offline", () => {
     expect(body.marker).toBe(VOICE_RUNTIME_DEPLOY_MARKER);
     expect("buildSha" in body).toBe(true);
     expect(body.buildSha).toBe(deployedBuildSha());
+    // v255: why the SHA is null, beside it.
+    expect(body.build).toEqual(deployedBuild());
+    expect(Object.keys(body.build as object).sort()).toEqual(["builtAt", "dirty", "reason", "traceable"]);
   });
 
   it("plays the agent's audio to the caller and records what was actually heard", async () => {

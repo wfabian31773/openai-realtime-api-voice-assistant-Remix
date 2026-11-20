@@ -25,12 +25,24 @@
  * can never hang or fail on GitHub. A workspace commit that never reached
  * GitHub reads false — the SHA is still the true SHA of what was built.
  *
+ * EVERY NULL SAYS WHY (v255). From v144 to v254 every Replit publish read
+ * buildSha null, and the cause could not be recovered: git's stderr is
+ * suppressed here, and a missing git binary, a missing repository and an
+ * unreadable HEAD all ended in the same null. So a null SHA now carries a
+ * `reason` naming which one it was: `git_unavailable` (no git executable),
+ * `not_a_repository` (git runs, but there is no repository, e.g. a build
+ * that was not given the .git folder), `head_unreadable` (a repository with
+ * no readable HEAD), `dirty` (uncommitted changes) or `status_unreadable`
+ * (git status could not run). A clean commit carries `reason: null`.
+ *
  * A DIRTY WORKSPACE HAS NO SHA (Codex, #364). Replit publishes from the
  * workspace, and a tracked edit or an untracked source file there means the
  * bundle is NOT the commit HEAD names. So the SHA is reported only when
  * `git status` confirms the tree is clean; dirty (or a status that cannot be
- * read) writes gitSha/gitShaFull null, traceable false, dirty true, and the
- * commit underneath as baseShaFull for a person to read — never as the build.
+ * read) writes gitSha/gitShaFull null, traceable false, and the commit
+ * underneath as baseShaFull for a person to read — never as the build.
+ * `dirty` is true only when git status SAW changes; a status that could not
+ * run writes `dirty: null`, because the state is unknown (Codex, #502).
  */
 "use strict";
 
@@ -62,17 +74,68 @@ function isAncestorOfMain() {
   }
 }
 
-/** true = uncommitted changes (or status unreadable), false = clean. Ignored files never count. */
-function isDirty() {
+/** "dirty" = uncommitted changes, "status_unreadable" = git status could not run, null = clean. Ignored files never count. */
+function dirtiness() {
   const status = git(["status", "--porcelain", "--untracked-files=normal"]);
-  return status === null ? true : status.length > 0;
+  if (status === null) return "status_unreadable";
+  return status.length > 0 ? "dirty" : null;
+}
+
+/** A path as git compares it for GIT_CEILING_DIRECTORIES: absolute, symlinks resolved where they can be. */
+function canonical(p) {
+  try {
+    return fs.realpathSync(path.resolve(p));
+  } catch {
+    return path.resolve(p);
+  }
+}
+
+/**
+ * Whether repository metadata is on disk where git would look: $GIT_DIR when
+ * it is set, otherwise a `.git` in this directory or a parent, the walk git
+ * itself does, which never moves up into a directory named in
+ * GIT_CEILING_DIRECTORIES (Codex, #502). Read from the filesystem, not from
+ * git, because git refuses a repository it cannot parse (a corrupt .git/HEAD
+ * reads "not a git repository") and that must not be reported as a build that
+ * was never given .git (Codex, #502).
+ */
+function gitMetadataPresent() {
+  if (process.env.GIT_DIR) return fs.existsSync(process.env.GIT_DIR);
+  const ceilings = new Set(
+    (process.env.GIT_CEILING_DIRECTORIES || "")
+      .split(path.delimiter)
+      .filter((d) => path.isAbsolute(d))
+      .map(canonical),
+  );
+  for (let dir = canonical(process.cwd()); ; ) {
+    if (fs.existsSync(path.join(dir, ".git"))) return true;
+    const parent = path.dirname(dir);
+    if (parent === dir || ceilings.has(parent)) return false;
+    dir = parent;
+  }
+}
+
+/** Why HEAD could not be read: the first of the three checks that fails. */
+function whyNoSha() {
+  if (git(["--version"]) === null) return "git_unavailable";
+  if (!gitMetadataPresent()) return "not_a_repository";
+  return "head_unreadable";
 }
 
 function buildInfo() {
   const full = git(["rev-parse", "HEAD"]);
   const sha = full && /^[0-9a-f]{40}$/.test(full) ? full : null;
-  if (sha && isDirty()) {
-    return { builtAt: new Date().toISOString(), gitSha: null, gitShaFull: null, traceable: false, dirty: true, baseShaFull: sha };
+  const unclean = sha ? dirtiness() : null;
+  if (sha && unclean) {
+    return {
+      builtAt: new Date().toISOString(),
+      gitSha: null,
+      gitShaFull: null,
+      traceable: false,
+      dirty: unclean === "dirty" ? true : null,
+      reason: unclean,
+      baseShaFull: sha,
+    };
   }
   return {
     builtAt: new Date().toISOString(),
@@ -80,6 +143,7 @@ function buildInfo() {
     gitShaFull: sha,
     traceable: sha ? isAncestorOfMain() : null,
     dirty: sha ? false : null,
+    reason: sha ? null : whyNoSha(),
   };
 }
 
@@ -94,9 +158,11 @@ function main(out = path.join(process.cwd(), "build-info.json")) {
     const info = buildInfo();
     fs.writeFileSync(out, JSON.stringify(info));
     console.log(
-      info.dirty
-        ? `[build-info] workspace has uncommitted changes on ${info.baseShaFull.slice(0, 7)}; build SHA reported as unknown`
-        : `[build-info] ${info.gitSha ?? "unknown sha"} traceable=${info.traceable}`,
+      info.baseShaFull
+        ? info.reason === "status_unreadable"
+          ? `[build-info] git status could not run on ${info.baseShaFull.slice(0, 7)}, so the workspace state is unknown (status_unreadable); build SHA reported as unknown`
+          : `[build-info] workspace has uncommitted changes on ${info.baseShaFull.slice(0, 7)} (dirty); build SHA reported as unknown`
+        : `[build-info] ${info.gitSha ?? `unknown sha (${info.reason})`} traceable=${info.traceable}`,
     );
     return true;
   } catch (error) {

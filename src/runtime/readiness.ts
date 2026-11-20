@@ -2013,9 +2013,22 @@ import { callEnvironment } from "./callRecord";
  * 5 corpus calls' real caller lines carry no symptom, so no rescue is lost.
  * Above main's v253 (#499, `1035254`), which it contains; v245 is #488 on its
  * open branch. No migration.
+ * On main since #500 (`a1955262`).
+ *
+ * v255 — A NULL BUILD SHA SAYS WHY (2026-11-20). Every Replit publish from
+ * v144 to v254 read buildSha null on /voice/health, with a clean workspace
+ * (git status, 2026-11-20), and the cause could not be recovered: the build
+ * script suppresses git's stderr and its log line was not in the logs the
+ * Replit agent could read. The build now records which of three things
+ * failed (git_unavailable, not_a_repository, head_unreadable, or dirty /
+ * status_unreadable), and /voice/health serves `build: { builtAt, reason,
+ * dirty, traceable }`: builtAt null means the running process never read
+ * build-info.json. Above main's v254 (#500, `a1955262`), which it contains,
+ * with the vite 8.3.8 lockfile (#501, `04f514af`); v245 is #488 on its open
+ * branch. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v254-a-symptom-the-caller-said-keeps-glasses-in-tech-20261120";
+  "voice-runtime-v255-a-null-build-sha-says-why-20261120";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
