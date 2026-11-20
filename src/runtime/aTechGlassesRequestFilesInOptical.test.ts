@@ -296,6 +296,63 @@ describe('sweptTechRequestForOptical', () => {
     }
   });
 
+  // v254, the safety-direction P1 on #499 (merged before its fix): the model's
+  // sentence can leave out a symptom the caller said, so the caller's own
+  // lines are read too. Agent lines are not.
+  it('keeps a glasses request in Technicians when only the caller\'s own words name a symptom', () => {
+    const plain = 'Wants a new eyeglass prescription.';
+    expect(sweptTechRequestForOptical('tech', plain,
+      'Yes. I need new glasses and my eye has been red and painful since yesterday.')).toBeNull();
+    // Words only CALLER_SYMPTOM knows, and the one only SEES_DOUBLE knows.
+    expect(sweptTechRequestForOptical('tech', plain, 'Contacts question. My eye is itchy and watering.')).toBeNull();
+    expect(sweptTechRequestForOptical('tech', plain, 'New glasses please. I keep seeing double.')).toBeNull();
+    // A word only the shared complaint list knows.
+    expect(sweptTechRequestForOptical('tech', plain, 'New glasses, and I have light sensitivity.')).toBeNull();
+    expect(sweptTechRequestForOptical('tech', plain, 'Necesito lentes nuevos, me duele el ojo.')).toBeNull();
+  });
+
+  it('caller words with no symptom, or none at all, change nothing', () => {
+    const plain = 'Wants a new eyeglass prescription.';
+    expect(sweptTechRequestForOptical('tech', plain, 'Yes. I need a new prescription for my eyeglasses.')?.departmentId).toBe(1);
+    expect(sweptTechRequestForOptical('tech', plain, '')?.departmentId).toBe(1);
+    expect(sweptTechRequestForOptical('tech', plain)?.departmentId).toBe(1);
+    // Never a reason to route anywhere it would not have gone.
+    expect(sweptTechRequestForOptical('tech', 'Requesting a refill for eye drops medication.', 'Yes.')).toBeNull();
+    expect(sweptTechRequestForOptical('optical', plain, 'Yes.')).toBeNull();
+  });
+
+  it('a swept call whose caller said a symptom the sentence left out files in Technicians', async () => {
+    const row: Row = {
+      sid: 'CA00000000000000000000000000000c03', ticket: 'synthetic',
+      says: ['Yes.', 'I need new glasses, and my eye has been red and painful since yesterday.'],
+      reads: 'Wants a new eyeglass prescription.',
+    };
+    const { out, f } = await sweep(row);
+    expect(out.filed).toBe(true);
+    expect(f.calls[0].departmentId).toBe(3);
+    expect(f.calls[0].routingAskExhausted).toBeUndefined();
+    expect(String(f.calls[0].staffNote)).not.toContain(SWEPT_TO_OPTICAL_NOTE);
+  });
+
+  it('a symptom word in the agent\'s line does not keep the request out of Optical', async () => {
+    const row = TO_OPTICAL[2];
+    const rec = record(row.sid, 'tech', row.says);
+    rec.transcript = rec.transcript.replace(
+      'AGENT: Thank you. Let me take a look at that for you. [interrupted]',
+      'AGENT: Any pain, redness or blurry vision with that eye?',
+    );
+    const f = filer();
+    await runRequestSweep(rec, f, noName, onePerson, answers(row.reads));
+    expect(f.calls[0].departmentId).toBe(1);
+    expect(String(f.calls[0].staffNote)).toContain(SWEPT_TO_OPTICAL_NOTE);
+  });
+
+  it('the 5 corpus calls\' caller lines carry no symptom, so the caller-words check costs no rescue', () => {
+    for (const row of TO_OPTICAL) {
+      expect(sweptTechRequestForOptical('tech', row.reads, row.says.join(' '))?.departmentId).toBe(1);
+    }
+  });
+
   it('is what buildSweptTicket reads', () => {
     expect(buildSweptTicket.toString()).toContain('sweptTechRequestForOptical');
   });

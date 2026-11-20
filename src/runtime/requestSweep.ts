@@ -600,9 +600,29 @@ function describesASymptom(request: string): boolean {
   return hasClinicalComplaint(request) || CALLER_SYMPTOM.test(text) || SEES_DOUBLE.test(text);
 }
 
-export function sweptTechRequestForOptical(slug: string, request: string | undefined): QueueRedirect | null {
+/**
+ * v254: AND THE CALLER'S OWN WORDS ARE READ TOO (the safety-direction P1 on
+ * #499, merged before its fix). The request the sweep routes on is a model's
+ * sentence (drafted on the call, or read from the recording at teardown), and
+ * a model asked for one sentence of what the caller asked can leave the
+ * symptom out: "I need new glasses, and my eye has been red and painful since
+ * yesterday" can come back as "Wants new glasses." So the same three tests
+ * run over every CALLER line, and a match keeps the request in Technicians,
+ * where a symptom reaches clinical triage, as on `main` before v253. The
+ * agent's lines are not read (the agent asking "any pain?" is not a symptom).
+ * The 5 corpus calls' real caller lines carry none of them, so this costs no
+ * rescue; what it can cost is a glasses request whose caller used a symptom
+ * word in another sense ("the red frames"), which stays in Technicians as on
+ * `main`, the safe direction.
+ */
+export function sweptTechRequestForOptical(
+  slug: string,
+  request: string | undefined,
+  callerSaid?: string,
+): QueueRedirect | null {
   if (slug !== "tech" || !request) return null;
   if (describesASymptom(request)) return null;
+  if (callerSaid && describesASymptom(callerSaid)) return null;
   const redirect = detectCrossQueue(request, DEPARTMENT_BY_SLUG.tech!);
   return redirect?.departmentId === 1 ? redirect : null;
 }
@@ -997,7 +1017,7 @@ export function buildSweptTicket(
   const readFromRecording =
     !input.draftedRequest?.trim() && input.requestFromRecording?.trim() ? input.requestFromRecording.trim() : undefined;
   const sentenceDescribes = readFromRecording;
-  const toOptical = sweptTechRequestForOptical(input.slug, input.draftedRequest?.trim() || readFromRecording);
+  const toOptical = sweptTechRequestForOptical(input.slug, input.draftedRequest?.trim() || readFromRecording, callerSaid);
   const departmentId = toOptical ? toOptical.departmentId : homeDepartmentId;
   const homeReason = resolveSweepReason({
     departmentId: homeDepartmentId,
