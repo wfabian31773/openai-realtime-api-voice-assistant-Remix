@@ -389,6 +389,46 @@ describe('the priority said is the one SENT, not the one asked for (Codex P1 and
   });
 });
 
+describe('a bare replay says nothing about priority (github-actions P1 on #504, head e84d94b7)', () => {
+  const SID = 'CA0000000000000000000000000000d504';
+  const HIGH = { request_reason_id: 155, request_description: 'Caller is out of her latanoprost and needs a refill today.' };
+
+  it('a first filing the app answers as a replay of an earlier POST, details not added, is not called urgent', async () => {
+    const r = await file({ call_sid: SID, ...HIGH }, { success: true, ticketNumber: 'VA-90004', cached: true });
+    expect(r.sent?.priority).toBe('high');
+    expect(r.result).toMatchObject({ success: true, priority: 'unknown', marked_urgent: false });
+    expect(String(r.result.fix)).toMatch(MUST_NOT);
+  });
+
+  it('the same replay with the details added: the app raised the ticket, so it may be called urgent', async () => {
+    const r = await file({ call_sid: SID, ...HIGH }, { success: true, ticketNumber: 'VA-90004', cached: true, detailsAdded: true });
+    expect(r.result).toMatchObject({ success: true, priority: 'high', marked_urgent: true });
+    expect(String(r.result.fix)).toMatch(MAY_SAY);
+  });
+
+  it('a filing consolidated onto an earlier ticket says the priority it sent (the app raises on consolidation)', async () => {
+    const r = await file({ call_sid: SID, ...HIGH }, { success: true, ticketNumber: 'VA-90005', consolidated: true });
+    expect(r.result).toMatchObject({ success: true, priority: 'high', marked_urgent: true });
+  });
+
+  it('an unkeyed filing answered as a bare replay is not called urgent either', async () => {
+    const r = await file({ call_sid: 'unknown', ...HIGH }, { success: true, ticketNumber: 'VA-90006', cached: true });
+    expect(r.sent?.priority).toBe('high');
+    expect(r.result).toMatchObject({ success: true, priority: 'unknown', marked_urgent: false });
+  });
+
+  it('VA-83575 (CAf091561502223f2c9fb51162938a580a), the accepted cost: a high ticket answered as a bare replay is not called urgent', async () => {
+    // One of the 3 bare replays on tech's own keys in the 14 days to
+    // 2026-11-20 22:00 UTC, and the only one that asked for high. The ticket
+    // is high; the agent now says nothing about urgency on it.
+    const r = await file(
+      { call_sid: 'CAf091561502223f2c9fb51162938a580a', ...HIGH },
+      { success: true, ticketNumber: 'VA-83575', cached: true, detailsAdded: false },
+    );
+    expect(r.result).toMatchObject({ priority: 'unknown', marked_urgent: false });
+  });
+});
+
 describe('the misspelling reader', () => {
   it('reads every misspelling the window carried as a glaucoma drug', () => {
     for (const w of ['lomigan', 'rupressa', 'terzolamide', 'simbranza', 'simbriza', 'dorzamide', 'benzolamide', 'ropressa',

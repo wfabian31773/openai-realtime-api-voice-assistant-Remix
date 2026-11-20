@@ -61,13 +61,29 @@ export interface DurableCreateResult extends CreateTicketResponse {
    * `failed` or `sending` keeps its first payload, so a retry that asked for
    * high can send the medium one the row holds. The ticketing app only ever
    * raises a ticket's priority to an incoming one (`appendContactEntry`), so
-   * a payload that landed is a floor. Undefined when it is not known.
+   * a payload that landed is a floor. Undefined when it is not known, which
+   * includes a bare replay (`bareReplay`): a cached answer the app did not
+   * add this payload to.
    */
   filedPriority?: TicketPriority;
 }
 
 function sentPriority(p: CreateTicketParams | undefined): TicketPriority | undefined {
   return p?.priority;
+}
+
+/**
+ * A BARE REPLAY SAYS NOTHING ABOUT PRIORITY (github-actions P1 on #504, head
+ * `e84d94b7`). `cached: true` without `detailsAdded` is the app handing back a
+ * ticket an earlier POST on the same key filed, and this payload's priority
+ * never reached it. That earlier POST is usually this same payload (a timed-out
+ * send that committed), but not always, so a bare replay reports no priority
+ * and the caller is not told "urgent" on the strength of it. With
+ * `detailsAdded` the app added this payload as a contact entry and raised the
+ * ticket in the same transaction, so the payload is a floor again.
+ */
+function bareReplay(res: Pick<CreateTicketResponse, 'cached' | 'detailsAdded'>): boolean {
+  return res.cached === true && res.detailsAdded !== true;
 }
 
 /**
@@ -358,7 +374,9 @@ export async function createTicketDurable(
         return { success: true, ticketNumber: write.ticketNumber, alreadyFiled: true, addition, filedPriority };
       }
       const sent = await TicketOutboxService.attemptSend(write.outboxId, { liveCaller: true });
-      if (sent.success && sent.ticketNumber) return { ...sent, filedPriority: await heldPriority(params, write) };
+      if (sent.success && sent.ticketNumber) {
+        return { ...sent, filedPriority: bareReplay(sent) ? undefined : await heldPriority(params, write) };
+      }
       if (sent.terminal) return { ...sent, queued: false, missingField: missingFieldFromError(sent.error) };
       console.error(
         `[TICKET OUTBOX] Immediate filing failed: ${loggableTicketingError(sent.error, sent.statusCode)} — ` +
@@ -377,7 +395,7 @@ export async function createTicketDurable(
   }
   const res = await ticketingApiClient.createTicket(params);
   if (res.success && res.ticketNumber) {
-    return { ...res, filedPriority: sentPriority(params) };
+    return { ...res, filedPriority: bareReplay(res) ? undefined : sentPriority(params) };
   }
 
   const agent = params.callData?.agentUsed ?? 'unknown';
