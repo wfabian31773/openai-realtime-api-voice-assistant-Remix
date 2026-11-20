@@ -1981,9 +1981,20 @@ import { callEnvironment } from "./callRecord";
  * callback on. The promise now counts; an offer and the no-transfer ask do
  * not. Above main's v250 (#496, `b7a4e12`); v245 is #488 on its open branch.
  * No migration.
+ * On main since #497 (`0300838`).
+ *
+ * v252 — A PATIENT SEEN TODAY IS NOT CALLED (2026-11-20). NPX outreach calls
+ * New and Lapsed patients only (v246). The Console's hourly list counts kept
+ * visits before the day it is built for, so a Lapsed patient seen today is
+ * still Lapsed on today's list: CAf256c21807735a19e196154c7064ff5a was dialled
+ * and texted on 2026-11-19, the day their visit was kept, 1 of the 14 NPX
+ * contacts touched since v246 (2 of the 320 rows on that day's list). The
+ * list read and the dial's re-check now leave out a patient with a visit kept
+ * since the day the list was built for. Above main's v251 (#497, `0300838`),
+ * which it contains; v245 is #488 on its open branch. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v251-a-promised-callback-keeps-its-ticket-20261120";
+  "voice-runtime-v252-a-patient-seen-today-is-not-called-20261120";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

@@ -118,6 +118,19 @@ export function rowToMovable(r: Record<string, unknown>): MovableAppointment {
  * without the class and dialled Existing patients: 946 of the first 1,215
  * contacts (2026-11-07..16), 606 of them seen since 2026-09-01. `current()`
  * runs this same statement at the dial, so a queued Existing row is skipped.
+ *
+ * And not a patient seen since the cache was built (v252). The class counts
+ * kept visits BEFORE the day it is built for (`capacity_movable_rows_part`,
+ * `last_visit < p_today`), so a Lapsed patient seen today is still Lapsed on
+ * today's list, and the dialler rang one at 13:20 Pacific on the day of their
+ * visit (`CAf256c21807735a19e196154c7064ff5a`, 2026-11-19, and texted a minute
+ * later). A kept visit on or after `built_for` and on or before today makes
+ * the patient Existing; that patient is off the list here and at the dial.
+ * 2 of the 320 New and Lapsed rows built for 2026-11-19 were this shape. The
+ * read costs one index anti-join on `idx_si_facts_person_date` (15.7 ms for
+ * the whole list on the Console, 2026-11-20). The same rule in the Console's
+ * own build (`<=` there) is the Console team's change, and this one then
+ * removes nothing.
  * One fixed statement with bound parameters, so it costs the Console one
  * plan and one `pg_stat_statements` entry however often it runs.
  *
@@ -138,6 +151,12 @@ export const MOVABLE_SELECT = `
     join public.patients_master pm on pm.person_id = r.person_id
    where r.in_reach
      and r.patient_class in ('new', 'lapsed')
+     and not exists (
+       select 1 from public.si_appointment_facts k
+        where k.person_id = r.person_id
+          and coalesce(k.is_kept, false)
+          and k.appointment_date >= r.built_for
+          and k.appointment_date <= $1::date)
      and not coalesce(f.is_cancelled, false)
      and not coalesce(f.is_rescheduled, false)
      and f.appointment_date >= $1::date`;
