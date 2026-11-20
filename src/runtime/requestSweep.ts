@@ -576,10 +576,8 @@ export const TEARDOWN_UNASSIGNED_EXIT_DEPARTMENTS: ReadonlySet<number> = new Set
  * label or the placeholder.
  */
 export function sweptTechRequestForOptical(slug: string, request: string | undefined): QueueRedirect | null {
-  if (slug !== "tech") return null;
-  const text = request?.trim();
-  if (!text) return null;
-  const redirect = detectCrossQueue(text, DEPARTMENT_BY_SLUG.tech!);
+  if (slug !== "tech" || !request) return null;
+  const redirect = detectCrossQueue(request, DEPARTMENT_BY_SLUG.tech!);
   return redirect?.departmentId === 1 ? redirect : null;
 }
 
