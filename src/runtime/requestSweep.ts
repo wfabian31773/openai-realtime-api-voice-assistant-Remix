@@ -56,6 +56,7 @@ import { classifyOptical, classificationByReasonId } from "../tools/opticalTaxon
 import { sanitizeForSms } from "../services/gsm7";
 import { NAME_SCAFFOLDING } from "./nameScaffolding";
 import { detectCrossQueue, type QueueRedirect } from "../tools/queueRouting";
+import { hasClinicalComplaint } from "../tools/requestClassification";
 
 /** The lanes this runs on. Each is a queue whose department is its routing. */
 const DEPARTMENT_BY_SLUG: Record<string, number> = {
@@ -574,9 +575,16 @@ export const TEARDOWN_UNASSIGNED_EXIT_DEPARTMENTS: ReadonlySet<number> = new Set
  * rest of the router stays off the sweep. The request read is the model's
  * drafted request or the sentence read from the recording, never a taxonomy
  * label or the placeholder.
+ *
+ * A REQUEST THAT ALSO CARRIES A CLINICAL COMPLAINT STAYS IN TECHNICIANS
+ * (github-actions on #499): "my glasses broke and I have eye pain" reads as
+ * eyewear to the router, whose clinical guard does not cover the tech line,
+ * and a symptom must reach clinical triage. None of the 5 corpus tickets
+ * carries one, so this costs no rescue.
  */
 export function sweptTechRequestForOptical(slug: string, request: string | undefined): QueueRedirect | null {
   if (slug !== "tech" || !request) return null;
+  if (hasClinicalComplaint(request)) return null;
   const redirect = detectCrossQueue(request, DEPARTMENT_BY_SLUG.tech!);
   return redirect?.departmentId === 1 ? redirect : null;
 }

@@ -207,6 +207,19 @@ describe('only the tech line, and only a request read from the call', () => {
     expect(f.calls[0].departmentId).toBe(3);
   });
 
+  it('a swept glasses request with a symptom files in Technicians with no Optical note', async () => {
+    const row: Row = {
+      sid: 'CA00000000000000000000000000000c01', ticket: 'synthetic',
+      says: ['Yes.', 'My glasses broke and my eye hurts.'],
+      reads: 'My glasses broke and I have eye pain.',
+    };
+    const { out, f } = await sweep(row);
+    expect(out.filed).toBe(true);
+    expect(f.calls[0].departmentId).toBe(3);
+    expect(f.calls[0].routingAskExhausted).toBeUndefined();
+    expect(String(f.calls[0].staffNote)).not.toContain(SWEPT_TO_OPTICAL_NOTE);
+  });
+
   it('a placeholder description never routes', () => {
     expect(SWEPT_TICKET_DESCRIPTION).toBeTruthy();
     expect(sweptTechRequestForOptical('tech', undefined)).toBeNull();
@@ -231,6 +244,20 @@ describe('sweptTechRequestForOptical', () => {
     expect(sweptTechRequestForOptical('optical', 'Wants a new eyeglass prescription.')).toBeNull();
     expect(sweptTechRequestForOptical('surgery', 'Wants a new eyeglass prescription.')).toBeNull();
     expect(sweptTechRequestForOptical('records', 'Wants a new eyeglass prescription.')).toBeNull();
+  });
+
+  // github-actions on #499 (head c354002), a P1: a symptom must reach clinical
+  // triage, so eyewear beside a clinical complaint stays in Technicians.
+  it('keeps a glasses request that carries a clinical complaint in Technicians', () => {
+    expect(sweptTechRequestForOptical('tech', 'My glasses broke and I have eye pain.')).toBeNull();
+    expect(sweptTechRequestForOptical('tech', 'Caller needs new glasses and reports blurry vision since yesterday.')).toBeNull();
+    expect(sweptTechRequestForOptical('tech', 'Question about contact lenses; the eye is red and painful.')).toBeNull();
+  });
+
+  it('none of the 5 corpus requests carries a complaint, so the guard costs no rescue', () => {
+    for (const row of TO_OPTICAL) {
+      expect(sweptTechRequestForOptical('tech', row.reads)?.departmentId).toBe(1);
+    }
   });
 
   it('is what buildSweptTicket reads', () => {
