@@ -9,6 +9,7 @@ import { SWEPT_TICKET_DESCRIPTION } from "./requestSweep";
 import type { VoiceCallRecord, ToolEvent } from "./mediaStreamBridge";
 import { rememberVerifiedIdentity, resetVerifiedIdentities } from "../tools/verifiedIdentity";
 import * as directory from '../services/consoleDirectory';
+import { noteDraftedRequestFromArgs, resetDraftedRequests } from "../tools/draftedRequest";
 
 const { durableFile } = vi.hoisted(() => ({ durableFile: vi.fn() }));
 vi.mock('../services/durableTicketFiling', () => ({ createTicketDurable: durableFile }));
@@ -61,6 +62,7 @@ beforeEach(() => {
     facilityKind: name === 'Synthetic Surgery Center' ? 'surgery_center' : 'clinic',
   }));
   resetVerifiedIdentities();
+  resetDraftedRequests();
   rememberVerifiedIdentity(SID, {
     firstName: "Testpatient",
     lastName: "Example",
@@ -116,6 +118,41 @@ describe("recovering a request the agent did not file", () => {
     expect(payload.validatedPatient.confirmedClinic).toBe(acceptable(usualOffice) ? usualOffice : undefined);
     expect(payload.locationOfLastVisit).toBe([nextOffice, lastOffice, usualOffice].find(acceptable));
     expect(JSON.stringify(payload)).not.toContain('Synthetic Surgery Center');
+  });
+
+  it('filters Optical history on a tech-line eyewear request the sweep files in Optical (Codex P2, #499)', async () => {
+    const nextAppointment = { date: '2099-01-01', location: 'Synthetic Surgery Center' };
+    const lastVisit = { date: '2020-01-01', location: 'Synthetic Last Clinic' };
+    rememberVerifiedIdentity(SID, { firstName: 'Testpatient', lastName: 'Example', dateOfBirth: '1950-01-02',
+      certain: true, personId: 'synthetic-person', nextAppointment, lastVisit, usualOffice: 'Synthetic Surgery Center' });
+    noteDraftedRequestFromArgs('classify_tech_request', {
+      call_sid: SID, request_description: 'Caller wants a prescription for computer glasses.' });
+    durableFile.mockResolvedValue({ success: true, ticketNumber: 'VA-SYNTHETIC' });
+
+    expect(await runRequestSweep(record({ slug: 'tech',
+      transcript: 'AGENT: How can I help?\nCALLER: I need a prescription for computer glasses.' })))
+      .toEqual({ filed: true, ticketNumber: 'VA-SYNTHETIC' });
+
+    const payload = durableFile.mock.calls[0][0];
+    expect(payload.departmentId).toBe(1);
+    expect(payload.validatedPatient.nextAppointment).toBeUndefined();
+    expect(payload.validatedPatient.lastVisit).toEqual(lastVisit);
+    expect(payload.locationOfLastVisit).toBe('Synthetic Last Clinic');
+    expect(JSON.stringify(payload)).not.toContain('Synthetic Surgery Center');
+  });
+
+  it('keeps carried history on a tech-line request that stays in Technicians', async () => {
+    const nextAppointment = { date: '2099-01-01', location: 'Synthetic Surgery Center' };
+    rememberVerifiedIdentity(SID, { firstName: 'Testpatient', lastName: 'Example', dateOfBirth: '1950-01-02',
+      certain: true, nextAppointment, usualOffice: 'Synthetic Usual Clinic' });
+    durableFile.mockResolvedValue({ success: true, ticketNumber: 'VA-SYNTHETIC' });
+
+    expect(await runRequestSweep(record())).toMatchObject({ filed: true });
+
+    expect(durableFile).toHaveBeenCalledWith(expect.objectContaining({
+      departmentId: 3, validatedPatient: expect.objectContaining({ nextAppointment }), locationOfLastVisit: 'Synthetic Usual Clinic',
+    }), { refusalFallbackDescription: SWEPT_TICKET_DESCRIPTION });
+    expect(directory.lookupLocation).not.toHaveBeenCalled();
   });
 
   it('keeps surgery-center appointment history on Surgery recovery tickets', async () => {

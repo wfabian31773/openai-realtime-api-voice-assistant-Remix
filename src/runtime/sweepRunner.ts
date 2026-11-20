@@ -56,6 +56,8 @@ import { draftedRequestFor } from "../tools/draftedRequest";
 import { dobFromCallerAnswer } from "../tools/spokenDob";
 
 const CALLER_LINE = "CALLER: ";
+/** Optical Support, which routes by office (v253: a tech eyewear request files there too). */
+const OPTICAL_DEPARTMENT_ID = 1;
 
 /**
  * v237: THE DATE OF BIRTH THE CALLER GAVE, UNLESS THEY TOOK IT BACK.
@@ -484,7 +486,11 @@ export async function runRequestSweep(
       const dob = readDobQuietly(identity.dateOfBirth ?? '');
       const fields = ticketIdentityFields(record.callSid, identity.firstName, identity.lastName);
       let office = identity.usualOffice;
-      if (record.slug === 'optical' && fields.validatedPatient) {
+      // Keyed on where the ticket files, not on the lane: since v253 a
+      // tech-line eyewear request files in Optical too, and Optical routes by
+      // office, so its carried history is filtered the same way (Codex P2 on
+      // #499). On the optical lane this is the same test as before.
+      if (ticket.departmentId === OPTICAL_DEPARTMENT_ID && fields.validatedPatient) {
         const { filterOpticalPatientLocations } = await import('../tools/acceptableLocation');
         // Use the live Optical path's facility rules on carried history too:
         // the receiver prefers joined appointments over the fallback office.
