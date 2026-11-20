@@ -229,7 +229,9 @@ describe("the build SHA is written at build time, never committed", () => {
     execFileSync("node", [script], { cwd: dir, stdio: "pipe" });
     const info = getBuildInfo(path.join(dir, "build-info.json"));
     expect(info.gitShaFull).toBeNull();
-    expect(info.dirty).toBe(true);
+    // Unknown, not dirty: git status never saw changes (Codex, #502).
+    expect(info.dirty).toBeNull();
+    expect(info.reason).toBe("status_unreadable");
   });
 
   it("an ignored file alone leaves the tree clean and the SHA stands", () => {
@@ -374,6 +376,36 @@ describe("the build SHA is written at build time, never committed", () => {
       expect(run(elsewhere, { ...process.env, GIT_DIR: unreadable }).reason).toBe("head_unreadable");
     });
 
+    it("a .git above GIT_CEILING_DIRECTORIES is one git cannot reach: not_a_repository, as git sees it (Codex, #502)", () => {
+      const repo = tmp();
+      const git = (...a: string[]) => execFileSync("git", a, { cwd: repo, stdio: "pipe" });
+      git("init", "-q");
+      git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "x");
+      const sub = path.join(repo, "client");
+      fs.mkdirSync(sub);
+      const fenced = run(sub, { ...process.env, GIT_CEILING_DIRECTORIES: repo });
+      expect(fenced.gitSha).toBeNull();
+      expect(fenced.reason).toBe("not_a_repository");
+      // A ceiling above the repository fences nothing git needs: the SHA stands.
+      const open = run(sub, { ...process.env, GIT_CEILING_DIRECTORIES: path.dirname(repo) });
+      expect(open.gitShaFull).toBe(git("rev-parse", "HEAD").toString().trim());
+      expect(open.reason).toBeNull();
+    });
+
+    it("the ceiling is read as git reads it: a symlink is resolved, and a relative entry is ignored", () => {
+      const repo = tmp();
+      const git = (...a: string[]) => execFileSync("git", a, { cwd: repo, stdio: "pipe" });
+      git("init", "-q");
+      git("-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "x");
+      fs.writeFileSync(path.join(repo, ".git", "HEAD"), "garbage\n");
+      const sub = path.join(repo, "client");
+      fs.mkdirSync(sub);
+      const link = path.join(tmp(), "link-to-repo");
+      fs.symlinkSync(repo, link);
+      expect(run(sub, { ...process.env, GIT_CEILING_DIRECTORIES: link }).reason).toBe("not_a_repository");
+      expect(run(sub, { ...process.env, GIT_CEILING_DIRECTORIES: ".." }).reason).toBe("head_unreadable");
+    });
+
     it("the log line names an unreadable status as unknown, never as uncommitted changes (Codex, #502)", () => {
       const dir = tmp();
       const git = (...a: string[]) => execFileSync("git", a, { cwd: dir, stdio: "pipe" });
@@ -382,6 +414,7 @@ describe("the build SHA is written at build time, never committed", () => {
       fs.writeFileSync(path.join(dir, ".git", "index"), "not an index");
       const out = execFileSync(process.execPath, [script], { cwd: dir, stdio: "pipe" }).toString();
       expect(out).toContain("status_unreadable");
+      expect(out).toContain("git status could not run");
       expect(out).not.toContain("uncommitted changes");
       fs.writeFileSync(path.join(dir, ".git", "index"), "");
       fs.rmSync(path.join(dir, ".git", "index"));
@@ -401,7 +434,10 @@ describe("the build SHA is written at build time, never committed", () => {
       git(broken, "init", "-q");
       git(broken, "-c", "user.email=t@t", "-c", "user.name=t", "commit", "-q", "--allow-empty", "-m", "x");
       fs.writeFileSync(path.join(broken, ".git", "index"), "not an index");
-      expect(run(broken).reason).toBe("status_unreadable");
+      const unknown = run(broken);
+      expect(unknown.reason).toBe("status_unreadable");
+      expect(unknown.dirty).toBeNull();
+      expect(run(dirty).dirty).toBe(true);
     });
 
     it("a clean commit carries no reason", () => {
