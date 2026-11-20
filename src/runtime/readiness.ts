@@ -1969,6 +1969,39 @@ import { callEnvironment } from "./callRecord";
  * a request leaves PCP Support, on the intake's own budget, and files with the
  * gap written when it does not come. Above main's v249 (#495, `cadcf4a`); v245
  * is #488 on its open branch. No migration.
+ * On main since #496 (`b7a4e12`).
+ *
+ * v251 — A PROMISED CALLBACK KEEPS ITS TICKET (2026-11-20). The hang-up
+ * withdrawal (v100) keeps a PCP ticket the caller was told about (v102): a
+ * ticket number read back, or the refused transfer's "I've taken this down".
+ * It did not read the no-transfer promise the done-intake reply hands the
+ * model, "I'll take this down and the right team will call you back"
+ * (`NO_TRANSFER_LINE`), so 14 of the 40 PCP hang-up withdrawals of
+ * 2026-11-05..19 removed a ticket the caller had just been promised a
+ * callback on. The promise now counts; an offer and the no-transfer ask do
+ * not. Above main's v250 (#496, `b7a4e12`); v245 is #488 on its open branch.
+ * No migration.
+ * On main since #497 (`0300838`).
+ *
+ * v252 — A PATIENT SEEN TODAY IS NOT CALLED (2026-11-20). NPX outreach calls
+ * New and Lapsed patients only (v246). The Console's hourly list counts kept
+ * visits before the day it is built for, so a Lapsed patient seen today is
+ * still Lapsed on today's list: CAf256c21807735a19e196154c7064ff5a was dialled
+ * and texted on 2026-11-19, the day their visit was kept, 1 of the 14 NPX
+ * contacts touched since v246 (2 of the 320 rows on that day's list). The
+ * list read and the dial's re-check now leave out a patient with a visit kept
+ * since the day the list was built for. Above main's v251 (#497, `0300838`),
+ * which it contains; v245 is #488 on its open branch. No migration.
+ * On main since #498 (`6e08bf0`).
+ *
+ * v253 — A TECH-LINE GLASSES REQUEST SWEPT AT TEARDOWN FILES IN OPTICAL
+ * (2026-11-20). The teardown sweep files in the lane's own department and
+ * runs no router, while the in-call tech tool sends eyewear to Optical (v202).
+ * On the tech line only, the sweep now takes the router's Optical verdict for
+ * the drafted or heard request; staff had moved 4 of the 5 such tickets of
+ * 2026-11-06..19 to Optical. A request that also describes a symptom stays in
+ * Technicians. Above main's v252 (#498, `6e08bf0`), which it contains; v245 is
+ * #488 on its open branch. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
   "voice-runtime-v253-a-tech-line-glasses-request-files-in-optical-20261120";

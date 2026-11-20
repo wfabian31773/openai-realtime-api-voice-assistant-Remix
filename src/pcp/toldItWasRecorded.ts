@@ -24,7 +24,8 @@
  * Each of those callers was promised a follow-up, and the withdrawal removed
  * the only record of it — the v18 shape, a caller told their request is filed
  * whose request does not exist. So the withdrawal now stands aside when the
- * agent has said either of the two things the operator named:
+ * agent has said one of the things below. The first two are the ones the
+ * operator named; the third is the same claim in the done-intake reply's words:
  *
  *   1. A TICKET NUMBER THIS CALL FILED, in any rendering. grok-voice-3.0 —
  *      every lane from v101 — spells numbers out: on tech's 3.0 canary days
@@ -46,6 +47,35 @@
  *      `handoff_not_eligible_task_created` line in refusals.ts, which is only
  *      reached once the fallback filing has succeeded. Its failure sibling
  *      makes no claim and does not count; a test holds both to this function.
+ *   3. THE NO-TRANSFER PROMISE, "I'll take this down and the right team will
+ *      call you back" (v251) — `NO_TRANSFER_LINE` in intakeNextStep.ts, which
+ *      the done-intake reply hands the model for a caller who asked for a
+ *      person and has said what they need, and the same words the PCP prompt
+ *      scripts for a patient. It is our own copy, spoken before the filing it
+ *      promises, and it promises a callback. Measured over every PCP hang-up
+ *      withdrawal of 2026-11-05..19 (40): on 14 the agent had said it and a
+ *      `create_pcp_task` had succeeded, and the withdrawal then removed the
+ *      ticket the caller had just been promised a callback on. 8 of the 14
+ *      hung up on the title question that follows it, 4 on the filing line,
+ *      and 2 cut the promise itself short. The corpus is
+ *      aTakeThisDownPromiseKeepsTheTicket.test.ts. The match is the
+ *      scripted lead-in through "I'll take this down" (or "I will"): "put
+ *      you through", then "but I'll take this down" later in the same line,
+ *      so a line cut after it still counts (Codex P1 on #497) and an offer
+ *      in those words ("If you'd like, I'll take this down") does not
+ *      (github-actions on #497). Measured over the PCP runtime's 30 days to
+ *      2026-11-20: 111 agent lines said "I'll take this down", every one
+ *      after "put you through ... but" in one sentence (110 the exact
+ *      line, 1 naming the person between), and 0 as an offer; 0 of
+ *      the 111 were cut before the call-back clause, and the runtime stored the full
+ *      generated line plus "[interrupted]" on 83 of 84 interrupted PCP lines,
+ *      so the cut this reads is rare and the match fails safe. AN OFFER
+ *      ("I can take this down for the team") and the no-transfer ASK
+ *      (`NO_TRANSFER_ASK_LINE`, "I can take a message for the team. What can I
+ *      help you with today?") promise nothing and do not count, which is why
+ *      the match is the promise's subject and verb and not "take this down".
+ *      A line cut before "take this down" ("…but I'll [interrupted]") carries
+ *      no claim and does not count.
  *
  * NOTHING ELSE COUNTS, DELIBERATELY. A model paraphrase ("the ticket's in,
  * you're all set") is a claim too, but a list of paraphrases is the hand-
@@ -73,8 +103,16 @@ const DIGIT_WORDS: Record<string, string> = {
   nine: '9',
 };
 
-/** The refused transfer's claim, as refusals.ts words it. */
-const RECORDED_CLAIMS = ['taken this down'];
+/**
+ * The two claims in our own copy: the refused transfer's (refusals.ts) and the
+ * no-transfer promise (intakeNextStep.ts `NO_TRANSFER_LINE`, and the PCP
+ * prompt's patient line), read from its opening so a line cut after it still
+ * counts. Tests hold both to the copy they come from.
+ */
+const RECORDED_CLAIMS: readonly RegExp[] = [
+  /taken this down/,
+  /put you through.*\bbut i(?:['\u2019]ll| will) take this down\b/,
+];
 
 /** Lowercase, digit words to digits, then only letters and digits remain. */
 function fold(line: string): string {
@@ -104,7 +142,7 @@ export function toldTheCallerItWasRecorded(transcript: string, filedTicketNumber
   const numbers = filedTicketNumbers.map(ticketKey).filter((k): k is string => Boolean(k));
   for (const line of agentLines(transcript)) {
     const lower = line.toLowerCase();
-    if (RECORDED_CLAIMS.some((claim) => lower.includes(claim))) return true;
+    if (RECORDED_CLAIMS.some((claim) => claim.test(lower))) return true;
     if (numbers.length === 0) continue;
     const folded = fold(line);
     if (numbers.some((key) => folded.includes(key))) return true;
