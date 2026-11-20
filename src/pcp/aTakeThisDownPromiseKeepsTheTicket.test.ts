@@ -183,6 +183,40 @@ describe('what counts', () => {
     ).toBe(true);
   });
 
+  it('the scripted lead-in still counts with a person named between (github-actions on #497)', () => {
+    // CAad914a95e714fb3815722832ec1e9a73's shape: the one line of 111 in the
+    // 30 days that named who the caller asked for inside the lead-in.
+    expect(
+      toldTheCallerItWasRecorded(
+        "AGENT: I'm not able to put you through to Alex from this line, but I'll take this down and the right team will call you back.",
+        [],
+      ),
+    ).toBe(true);
+  });
+
+  it('an offer in the promise\'s own words does not count (github-actions on #497)', () => {
+    expect(toldTheCallerItWasRecorded("AGENT: If you'd like, I'll take this down for the team.", [])).toBe(false);
+    expect(toldTheCallerItWasRecorded('AGENT: Would you like me to? I will take this down and pass it on.', [])).toBe(false);
+    expect(
+      toldTheCallerItWasRecorded("AGENT: I can't put you through. If you'd like, I'll take this down.", []),
+    ).toBe(false);
+    expect(
+      toldTheCallerItWasRecorded("AGENT: I can put you through to the queue, or I'll take this down if you'd prefer.", []),
+    ).toBe(false);
+    expect(
+      toldTheCallerItWasRecorded("AGENT: I can look that up for you, but I'll take this down for the team if you'd like.", []),
+    ).toBe(false);
+  });
+
+  it('the promise split across two sentences still counts', () => {
+    expect(
+      toldTheCallerItWasRecorded(
+        "AGENT: I'm not able to put you through from this line. But I'll take this down and the right team will call you back.",
+        [],
+      ),
+    ).toBe(true);
+  });
+
   it('an offer cut short is still an offer and does not count', () => {
     expect(
       toldTheCallerItWasRecorded("AGENT: I'm not able to pull that up right now, but I can take this down for the team [interrupted]", []),

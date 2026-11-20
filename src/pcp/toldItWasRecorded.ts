@@ -58,11 +58,16 @@
  *      ticket the caller had just been promised a callback on. 8 of the 14
  *      hung up on the title question that follows it, 4 on the filing line,
  *      and 2 cut the promise itself short. The corpus is
- *      aTakeThisDownPromiseKeepsTheTicket.test.ts. The match is "I'll take
- *      this down" (or "I will"), the promise's own opening, so a line cut
- *      after it still counts (Codex P1 on #497): measured over the PCP
- *      runtime's 30 days to 2026-11-20, 0 of 111 agent lines saying it were
- *      cut before the call-back clause, and the runtime stored the full
+ *      aTakeThisDownPromiseKeepsTheTicket.test.ts. The match is the
+ *      scripted lead-in through "I'll take this down" (or "I will"): "put
+ *      you through", then "but I'll take this down" later in the same line,
+ *      so a line cut after it still counts (Codex P1 on #497) and an offer
+ *      in those words ("If you'd like, I'll take this down") does not
+ *      (github-actions on #497). Measured over the PCP runtime's 30 days to
+ *      2026-11-20: 111 agent lines said "I'll take this down", every one
+ *      after "put you through ... but" in one sentence (110 the exact
+ *      line, 1 naming the person between), and 0 as an offer; 0 of
+ *      the 111 were cut before the call-back clause, and the runtime stored the full
  *      generated line plus "[interrupted]" on 83 of 84 interrupted PCP lines,
  *      so the cut this reads is rare and the match fails safe. AN OFFER
  *      ("I can take this down for the team") and the no-transfer ASK
@@ -104,7 +109,10 @@ const DIGIT_WORDS: Record<string, string> = {
  * prompt's patient line), read from its opening so a line cut after it still
  * counts. Tests hold both to the copy they come from.
  */
-const RECORDED_CLAIMS: readonly RegExp[] = [/taken this down/, /\bi(?:['\u2019]ll| will) take this down\b/];
+const RECORDED_CLAIMS: readonly RegExp[] = [
+  /taken this down/,
+  /put you through.*\bbut i(?:['\u2019]ll| will) take this down\b/,
+];
 
 /** Lowercase, digit words to digits, then only letters and digits remain. */
 function fold(line: string): string {
