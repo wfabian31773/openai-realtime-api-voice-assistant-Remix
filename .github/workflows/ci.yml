@@ -51,6 +51,21 @@ jobs:
       - name: Install
         run: npm ci
 
+      # The lockfile must be the one `npm install` writes. Replit runs a plain
+      # `npm install` (npm 10.9.9 on 2026-11-20) before the deployment build
+      # command, and a lockfile it rewrites leaves the tree dirty, so
+      # scripts/write-build-info.cjs reports no build SHA. Every publish from
+      # v144 to v255 read buildSha null for this reason: package.json gained
+      # `engines` (v208) without the lockfile, and the lockfile carried `libc`
+      # fields a newer npm wrote. npm versions serialize the lockfile
+      # differently (`libc` above all), so the check runs Replit's own npm,
+      # pinned, not whichever npm the runner's Node 22 ships. If Replit's npm
+      # moves (its publish log prints the version), move this pin with it.
+      - name: Lockfile is what npm install writes
+        run: |
+          npx -y npm@10.9.9 install --package-lock-only --ignore-scripts --no-audit --no-fund
+          git diff --exit-code package-lock.json
+
       - name: Typecheck
         run: npx tsc -p . --noEmit
 
