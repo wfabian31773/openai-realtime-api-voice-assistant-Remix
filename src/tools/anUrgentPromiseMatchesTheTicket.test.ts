@@ -29,7 +29,7 @@ vi.hoisted(() => {
 });
 
 const outbox = vi.hoisted(() => {
-  interface Row { id: string; status: string; ticketNumber?: string; payload: { params: Record<string, unknown> } }
+  interface Row { id: string; status: string; ticketNumber?: string; payload: { params: Record<string, unknown>; priorityUnconfirmed?: boolean } }
   const byKey = new Map<string, Row>();
   const byId = new Map<string, Row>();
   return { byKey, byId };
@@ -54,12 +54,21 @@ vi.mock('../services/ticketOutboxService', () => ({
       const { ticketingApiClient } = await import('../../server/services/ticketingApiClient');
       const res = await ticketingApiClient.createTicket(row.payload.params as never);
       if (res.success && res.ticketNumber) {
+        const { bareReplay } = await import('../services/ticketPriority');
         row.status = 'sent';
         row.ticketNumber = res.ticketNumber;
+        row.payload.priorityUnconfirmed = bareReplay(res);
       }
       return { ...res, outboxId };
     }),
-    storedCreateParams: vi.fn(async (outboxId: string) => outbox.byId.get(outboxId)?.payload?.params),
+    // The production rule, read from the module it lives in: a send the app
+    // answered with a bare replay leaves the ticket's priority unknown.
+    storedFiling: vi.fn(async (outboxId: string) => {
+      const row = outbox.byId.get(outboxId);
+      if (!row) return {};
+      const params = row.payload.params as { priority?: string };
+      return { params, priority: row.payload.priorityUnconfirmed === true ? undefined : params.priority };
+    }),
   },
 }));
 
@@ -426,6 +435,59 @@ describe('a bare replay says nothing about priority (github-actions P1 on #504, 
       { success: true, ticketNumber: 'VA-83575', cached: true, detailsAdded: false },
     );
     expect(r.result).toMatchObject({ priority: 'unknown', marked_urgent: false });
+  });
+});
+
+describe('a later filing after a bare replay (github-actions P1 and P2 on #504, head 5065f2d4)', () => {
+  const SID = 'CA0000000000000000000000000000e504';
+  const HIGH = { request_reason_id: 155, request_description: 'Caller is out of her latanoprost and needs a refill today.' };
+  const BARE = { success: true, ticketNumber: 'VA-90007', cached: true };
+
+  it('the same request filed again is not called urgent: the first send never confirmed the priority', async () => {
+    await file({ call_sid: SID, ...HIGH }, BARE);
+    const r = await file({ call_sid: SID, ...HIGH });
+    expect(r.result).toMatchObject({ already_filed: true, priority: 'unknown', marked_urgent: false });
+    expect(String(r.result.fix)).toMatch(MUST_NOT);
+  });
+
+  it('an addition the app did not confirm is not called urgent either', async () => {
+    await file({ call_sid: SID, ...HIGH }, BARE);
+    const r = await file(
+      { call_sid: SID, ...HIGH, request_description: `${HIGH.request_description} She also asks for a text when it is ready.` },
+      { success: true, ticketNumber: 'VA-90007' },
+    );
+    expect(r.result).toMatchObject({ already_filed: true, details_added: false, priority: 'unknown', marked_urgent: false });
+  });
+
+  it('control: an addition the app confirmed raised the ticket, so it may be called urgent', async () => {
+    await file({ call_sid: SID, ...HIGH }, BARE);
+    const r = await file(
+      { call_sid: SID, ...HIGH, request_description: `${HIGH.request_description} She also asks for a text when it is ready.` },
+      { success: true, ticketNumber: 'VA-90007', cached: true, detailsAdded: true },
+    );
+    expect(r.result).toMatchObject({ already_filed: true, details_added: true, priority: 'high', marked_urgent: true });
+  });
+
+  it('control: a first send that was not a replay still makes the repeat high', async () => {
+    await file({ call_sid: SID, ...HIGH }, { success: true, ticketNumber: 'VA-90008' });
+    const r = await file({ call_sid: SID, ...HIGH });
+    expect(r.result).toMatchObject({ already_filed: true, priority: 'high', marked_urgent: true });
+  });
+
+  it('an unknown priority is not called normal: the fix says no priority at all', async () => {
+    const first = await file({ call_sid: SID, ...HIGH }, BARE);
+    const again = await file({ call_sid: SID, ...HIGH });
+    for (const r of [first.result, again.result]) {
+      expect(String(r.fix)).toMatch(MUST_NOT);
+      expect(String(r.fix)).toMatch(/do not say what priority it has/);
+      expect(String(r.fix)).not.toMatch(/normal priority/);
+    }
+  });
+
+  it('control: a known medium ticket is still called normal priority', async () => {
+    const r = await file({ call_sid: SID, request_reason_id: 154, request_description: 'Refill of artificial tears drops.' });
+    expect(r.result).toMatchObject({ priority: 'medium', marked_urgent: false });
+    expect(String(r.result.fix)).toMatch(/filed at normal priority/);
   });
 });
 

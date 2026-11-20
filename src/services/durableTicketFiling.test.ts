@@ -24,12 +24,13 @@ vi.mock('../../server/services/ticketingApiClient', () => ({
 
 const writeToOutbox = vi.fn();
 const attemptSend = vi.fn();
+const storedFiling = vi.fn();
 vi.mock('./ticketOutboxService', async (importOriginal) => {
   // The envelope helpers stay REAL. Stubbing `wrapCreateTicketPayload` would
   // make this suite agree with itself about the discriminator while the outbox
   // read a different one, which is the only way this wiring can silently fail.
   const actual = await importOriginal<typeof import('./ticketOutboxService')>();
-  return { ...actual, TicketOutboxService: { writeToOutbox, attemptSend } };
+  return { ...actual, TicketOutboxService: { writeToOutbox, attemptSend, storedFiling } };
 });
 
 // Registration is an import side effect, and askAsFor reads the registry — so
@@ -397,5 +398,29 @@ describe('a payload the server read and refused', () => {
       expect(res.queued, `HTTP ${statusCode} must be captured`).toBe(true);
       expect(writeToOutbox).toHaveBeenCalledOnce();
     }
+  });
+});
+
+describe('a row another worker sent reports the priority its send confirmed (github-actions P1 on #504, head 5065f2d4)', () => {
+  const SID = 'CA0000000000000000000000000000f504';
+  const params = {
+    departmentId: 3, requestTypeId: 30, requestReasonId: 155, patientFirstName: 'Testcaller', patientLastName: 'Tech',
+    patientPhone: '5555550147', description: 'Refill of latanoprost.', priority: 'high' as const,
+    callData: { callSid: SID }, idempotencyKey: `call-${SID}`,
+  };
+
+  it.each([
+    [{ params, priority: undefined }, undefined],
+    [{ params, priority: 'high' }, 'high'],
+  ])('stored %o reports %s', async (stored, expected) => {
+    // The snapshot said the row still had to be sent; by the time this call
+    // claimed it, another worker had sent it, so the answer carries no
+    // `cached` and the row is the only witness of what the app said.
+    writeToOutbox.mockResolvedValueOnce({ outboxId: 'ob-9', alreadyExists: true, status: 'pending' });
+    attemptSend.mockResolvedValueOnce({ success: true, ticketNumber: 'VA-90009', outboxId: 'ob-9' });
+    storedFiling.mockResolvedValueOnce(stored);
+    const res = await createTicketDurable(params as never);
+    expect(res).toMatchObject({ success: true, ticketNumber: 'VA-90009' });
+    expect(res.filedPriority).toBe(expected);
   });
 });

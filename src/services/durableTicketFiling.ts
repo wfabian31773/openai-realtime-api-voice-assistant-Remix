@@ -35,7 +35,7 @@ import { loggableTicketingError } from './loggableTicketingError';
 // One-way edge: the registry does not import this module, the tools import both.
 import { getTool } from '../tools/registry';
 import { createHash } from 'node:crypto';
-import { higherPriority, type TicketPriority } from './ticketPriority';
+import { bareReplay, higherPriority, type TicketPriority } from './ticketPriority';
 import type { CreateTicketParams, CreateTicketResponse } from '../../server/services/ticketingApiClient';
 
 export interface DurableCreateResult extends CreateTicketResponse {
@@ -70,20 +70,6 @@ export interface DurableCreateResult extends CreateTicketResponse {
 
 function sentPriority(p: CreateTicketParams | undefined): TicketPriority | undefined {
   return p?.priority;
-}
-
-/**
- * A BARE REPLAY SAYS NOTHING ABOUT PRIORITY (github-actions P1 on #504, head
- * `e84d94b7`). `cached: true` without `detailsAdded` is the app handing back a
- * ticket an earlier POST on the same key filed, and this payload's priority
- * never reached it. That earlier POST is usually this same payload (a timed-out
- * send that committed), but not always, so a bare replay reports no priority
- * and the caller is not told "urgent" on the strength of it. With
- * `detailsAdded` the app added this payload as a contact entry and raised the
- * ticket in the same transaction, so the payload is a floor again.
- */
-function bareReplay(res: Pick<CreateTicketResponse, 'cached' | 'detailsAdded'>): boolean {
-  return res.cached === true && res.detailsAdded !== true;
 }
 
 /**
@@ -229,16 +215,20 @@ async function forwardRepeatFiling(
   outboxKey: string,
   firstOutboxId: string,
 ): Promise<{ addition: RepeatAddition; filedPriority?: TicketPriority }> {
-  // The first filing's payload landed, so its priority is a floor; an
-  // addition raises it only once the app confirms the addition reached the
-  // ticket (`detailsAdded`), and then to the addition's priority at most.
+  // The first filing's payload landed, so its priority is a floor, unless the
+  // app answered that send with a bare replay, which the row records
+  // (`storedFiling`; github-actions P1 on #504, head `5065f2d4`). An addition
+  // raises it only once the app confirms the addition reached the ticket
+  // (`detailsAdded`), and then to the addition's priority at most.
   let firstPriority: TicketPriority | undefined;
   try {
     const { TicketOutboxService, wrapCreateTicketPayload } = await import('./ticketOutboxService');
-    const first = await TicketOutboxService.storedCreateParams(firstOutboxId);
-    firstPriority = sentPriority(first);
+    const first = await TicketOutboxService.storedFiling(firstOutboxId);
+    firstPriority = first.priority;
     const fingerprint = filingFingerprint(params);
-    if (first && filingFingerprint(first) === fingerprint) return { addition: 'nothing_new', filedPriority: firstPriority };
+    if (first.params && filingFingerprint(first.params) === fingerprint) {
+      return { addition: 'nothing_new', filedPriority: firstPriority };
+    }
 
     const write = await TicketOutboxService.writeToOutbox(
       wrapCreateTicketPayload(params),
@@ -270,7 +260,8 @@ async function forwardRepeatFiling(
  * The priority of the payload an outbox row holds. A fresh row holds this
  * filing's own; a row that already existed may keep the one it was first
  * written with (the worker still owns it), and that is what `attemptSend`
- * sends.
+ * sends. A row another worker sent first, whose send the app answered with a
+ * bare replay, reports none (`storedFiling`).
  */
 async function heldPriority(
   params: CreateTicketParams,
@@ -279,7 +270,7 @@ async function heldPriority(
   if (!write.alreadyExists) return sentPriority(params);
   try {
     const { TicketOutboxService } = await import('./ticketOutboxService');
-    return sentPriority(await TicketOutboxService.storedCreateParams(write.outboxId));
+    return (await TicketOutboxService.storedFiling(write.outboxId)).priority;
   } catch {
     return undefined;
   }

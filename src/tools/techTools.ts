@@ -524,10 +524,16 @@ registerTool({
       res.filedPriority,
     );
     if (filedPriority) noteCallValue(callSid, FILED_PRIORITY, filedPriority);
+    // Three answers, not two: a priority the ticket system did not confirm
+    // (a bare replay, an outbox row it cannot read) says no priority at all,
+    // rather than calling the ticket normal (github-actions P2 on #504, head
+    // `5065f2d4`).
     const markedUrgent = filedPriority === 'high';
     const urgencyFix = markedUrgent
       ? 'This request is filed at high priority. You may tell the caller it is marked urgent.'
-      : 'This request is filed at normal priority. Do not tell the caller it is urgent or marked urgent.';
+      : filedPriority
+        ? 'This request is filed at normal priority. Do not tell the caller it is urgent or marked urgent.'
+        : 'The ticket system did not confirm this request\'s priority. Do not tell the caller it is urgent or marked urgent, and do not say what priority it has.';
 
     return {
       success: true,
