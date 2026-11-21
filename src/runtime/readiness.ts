@@ -2026,6 +2026,32 @@ import { callEnvironment } from "./callRecord";
  * build-info.json. Above main's v254 (#500, `a1955262`), which it contains,
  * with the vite 8.3.8 lockfile (#501, `04f514af`); v245 is #488 on its open
  * branch. No migration.
+ * On main since #502 (`7d919e1d`).
+ *
+ * v256 — THE CALLER IS TOLD "URGENT" ONLY WHEN THE TICKET IS (2026-11-20).
+ * The tech prompt told the model to say a glaucoma request was being marked
+ * urgent, and the ticket's priority is the tool's: reason 155 or an outage
+ * files high, everything else medium. 24 of 109 grok tech calls whose agent
+ * said "urgent" in the 14 days to 2026-11-20 got only a medium ticket. The
+ * prompt now leaves urgency to the filing tool, whose answer carries
+ * `priority`, `marked_urgent` and a line saying whether the model may say it;
+ * and a glaucoma drug the classifier missed (misspelt, or named only in the
+ * medication field) under a generic refill reason files as 155, high: 14
+ * medium tickets of the same window. Above main's v255 (#502, `7d919e1d`),
+ * which it contains along with the npm 10.9.9 lockfile (#503, `f3bda4ed`);
+ * v245 is #488 on its open branch. No migration.
+ * On main since #504 (`46cd4aa1`).
+ *
+ * v257 — THE TEARDOWN SWEEP CARRIES THE OFFICE THE CALLER CONFIRMED (2026-11-21).
+ * `resolve_location` keeps the office the directory verified for the call,
+ * and the in-call filing tools carry it first; the teardown sweep read only
+ * a certain identity's history office. 15 of the 16 swept tickets on
+ * verified-office calls in the 7 days to 2026-11-21 did not carry it. The
+ * sweep now sends the verified office as the caller's, only one the
+ * directory verified, and on an Optical ticket only a kind Optical accepts,
+ * judged from the kind kept with the hit. Above main's v256 (#504,
+ * `46cd4aa1`), which it contains; v258 is #506 and v245 is #488 on their
+ * open branches. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
   "voice-runtime-v257-the-sweep-carries-the-confirmed-office-20261121";

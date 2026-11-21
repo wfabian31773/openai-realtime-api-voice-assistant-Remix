@@ -7,6 +7,7 @@ import type { CreateTicketParams, CreateTicketResponse } from '../../server/serv
 import { getValidatedTicketIds } from '../config/answeringServiceTicketing';
 import type { SyncAgentTicketParams } from './syncAgentService';
 import { storage } from '../../server/storage';
+import { bareReplay, type TicketPriority } from './ticketPriority';
 
 const RETRY_BACKOFF_BASE_MS = 30_000;
 /**
@@ -76,6 +77,14 @@ export interface CreateTicketOutboxPayload {
   kind: typeof CREATE_TICKET_PAYLOAD_KIND;
   params: CreateTicketParams;
   refusalFallback?: RefusalFallback;
+  /**
+   * Written with `sent`: the app answered this row's send with a bare replay
+   * (`bareReplay`), so the ticket is not known to hold `params.priority`. A
+   * later filing on the call reads it through `storedFiling` (github-actions
+   * P1 on #504, head `5065f2d4`). Absent on rows sent before v256, which read
+   * as they always have.
+   */
+  priorityUnconfirmed?: boolean;
 }
 
 export type OutboxPayload = SyncAgentTicketParams | CreateTicketOutboxPayload;
@@ -275,14 +284,27 @@ export class TicketOutboxService {
     return { outboxId: entry.id, alreadyExists: false };
   }
 
-  /** The create-ticket parameters an outbox row holds, if it holds one. */
-  static async storedCreateParams(outboxId: string): Promise<CreateTicketParams | undefined> {
+  /**
+   * The create-ticket parameters an outbox row holds, if it holds one, and the
+   * priority the ticket is known to hold from it: the payload's own only when
+   * the row's send was recorded as not a bare replay; none when it was, when
+   * the row is not sent yet, or when it was sent before v256 and carries no
+   * verdict.
+   */
+  static async storedFiling(
+    outboxId: string,
+  ): Promise<{ params?: CreateTicketParams; priority?: TicketPriority }> {
     const [row] = await db
       .select({ payload: ticketOutbox.payload })
       .from(ticketOutbox)
       .where(eq(ticketOutbox.id, outboxId))
       .limit(1);
-    return row && isCreateTicketPayload(row.payload) ? row.payload.params : undefined;
+    if (!row || !isCreateTicketPayload(row.payload)) return {};
+    const { params, priorityUnconfirmed } = row.payload;
+    // Only an explicit confirmation counts: a row sent before v256 carries no
+    // flag, and its send may have been a bare replay (github-actions P2 on
+    // #504, head `670eef2a`).
+    return { params, priority: priorityUnconfirmed === false ? params.priority : undefined };
   }
 
   static async attemptSend(outboxId: string, options: { liveCaller?: boolean } = {}): Promise<OutboxSendResult> {
@@ -377,7 +399,15 @@ export class TicketOutboxService {
             status: 'sent',
             ticketNumber: response.ticketNumber,
             externalTicketId: response.ticketId ?? null,
-            ...(isCreateTicketPayload(stored) ? { payload: { ...stored, consolidated: response.consolidated === true } } : {}),
+            ...(isCreateTicketPayload(stored)
+              ? {
+                  payload: {
+                    ...stored,
+                    consolidated: response.consolidated === true,
+                    priorityUnconfirmed: bareReplay(response),
+                  },
+                }
+              : {}),
             sentAt: now,
             updatedAt: now,
           })
