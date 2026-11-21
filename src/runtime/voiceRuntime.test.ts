@@ -258,6 +258,8 @@ async function harness(
     stallHandshake?: boolean;
     /** Every transport stalls after 101 — no first event. */
     stallFirstEvent?: boolean;
+    /** #508 review: every transport's closeDiagnostics throws. */
+    throwingDiagnostics?: boolean;
     /** Stall the first N transports; later ones emit session.created. */
     firstEventStalls?: number;
     firstEventTimeoutMs?: number;
@@ -313,6 +315,11 @@ async function harness(
       // Flags BEFORE push: firstEventStalls: 1 stalls while length is still 0.
       if (over.stallFirstEvent) t.stallFirstEvent = true;
       else if ((over.firstEventStalls ?? 0) > transports.length) t.stallFirstEvent = true;
+      if (over.throwingDiagnostics) {
+        t.closeDiagnostics = () => {
+          throw new Error("diagnostics read failed");
+        };
+      }
       transports.push(t);
       return t;
     },
@@ -2958,13 +2965,40 @@ describe("the provider-close row (v259)", () => {
     await h.close();
   });
 
+  it("writes no setup row for a connect the caller abandoned by hanging up", async () => {
+    // The CA92A shape: the caller hangs up inside the first-event wait and
+    // the retry stops with ProviderConnectAbortedError. The provider did not
+    // end it, so it is not counted as a provider close (#508 review).
+    const h = await harness({ stallFirstEvent: true, firstEventTimeoutMs: 400, connectRetries: 2 });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA-close4", From: "+15551234567", To: "+2" });
+    const { ws } = await openStream(h, "CA-close4", tokenFrom(answered.text));
+    await new Promise((r) => setTimeout(r, 40));
+    ws.close();
+    await waitFor(() => h.persisted.some((r) => r.callSid === "CA-close4"), "the abandoned setup to persist", 3000);
+    await new Promise((r) => setTimeout(r, 120));
+    expect(h.transports.length).toBeGreaterThanOrEqual(1);
+    expect(h.closeRows.filter((r) => r.callSid === "CA-close4")).toHaveLength(0);
+    await h.close();
+  });
+
+  it("still closes the caller's line when reading the diagnostics throws", async () => {
+    const h = await harness({ stallFirstEvent: true, firstEventTimeoutMs: 80, connectRetries: 2, throwingDiagnostics: true });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA-close5", From: "+15551234567", To: "+2" });
+    const { ws } = await openStream(h, "CA-close5", tokenFrom(answered.text));
+    const closed = new Promise<void>((r) => (ws.readyState === ws.CLOSED ? r() : ws.once("close", () => r())));
+    await waitFor(() => h.closeRows.some((r) => r.callSid === "CA-close5"), "the setup close row", 3000);
+    expect(h.closeRows.find((r) => r.callSid === "CA-close5")?.diagnostics).toBeUndefined();
+    await closed;
+    await h.close();
+  });
+
   it("writes no setup row when no socket was ever opened", () => {
     const runtimeSource = readFileSync(new URL("./voiceRuntime.ts", import.meta.url), "utf8");
     const at = runtimeSource.indexOf('stage: "setup"');
     expect(at).toBeGreaterThan(-1);
     const before = runtimeSource.slice(Math.max(0, at - 400), at);
-    expect(before).toContain("if (setupTransport) {");
-    expect(runtimeSource.slice(at, at + 200)).toContain("setupTransport.closeDiagnostics?.()");
+    expect(before).toContain("if (setupTransport && !(err instanceof ProviderConnectAbortedError)) {");
+    expect(runtimeSource.slice(at, at + 200)).toContain("closeDiagnosticsOf(setupTransport)");
     expect(runtimeSource).toMatch(/opened\.transport = t;\s+setupTransport = t;/);
   });
 
@@ -2973,7 +3007,7 @@ describe("the provider-close row (v259)", () => {
     const at = runtimeSource.indexOf("void logClose(");
     expect(at).toBeGreaterThan(-1);
     const call = runtimeSource.slice(at, at + 320);
-    expect(call).toContain("transport.closeDiagnostics?.()");
+    expect(call).toContain("closeDiagnosticsOf(transport)");
     expect(call).toContain("{ after: audioWritten }");
     expect(call).toContain(".catch(() => undefined)");
     expect(runtimeSource.indexOf("const audioWritten = logAudio(")).toBeLessThan(at);
