@@ -2028,6 +2028,32 @@ import { callEnvironment } from "./callRecord";
  * branch. No migration.
  * On main since #502 (`7d919e1d`).
  *
+ * v256 — THE CALLER IS TOLD "URGENT" ONLY WHEN THE TICKET IS (2026-11-20).
+ * The tech prompt told the model to say a glaucoma request was being marked
+ * urgent, and the ticket's priority is the tool's: reason 155 or an outage
+ * files high, everything else medium. 24 of 109 grok tech calls whose agent
+ * said "urgent" in the 14 days to 2026-11-20 got only a medium ticket. The
+ * prompt now leaves urgency to the filing tool, whose answer carries
+ * `priority`, `marked_urgent` and a line saying whether the model may say it;
+ * and a glaucoma drug the classifier missed (misspelt, or named only in the
+ * medication field) under a generic refill reason files as 155, high: 14
+ * medium tickets of the same window. Above main's v255 (#502, `7d919e1d`),
+ * which it contains along with the npm 10.9.9 lockfile (#503, `f3bda4ed`);
+ * v245 is #488 on its open branch. No migration.
+ * On main since #504 (`46cd4aa1`).
+ *
+ * v257 — THE TEARDOWN SWEEP CARRIES THE OFFICE THE CALLER CONFIRMED (2026-11-21).
+ * `resolve_location` keeps the office the directory verified for the call,
+ * and the in-call filing tools carry it first; the teardown sweep read only
+ * a certain identity's history office. 15 of the 16 swept tickets on
+ * verified-office calls in the 7 days to 2026-11-21 did not carry it. The
+ * sweep now sends the verified office as the caller's, only one the
+ * directory verified, and on an Optical ticket only a kind Optical accepts,
+ * judged from the kind kept with the hit. Above main's v256 (#504,
+ * `46cd4aa1`), which it contains; v245 is #488 on its open branch. No
+ * migration.
+ * On main since #505 (`1c0eea50`).
+ *
  * v258 — THE RECORD'S NAMES REACH THE APP (2026-11-21). A filing for a
  * confirmed patient attaches the record's names (validatedPatient) and the
  * ticketing app refuses a payload whose names differ from them ("Invalid or
@@ -2038,9 +2064,9 @@ import { callEnvironment } from "./callRecord";
  * the teardown sweep after the caller hung up. The queue lanes' filing gate
  * now files a validated patient under the record's names, and createTicket
  * aligns the names for any caller when they are names the attached patient
- * answers to. Above main's v255 (#502, `7d919e1d`), which it contains, with
- * the npm 10.9.9 lockfile (#503, `f3bda4ed`); v256 is #504, v257 is #505 and
- * v245 is #488, all on their open branches. No migration.
+ * answers to. Above main's v257 (#505, `1c0eea50`), which it contains along
+ * with v256 (#504, `46cd4aa1`) and v255 (#502, `7d919e1d`); v245 is #488 on
+ * its open branch. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
   "voice-runtime-v258-the-record-names-reach-the-app-20261121";

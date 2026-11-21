@@ -59,6 +59,7 @@
  */
 
 import { anyCue } from './cueMatch';
+import { fold } from './queueRouting';
 
 export const TECH_DEPARTMENT_ID = 3;
 
@@ -71,6 +72,8 @@ export interface TechClassification {
   cues: string[];
   /** Clinically time-sensitive — raises priority, does not make the agent a nurse. */
   urgent?: true;
+  /** A second reader beside the cues, for words a cue list cannot spell out. */
+  alsoMatches?: (text: string) => boolean;
 }
 
 /**
@@ -87,6 +90,55 @@ const GLAUCOMA_DRUGS = [
   'rhopressa', 'netarsudil', 'vyzulta', 'rocklatan', 'simbrinza',
   'betoptic', 'betaxolol', 'zioptan', 'tafluprost', 'iyuzeh',
 ];
+
+/**
+ * A glaucoma drug the way it reaches the ticket, misheard or misspelt.
+ *
+ * The cue list above matches a drug only when it is spelt right, and the
+ * description is the model's sentence of what it heard. Measured over
+ * department 3's own tickets of the 120 days to 2026-11-20 (197 tickets) and
+ * the Hub's call transcripts of the 60 days before it: "dorzolamida",
+ * "bromonidine", "latanaprost", "ropressa", "simbriza", "Lomigan",
+ * "terzolamide" and about a hundred more. None of them matched a cue, so the
+ * request filed as an ordinary refill at medium priority (v256). A word reads
+ * as one of the drugs when it is six letters or more and within one edit of a
+ * drug under nine letters, or two edits of a longer one. On both vocabularies
+ * that rule matched only misspellings of the drugs, apart from the word below;
+ * at two edits for the short names it also matched "alphaeon" (a financing
+ * company), "cambian", "colbian" and "viroptic", so the short names stay at
+ * one.
+ *
+ * `alfagan` is in the cue list rather than here: it is two edits from
+ * "alphagan" (f for ph), which the short-name rule does not reach.
+ */
+const NOT_A_GLAUCOMA_DRUG = new Set([
+  'combinan', // Spanish, "they combine": one edit from "combigan"
+]);
+
+function editDistance(a: string, b: string): number {
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) {
+      cur.push(Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1)));
+    }
+    prev = cur;
+  }
+  return prev[b.length];
+}
+
+/** True when a word in the text reads as a glaucoma drug, spelt right or not. */
+export function namesAGlaucomaDrug(text: string): boolean {
+  if (anyCue(text, GLAUCOMA_DRUGS)) return true;
+  for (const word of fold(text).match(/[a-z]+/g) ?? []) {
+    if (word.length < 6 || NOT_A_GLAUCOMA_DRUG.has(word)) continue;
+    for (const drug of GLAUCOMA_DRUGS) {
+      const reach = drug.length >= 9 ? 2 : 1;
+      if (editDistance(word, drug) <= reach) return true;
+    }
+  }
+  return false;
+}
 
 /** Drops given around surgery — steroids, antibiotics, anti-inflammatories. */
 const POST_SURGERY_DRUGS = [
@@ -154,7 +206,7 @@ export const TECH_CLASSIFICATIONS: TechClassification[] = [
 
   // --- Named medication classes, before the generic "drops".
   { requestTypeId: 33, requestType: 'Medication Refill', requestReasonId: 155, requestReason: 'Glaucoma Medication Refill',
-    cues: ['glaucoma', ...GLAUCOMA_DRUGS] },
+    cues: ['glaucoma', 'alfagan', ...GLAUCOMA_DRUGS], alsoMatches: namesAGlaucomaDrug },
   { requestTypeId: 33, requestType: 'Medication Refill', requestReasonId: 156, requestReason: 'Post-Surgery Medication Refill',
     cues: ['after my surgery', 'after surgery', 'post-op drop', 'post op drop', 'post-surgery', 'since my surgery', 'for my cataract surgery', ...POST_SURGERY_DRUGS] },
   { requestTypeId: 33, requestType: 'Medication Refill', requestReasonId: 157, requestReason: 'Contact Lens Prescription Renewal',
@@ -228,7 +280,7 @@ export function classifyTech(text: string): TechClassification | null {
     //
     // `anyCue` also word-boundaries short cues, so `rx` cannot fire inside
     // another word.
-    if (anyCue(text, c.cues)) return c;
+    if (anyCue(text, c.cues) || c.alsoMatches?.(text)) return c;
   }
   return null;
 }

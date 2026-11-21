@@ -132,7 +132,7 @@ interface Entry extends VerifiedIdentity {
 }
 
 const verified = new Map<string, Entry>();
-const confirmedClinics = new Map<string, { clinic: string; at: number }>();
+const confirmedClinics = new Map<string, { clinic: string; at: number; verified: boolean; facilityKind?: string | null }>();
 
 /** Longer than any call, short enough that the map cannot become a leak. */
 const TTL_MS = 30 * 60_000;
@@ -730,17 +730,61 @@ export function resetVerifiedIdentities(): void {
   confirmedClinics.clear();
 }
 
-/** A caller-confirmed office is a call fact, never a phone-keyed identity. */
-export function rememberConfirmedClinic(callSid: string | undefined, clinic: string): void {
+/**
+ * A caller-confirmed office is a call fact, never a phone-keyed identity.
+ *
+ * `verified` says whether the directory placed it (`resolve_location`'s
+ * verified path). The caller's words carried on unverified (a spent ask, or no
+ * directory) are kept too, for the in-call filing tools, whose office the
+ * ticketing API still resolves. The latest office the caller gave wins, and its
+ * own flag says whether it was verified.
+ */
+export function rememberConfirmedClinic(
+  callSid: string | undefined,
+  clinic: string,
+  opts: { verified?: boolean; facilityKind?: string | null } = {},
+): void {
   if (!isTwilioCallSid(callSid) || !clinic.trim()) return;
   sweep(Date.now());
-  confirmedClinics.set(callSid, { clinic: clinic.trim(), at: Date.now() });
+  confirmedClinics.set(callSid, {
+    clinic: clinic.trim(), at: Date.now(), verified: opts.verified === true,
+    facilityKind: opts.facilityKind ?? null,
+  });
 }
 
 export function confirmedClinicFor(callSid: string | undefined): string | undefined {
   if (!isTwilioCallSid(callSid)) return undefined;
   const entry = confirmedClinics.get(callSid);
   return entry && Date.now() - entry.at <= TTL_MS ? entry.clinic : undefined;
+}
+
+/**
+ * v257: the office the directory verified on this call, and nothing else.
+ *
+ * The teardown sweep files after the caller has gone, and sends this office as
+ * the caller's own (`locationSource: 'caller'`), which the client's Optical
+ * filter keeps. An unverified string must not travel that way: nobody is left
+ * to ask, and it would bypass the filter the history office goes through
+ * (Codex P1 on #505). Answers only when the latest office the call kept is a
+ * verified one.
+ */
+export function verifiedClinicFor(callSid: string | undefined): string | undefined {
+  return verifiedClinicHitFor(callSid)?.clinic;
+}
+
+/**
+ * The verified office with the facility kind the directory gave it when it
+ * was verified. The sweep decides whether another department can use the
+ * office from this kind, read at the hit, never from a second directory read
+ * at teardown, which answers a miss or an outage by accepting the name (the
+ * github-actions review of #505, round 3).
+ */
+export function verifiedClinicHitFor(callSid: string | undefined): { clinic: string; facilityKind: string | null } | undefined {
+  if (!isTwilioCallSid(callSid)) return undefined;
+  const entry = confirmedClinics.get(callSid);
+  return entry && entry.verified && Date.now() - entry.at <= TTL_MS
+    ? { clinic: entry.clinic, facilityKind: entry.facilityKind ?? null }
+    : undefined;
 }
 
 /**

@@ -231,6 +231,26 @@ describe('PHI discipline — the allow-list is the safety mechanism', () => {
   });
 
   /**
+   * v256: the priority a tech filing landed at, and whether the agent may say
+   * "urgent", are countable, so a caller told "urgent" on a medium ticket is a
+   * join against the transcript.
+   */
+  it('keeps priority and marked_urgent on a tech filing, and still nothing about who', () => {
+    const callId = freshCall();
+    recordToolEvent(
+      callId,
+      'file_tech_ticket',
+      { description: 'Paula Kolterman is out of her glaucoma drops.' },
+      JSON.stringify({ success: true, ticket_number: 'VA-1', priority: 'high', marked_urgent: true }),
+      5,
+      { agentSlug: 'tech' },
+    );
+    const [ev] = getAzulTimeline(callId)!;
+    expect(ev.outcome).toMatchObject({ priority: 'high', marked_urgent: true });
+    expect(JSON.stringify(ev)).not.toContain('Kolterman');
+  });
+
+  /**
    * v127: a records filing the app refused and the tool logged as a recovery
    * ticket is countable. Without the key it reads as an ordinary filing.
    */

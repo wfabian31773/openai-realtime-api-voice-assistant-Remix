@@ -17,7 +17,7 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 const outbox = vi.hoisted(() => {
-  interface Row { id: string; status: string; ticketNumber?: string; payload: { params: Record<string, unknown> } }
+  interface Row { id: string; status: string; ticketNumber?: string; payload: { params: Record<string, unknown>; priorityUnconfirmed?: boolean } }
   const byKey = new Map<string, Row>();
   const byId = new Map<string, Row>();
   return { byKey, byId };
@@ -42,12 +42,22 @@ vi.mock('../services/ticketOutboxService', () => ({
       const { ticketingApiClient } = await import('../../server/services/ticketingApiClient');
       const res = await ticketingApiClient.createTicket(row.payload.params as never);
       if (res.success && res.ticketNumber) {
+        const { bareReplay } = await import('../services/ticketPriority');
         row.status = 'sent';
         row.ticketNumber = res.ticketNumber;
+        row.payload.priorityUnconfirmed = bareReplay(res);
       }
       return { ...res, outboxId };
     }),
-    storedCreateParams: vi.fn(async (outboxId: string) => outbox.byId.get(outboxId)?.payload.params),
+    // The production rule: only a send recorded as not a bare replay confirms
+    // the payload's priority; a bare replay, or a row with no verdict (sent
+    // before v256), leaves it unknown.
+    storedFiling: vi.fn(async (outboxId: string) => {
+      const row = outbox.byId.get(outboxId);
+      if (!row) return {};
+      const params = row.payload.params as { priority?: string };
+      return { params, priority: row.payload.priorityUnconfirmed === false ? params.priority : undefined };
+    }),
   },
 }));
 

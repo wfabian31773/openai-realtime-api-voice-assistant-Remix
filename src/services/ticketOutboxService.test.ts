@@ -613,6 +613,44 @@ describe('a dead letter must not hold the key its own correction needs', () => {
   });
 });
 
+describe('a send the app answers as a bare replay is recorded on the row (github-actions P1 on #504, head 5065f2d4)', () => {
+  const HIGH = { ...OPTICAL_OTHER, priority: 'high' as const };
+
+  it.each([
+    [{ cached: true }, true],
+    [{ cached: true, detailsAdded: false }, true],
+    [{ cached: true, detailsAdded: true }, false],
+    [{ consolidated: true }, false],
+    [{}, false],
+  ])('answer %o records priorityUnconfirmed = %s with the sent status', async (answer, unconfirmed) => {
+    updateResults.push(entry(wrapCreateTicketPayload(HIGH)), undefined);
+    createTicket.mockResolvedValueOnce({ success: true, ticketNumber: 'VA-TEST', ...answer });
+    await TicketOutboxService.attemptSend('ob-1');
+    const sent = setPayloads.find(value => value.status === 'sent');
+    expect(sent?.payload).toMatchObject({ priorityUnconfirmed: unconfirmed, params: { priority: 'high' } });
+  });
+
+  it('storedFiling reports no priority for a row whose send was a bare replay', async () => {
+    selectResults.push([{ payload: { ...wrapCreateTicketPayload(HIGH), priorityUnconfirmed: true } }]);
+    expect(await TicketOutboxService.storedFiling('ob-1')).toEqual({ params: HIGH, priority: undefined });
+  });
+
+  it('storedFiling reports the payload priority when the send was recorded as not a bare replay', async () => {
+    selectResults.push([{ payload: { ...wrapCreateTicketPayload(HIGH), priorityUnconfirmed: false } }]);
+    expect(await TicketOutboxService.storedFiling('ob-1')).toEqual({ params: HIGH, priority: 'high' });
+  });
+
+  it('storedFiling reports no priority for a row with no verdict: sent before v256, or not sent yet (github-actions P2 on #504, head 670eef2a)', async () => {
+    selectResults.push([{ payload: wrapCreateTicketPayload(HIGH) }]);
+    expect(await TicketOutboxService.storedFiling('ob-1')).toEqual({ params: HIGH, priority: undefined });
+  });
+
+  it('storedFiling reports nothing for a row that holds no create-ticket payload', async () => {
+    selectResults.push([]);
+    expect(await TicketOutboxService.storedFiling('ob-1')).toEqual({});
+  });
+});
+
 describe('late patient-scoped filings', () => {
   it('reopens completed call sync before publishing the sent filing', async () => {
     const sid = 'CA0123456789abcdef0123456789abcdef';
