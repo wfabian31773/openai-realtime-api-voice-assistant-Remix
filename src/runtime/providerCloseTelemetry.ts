@@ -44,12 +44,19 @@ export function providerCloseEvent(
   outcome: string,
   diagnostics: ProviderCloseDiagnostics | undefined,
   proc: { uptimeSec: number } = { uptimeSec: Math.round(process.uptime()) },
+  /**
+   * `call`: the socket ended on a call that had started. `setup`: the
+   * provider never answered well enough to start one (a refused handshake,
+   * every first-event retry stalled).
+   */
+  stage: "call" | "setup" = "call",
 ): ProviderCloseEvent | null {
   if (outcome !== "provider_failure") return null;
   return {
     level: "warn",
     data: {
       outcome,
+      stage,
       // A transport that keeps no diagnostics (a test fake, or a build that
       // lost them) says so rather than reading as a clean close.
       diagnostics: diagnostics ? "present" : "absent",
@@ -60,7 +67,7 @@ export function providerCloseEvent(
 }
 
 export async function logProviderClose(
-  call: { callSid: string; outcome: string },
+  call: { callSid: string; outcome: string; stage?: "call" | "setup" },
   diagnostics: ProviderCloseDiagnostics | undefined,
   ids: { callLogId?: string } = {},
   opts: {
@@ -74,7 +81,7 @@ export async function logProviderClose(
     after?: Promise<unknown>;
   } = {},
 ): Promise<boolean> {
-  const ev = providerCloseEvent(call.outcome, diagnostics);
+  const ev = providerCloseEvent(call.outcome, diagnostics, undefined, call.stage ?? "call");
   if (!ev) return false;
   // Lazy, like every database-touching import on the runtime: callEventLog
   // pulls in server/db, which validates DATABASE_URL at load.

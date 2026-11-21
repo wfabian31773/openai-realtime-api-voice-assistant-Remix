@@ -223,7 +223,7 @@ interface Harness {
   persistedIdentity: Array<unknown>;
   /** Every caller-audio row the runtime wrote, in order (v64). */
   audioRows: Array<{ callSid: string; outcome: string; counts: unknown }>;
-  closeRows: Array<{ callSid: string; outcome: string; diagnostics: unknown }>;
+  closeRows: Array<{ callSid: string; outcome: string; stage?: string; diagnostics: unknown }>;
   /**
    * Calls the teardown request sweep saw, in order.
    *
@@ -297,7 +297,7 @@ async function harness(
   const persisted: Array<Record<string, unknown>> = [];
   const persistedIdentity: Array<unknown> = [];
   const audioRows: Array<{ callSid: string; outcome: string; counts: unknown }> = [];
-  const closeRows: Array<{ callSid: string; outcome: string; diagnostics: unknown }> = [];
+  const closeRows: Array<{ callSid: string; outcome: string; stage?: string; diagnostics: unknown }> = [];
   const swept: Array<Record<string, unknown>> = [];
   const pcpSwept: Array<Record<string, unknown>> = [];
   const setupFailures: Array<Record<string, unknown>> = [];
@@ -367,6 +367,7 @@ async function harness(
         closeRows.push({
           callSid: (call as { callSid: string }).callSid,
           outcome: (call as { outcome: string }).outcome,
+          stage: (call as { stage?: string }).stage,
           diagnostics,
         });
         return true;
@@ -2940,6 +2941,31 @@ describe("the provider-close row (v259)", () => {
     await waitFor(() => h.closeRows.some((r) => r.callSid === "CA-close2"), "the close row");
     expect(h.closeRows.find((r) => r.callSid === "CA-close2")?.outcome).toBe("caller_hangup");
     await h.close();
+  });
+
+  it("writes a setup row with the last transport's diagnostics when every first-event retry stalls", async () => {
+    // The connect failed before a bridge existed. Before the #507 review
+    // fix this provider_failure wrote no close row at all.
+    const h = await harness({ stallFirstEvent: true, firstEventTimeoutMs: 80, connectRetries: 2 });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA-close3", From: "+15551234567", To: "+2" });
+    await openStream(h, "CA-close3", tokenFrom(answered.text));
+    await waitFor(() => h.closeRows.some((r) => r.callSid === "CA-close3"), "the setup close row", 3000);
+    const row = h.closeRows.find((r) => r.callSid === "CA-close3");
+    expect(row).toMatchObject({ outcome: "provider_failure", stage: "setup" });
+    expect(h.transports).toHaveLength(3);
+    expect(row?.diagnostics).toBe(h.transports[2].diagnostics);
+    expect(h.closeRows.filter((r) => r.callSid === "CA-close3")).toHaveLength(1);
+    await h.close();
+  });
+
+  it("writes no setup row when no socket was ever opened", () => {
+    const runtimeSource = readFileSync(new URL("./voiceRuntime.ts", import.meta.url), "utf8");
+    const at = runtimeSource.indexOf('stage: "setup"');
+    expect(at).toBeGreaterThan(-1);
+    const before = runtimeSource.slice(Math.max(0, at - 400), at);
+    expect(before).toContain("if (setupTransport) {");
+    expect(runtimeSource.slice(at, at + 200)).toContain("setupTransport.closeDiagnostics?.()");
+    expect(runtimeSource).toMatch(/opened\.transport = t;\s+setupTransport = t;/);
   });
 
   it("is never awaited by teardown, and runs after the caller-audio row", () => {

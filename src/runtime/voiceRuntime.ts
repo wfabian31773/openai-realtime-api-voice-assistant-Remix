@@ -1076,6 +1076,14 @@ export function mountVoiceRuntime(
       }
     };
     let bridge: VoiceCallBridge | null = null;
+    /**
+     * The last provider transport this call opened, kept outside the setup
+     * try so a setup that fails (a handshake refused, every first-event
+     * retry stalled) can still write why the provider closed. Without it
+     * those `provider_failure` calls never reached the close row (#507
+     * review).
+     */
+    let setupTransport: RuntimeTransport | undefined;
     let starting = false;
     /**
      * A valid `start` frame CLAIMED this socket: the callSid and token checked
@@ -1711,6 +1719,7 @@ export function mountVoiceRuntime(
               ? options.createTransport({ apiKey: lane.voice.apiKey, model: lane.voice.model })
               : new WebSocketGrokTransport(lane.voice.apiKey, lane.voice.model);
             opened.transport = t;
+            setupTransport = t;
             await t.connect();
             return {
               headers: t.upgradeHeaders?.() ?? {},
@@ -2175,11 +2184,23 @@ export function mountVoiceRuntime(
           // bridge (Codex P2, #327). Part of the no-audio population, so the
           // row goes here too or the instrument's claim of one per call is
           // false on exactly the calls it was built to size.
-          void logAudio(
+          const audioWritten = logAudio(
             { callSid: entry.callSid, outcome: "provider_failure" },
             callerAudio.counts(),
             { callLogId },
           ).catch(() => undefined);
+          // And why the provider closed, when a socket was opened at all: a
+          // refused handshake or every first-event retry stalled. A setup
+          // that failed before any socket (the lane or the agent binding)
+          // writes no row, because nothing closed (#507 review).
+          if (setupTransport) {
+            void logClose(
+              { callSid: entry.callSid, outcome: "provider_failure", stage: "setup" },
+              setupTransport.closeDiagnostics?.(),
+              { callLogId },
+              { after: audioWritten },
+            ).catch(() => undefined);
+          }
           twilioSocket.close();
         }
       } finally {

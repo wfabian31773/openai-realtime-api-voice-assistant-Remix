@@ -2067,9 +2067,25 @@ import { callEnvironment } from "./callRecord";
  * answers to. Above main's v257 (#505, `1c0eea50`), which it contains along
  * with v256 (#504, `46cd4aa1`) and v255 (#502, `7d919e1d`); v245 is #488 on
  * its open branch. No migration.
+ * On main since #506 (`831ac438`).
+ *
+ * v259 — WHY THE PROVIDER CLOSED (2026-11-21). Logging only: the raw socket's
+ * signal, timings, open sockets, ids and event-loop delay on every xAI close,
+ * and one provider_close_summary call_events row per provider_failure call.
+ * On main since #507 (`2589baf`).
+ *
+ * v260 — THE #507 REVIEW, ANSWERED (2026-11-21). The review arrived two
+ * minutes before #507 merged. A provider error type or code that is not a
+ * string no longer throws before the call's failure handling runs (a number
+ * is kept, an object dropped, and the note can never block onError); the
+ * peer's close reason is kept as its length only; and a setup that fails
+ * after a socket was opened (a refused handshake, every first-event retry
+ * stalled) now writes the close row, marked stage "setup". Above main's v259
+ * (#507, `2589baf`), which it contains; v245 is #488 on its open branch. No
+ * migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v259-why-the-provider-closed-20261121";
+  "voice-runtime-v260-the-close-review-answered-20261121";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

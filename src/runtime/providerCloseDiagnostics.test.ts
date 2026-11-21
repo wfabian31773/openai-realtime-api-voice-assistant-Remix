@@ -73,14 +73,74 @@ describe("why an xAI socket ended (v259)", () => {
     expect(d.socketErrorCode).toBeNull();
   });
 
-  it("records the peer's close frame, code and reason", async () => {
+  it("records the peer's close code and the reason's length, never its text", async () => {
+    // A close reason is whatever the peer sends, and this row is durable, so
+    // only its length is kept (#507 review).
     const url = await server((s) => setTimeout(() => s.close(1001, "going away"), 50));
     const { t, closed } = await open(url);
     await closed;
     const d = t.closeDiagnostics();
     expect(d.closeCode).toBe(1001);
-    expect(d.closeReason).toBe("going away");
+    expect(d.closeReasonLength).toBe("going away".length);
+    expect(JSON.stringify(d)).not.toContain("going away");
     expect(d.closedByUs).toBe(false);
+  });
+
+  it("reads a close with no reason as length 0", async () => {
+    const url = await server((_s, req) => setTimeout(() => req.socket.resetAndDestroy(), 50));
+    const { t, closed } = await open(url);
+    await closed;
+    expect(t.closeDiagnostics().closeReasonLength).toBe(0);
+  });
+
+  it("keeps an error code that arrives as a number, drops an object, and still fails the call", async () => {
+    // Provider events are parsed JSON with no runtime check. A number used to
+    // reach .replace() and throw before onError ran (#507 review, P1).
+    for (const [code, kept] of [[400, "400"], [{ nested: true }, null]] as const) {
+      const url = await server((s) =>
+        setTimeout(() => s.send(JSON.stringify({ type: "error", error: { type: 7, code } })), 50),
+      );
+      const t = new WebSocketGrokTransport("key", "model", url);
+      await t.connect();
+      let closedNow!: () => void;
+      const closed = new Promise<void>((r) => (closedNow = r));
+      const failed = new Promise<void>((r) => {
+        new GrokVoiceSession(t as GrokTransport, { instructions: "", tools: [] } as never, {
+          onError: () => r(),
+          onClosed: () => closedNow(),
+        } as never);
+      });
+      t.commitBuffered();
+      await failed;
+      const d = t.closeDiagnostics();
+      expect(d.providerErrorType).toBe("7");
+      expect(d.providerErrorCode).toBe(kept);
+      t.close();
+      await closed;
+    }
+  });
+
+  it("reaches the call's failure handling when recording the provider error throws", async () => {
+    const url = await server((s) =>
+      setTimeout(() => s.send(JSON.stringify({ type: "error", error: { type: "server_error" } })), 50),
+    );
+    const t = new WebSocketGrokTransport("key", "model", url);
+    t.noteProviderError = () => {
+      throw new Error("telemetry broke");
+    };
+    await t.connect();
+    let closedNow!: () => void;
+    const closed = new Promise<void>((r) => (closedNow = r));
+    const failed = new Promise<void>((r) => {
+      new GrokVoiceSession(t as GrokTransport, { instructions: "", tools: [] } as never, {
+        onError: () => r(),
+        onClosed: () => closedNow(),
+      } as never);
+    });
+    t.commitBuffered();
+    await failed;
+    t.close();
+    await closed;
   });
 
   it("says when we closed it first", async () => {
@@ -187,7 +247,7 @@ describe("why an xAI socket ended (v259)", () => {
 
   it("keeps every field it reports to the connection", () => {
     const fields: Array<keyof ProviderCloseDiagnostics> = [
-      "firstSignal", "closeCode", "closeReason", "socketErrorCode", "socketErrorMessage",
+      "firstSignal", "closeCode", "closeReasonLength", "socketErrorCode", "socketErrorMessage",
       "socketEndReceived", "wsErrorMessage", "providerErrorType", "providerErrorCode",
       "closedByUs", "openForMs", "msSinceServerEvent", "msSinceClientSend", "bufferedAmount",
       "openSockets", "remoteAddress", "eventLoopMaxMs", "msSinceLoopTick", "xTraceId", "cfRay",
