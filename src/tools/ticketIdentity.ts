@@ -94,6 +94,11 @@ export function recordNamesFor(
   if (!attached || !callSid || attached.callSid !== callSid) return undefined;
   const same = validatedPatientFor(callSid, first, last, dob);
   if (!same) return undefined;
+  // A date of birth the payload carries must be the held person's, read and
+  // equal, not merely not in conflict: validatedPatientFor skips a date it
+  // cannot compare, which includes a held person with no date of birth
+  // (github-actions review of #506).
+  if (value(dob) && (!isoDOB(dob) || isoDOB(dob) !== same.dateOfBirth)) return undefined;
   // The attached patient is the held person only when a key says so: the same
   // person id and the same date of birth, present or absent on both, and at
   // least one of them present. A shared record name with neither key (two

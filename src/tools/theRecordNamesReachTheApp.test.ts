@@ -356,6 +356,30 @@ describe('the rule at the create-ticket transport (recordNamesFor), for every ca
       expect(recordNamesFor(sid, 'Chris', LAST, undefined, held)).toEqual({ firstName: 'Christopher', lastName: LAST });
     });
 
+    it('a held person with no date of birth, beside a payload that carries one, renames nothing (github-actions review of #506)', () => {
+      hold({ dateOfBirth: undefined });
+      const held = validatedPatientFor(sid, 'Chris', LAST)!;
+      expect(held.dateOfBirth).toBeUndefined();
+      expect(held.personId).toBe(PERSON);
+      // The person id agrees, but nothing establishes that the payload's date is this person's.
+      expect(recordNamesFor(sid, 'Chris', LAST, '1960-04-05', held)).toBeUndefined();
+      // With no date on the payload either, the person id is the key, as before.
+      expect(recordNamesFor(sid, 'Chris', LAST, undefined, held)).toEqual({ firstName: 'Christopher', lastName: LAST });
+    });
+
+    it('a date of birth on the payload that does not read renames nothing', () => {
+      hold();
+      const held = validatedPatientFor(sid, 'Chris', LAST)!;
+      expect(recordNamesFor(sid, 'Chris', LAST, 'not a date', held)).toBeUndefined();
+      expect(recordNamesFor(sid, 'Chris', LAST, '   ', held)).toEqual({ firstName: 'Christopher', lastName: LAST });
+    });
+
+    it('a date of birth on the payload that is the held one still renames the same person', () => {
+      hold();
+      const held = validatedPatientFor(sid, 'Chris', LAST)!;
+      expect(recordNamesFor(sid, 'Chris', LAST, held.dateOfBirth, held)).toEqual({ firstName: 'Christopher', lastName: LAST });
+    });
+
     it('a stale patient from the other person, sent with no date-of-birth columns, is refused by the app, not accepted', async () => {
       hold({ personId: undefined });
       const held = validatedPatientFor(sid, 'Chris', LAST)!;
