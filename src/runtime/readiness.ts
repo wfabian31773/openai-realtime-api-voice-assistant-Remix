@@ -2040,9 +2040,21 @@ import { callEnvironment } from "./callRecord";
  * medium tickets of the same window. Above main's v255 (#502, `7d919e1d`),
  * which it contains along with the npm 10.9.9 lockfile (#503, `f3bda4ed`);
  * v245 is #488 on its open branch. No migration.
+ * On main since #504 (`46cd4aa1`).
+ *
+ * v257 — THE TEARDOWN SWEEP CARRIES THE OFFICE THE CALLER CONFIRMED (2026-11-21).
+ * `resolve_location` keeps the office the directory verified for the call,
+ * and the in-call filing tools carry it first; the teardown sweep read only
+ * a certain identity's history office. 15 of the 16 swept tickets on
+ * verified-office calls in the 7 days to 2026-11-21 did not carry it. The
+ * sweep now sends the verified office as the caller's, only one the
+ * directory verified, and on an Optical ticket only a kind Optical accepts,
+ * judged from the kind kept with the hit. Above main's v256 (#504,
+ * `46cd4aa1`), which it contains; v258 is #506 and v245 is #488 on their
+ * open branches. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v256-an-urgent-promise-matches-the-ticket-20261120";
+  "voice-runtime-v257-the-sweep-carries-the-confirmed-office-20261121";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
