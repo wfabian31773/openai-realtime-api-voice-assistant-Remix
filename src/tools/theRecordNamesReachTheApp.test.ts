@@ -269,6 +269,19 @@ describe('the rule at the filing step (prepareTicketIdentity)', () => {
       expect(input).toMatchObject({ first_name: 'Chris', last_name: LAST, date_of_birth: '04/05/1961' });
     });
 
+    it('a held person with no date of birth, beside a date that does not read, is not renamed', () => {
+      hold({ dateOfBirth: undefined });
+      const { input } = prepareTicketIdentity({ call_sid: sid, first_name: 'Chris', last_name: LAST, date_of_birth: 'not a date' }, { recordNames: true });
+      expect(input).toMatchObject({ first_name: 'Chris', last_name: LAST });
+    });
+
+    it('the record\'s first name with another chart\'s last name, beside a date that does not read, takes neither the rename nor the record\'s date', () => {
+      hold({ alsoKnownAs: ['Maidenname'] });
+      const { input } = prepareTicketIdentity({ call_sid: sid, first_name: 'Christopher', last_name: 'Maidenname', date_of_birth: 'not a date' }, { recordNames: true });
+      expect(input).toMatchObject({ first_name: 'Christopher', last_name: 'Maidenname' });
+      expect(input.date_of_birth).not.toBe(DOB);
+    });
+
     it('without the option nothing changes: a date that does not read is still replaced by the record\'s', () => {
       hold();
       const { input } = prepareTicketIdentity({ call_sid: sid, first_name: 'Chris', last_name: LAST, date_of_birth: 'not a date' });
