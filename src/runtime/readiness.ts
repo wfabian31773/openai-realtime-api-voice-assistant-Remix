@@ -2026,9 +2026,23 @@ import { callEnvironment } from "./callRecord";
  * build-info.json. Above main's v254 (#500, `a1955262`), which it contains,
  * with the vite 8.3.8 lockfile (#501, `04f514af`); v245 is #488 on its open
  * branch. No migration.
+ * On main since #502 (`7d919e1d`).
+ *
+ * v256 — THE CALLER IS TOLD "URGENT" ONLY WHEN THE TICKET IS (2026-11-20).
+ * The tech prompt told the model to say a glaucoma request was being marked
+ * urgent, and the ticket's priority is the tool's: reason 155 or an outage
+ * files high, everything else medium. 24 of 109 grok tech calls whose agent
+ * said "urgent" in the 14 days to 2026-11-20 got only a medium ticket. The
+ * prompt now leaves urgency to the filing tool, whose answer carries
+ * `priority`, `marked_urgent` and a line saying whether the model may say it;
+ * and a glaucoma drug the classifier missed (misspelt, or named only in the
+ * medication field) under a generic refill reason files as 155, high: 14
+ * medium tickets of the same window. Above main's v255 (#502, `7d919e1d`),
+ * which it contains along with the npm 10.9.9 lockfile (#503, `f3bda4ed`);
+ * v245 is #488 on its open branch. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v255-a-null-build-sha-says-why-20261120";
+  "voice-runtime-v256-an-urgent-promise-matches-the-ticket-20261120";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

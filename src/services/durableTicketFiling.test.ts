@@ -24,12 +24,13 @@ vi.mock('../../server/services/ticketingApiClient', () => ({
 
 const writeToOutbox = vi.fn();
 const attemptSend = vi.fn();
+const storedFiling = vi.fn();
 vi.mock('./ticketOutboxService', async (importOriginal) => {
   // The envelope helpers stay REAL. Stubbing `wrapCreateTicketPayload` would
   // make this suite agree with itself about the discriminator while the outbox
   // read a different one, which is the only way this wiring can silently fail.
   const actual = await importOriginal<typeof import('./ticketOutboxService')>();
-  return { ...actual, TicketOutboxService: { writeToOutbox, attemptSend } };
+  return { ...actual, TicketOutboxService: { writeToOutbox, attemptSend, storedFiling } };
 });
 
 // Registration is an import side effect, and askAsFor reads the registry — so
@@ -397,5 +398,87 @@ describe('a payload the server read and refused', () => {
       expect(res.queued, `HTTP ${statusCode} must be captured`).toBe(true);
       expect(writeToOutbox).toHaveBeenCalledOnce();
     }
+  });
+});
+
+describe('a row another worker sent reports the priority its send confirmed (github-actions P1 on #504, head 5065f2d4)', () => {
+  const SID = 'CA0000000000000000000000000000f504';
+  const params = {
+    departmentId: 3, requestTypeId: 30, requestReasonId: 155, patientFirstName: 'Testcaller', patientLastName: 'Tech',
+    patientPhone: '5555550147', description: 'Refill of latanoprost.', priority: 'high' as const,
+    callData: { callSid: SID }, idempotencyKey: `call-${SID}`,
+  };
+
+  it.each([
+    [{ params, priority: undefined }, undefined],
+    [{ params, priority: 'high' }, 'high'],
+  ])('stored %o reports %s', async (stored, expected) => {
+    // The snapshot said the row still had to be sent; by the time this call
+    // claimed it, another worker had sent it, so the answer carries no
+    // `cached` and the row is the only witness of what the app said.
+    writeToOutbox.mockResolvedValueOnce({ outboxId: 'ob-9', alreadyExists: true, status: 'pending' });
+    attemptSend.mockResolvedValueOnce({ success: true, ticketNumber: 'VA-90009', outboxId: 'ob-9' });
+    storedFiling.mockResolvedValueOnce(stored);
+    const res = await createTicketDurable(params as never);
+    expect(res).toMatchObject({ success: true, ticketNumber: 'VA-90009' });
+    expect(res.filedPriority).toBe(expected);
+  });
+});
+
+describe('an addition the worker already sent reports what its send confirmed (github-actions P2 on #504, head 07e615b6)', () => {
+  const SID = 'CA0000000000000000000000000000a507';
+  const base = {
+    departmentId: 3, requestTypeId: 30, patientFirstName: 'Testcaller', patientLastName: 'Tech',
+    patientPhone: '5555550147', callData: { callSid: SID }, idempotencyKey: `call-${SID}`,
+  };
+  const first = { ...base, requestReasonId: 154, description: 'Refill of artificial tears drops.', priority: 'medium' as const };
+  const addition = { ...base, requestReasonId: 155, description: 'Refill of latanoprost.', priority: 'high' as const };
+
+  it.each([
+    [{ params: addition, priority: 'high' }, 'high'],
+    [{ params: addition, priority: undefined }, 'medium'],
+  ])('the addition row stored %o reports %s', async (stored, expected) => {
+    writeToOutbox.mockResolvedValueOnce({ outboxId: 'ob-first', alreadyExists: true, status: 'sent', ticketNumber: 'VA-90010' });
+    storedFiling.mockResolvedValueOnce({ params: first, priority: 'medium' });
+    writeToOutbox.mockResolvedValueOnce({ outboxId: 'ob-add', alreadyExists: true, status: 'sent', ticketNumber: 'VA-90010' });
+    storedFiling.mockResolvedValueOnce(stored);
+    const res = await createTicketDurable(addition as never);
+    expect(res).toMatchObject({ success: true, ticketNumber: 'VA-90010' });
+    expect(res.filedPriority).toBe(expected);
+    expect(storedFiling).toHaveBeenLastCalledWith('ob-add');
+    expect(attemptSend).not.toHaveBeenCalled();
+  });
+});
+
+describe('a fresh row reports what its row recorded, not what this call wrote (github-actions P1 on #504, head 670eef2a)', () => {
+  const SID = 'CA0000000000000000000000000000a508';
+  const params = {
+    departmentId: 3, requestTypeId: 30, requestReasonId: 155, patientFirstName: 'Testcaller', patientLastName: 'Tech',
+    patientPhone: '5555550147', description: 'Refill of latanoprost.', priority: 'high' as const,
+    callData: { callSid: SID }, idempotencyKey: `call-${SID}`,
+  };
+
+  it.each([
+    // The worker claimed this call's new row first and the app answered a bare
+    // replay; the live attempt then answers plain success with no replay flags.
+    [{ params, priority: undefined }, undefined],
+    [{ params, priority: 'high' }, 'high'],
+  ])('a new row whose stored filing is %o reports %s', async (stored, expected) => {
+    writeToOutbox.mockResolvedValueOnce({ outboxId: 'ob-new', alreadyExists: false });
+    attemptSend.mockResolvedValueOnce({ success: true, ticketNumber: 'VA-90011', outboxId: 'ob-new' });
+    storedFiling.mockResolvedValueOnce(stored);
+    const res = await createTicketDurable(params as never);
+    expect(res).toMatchObject({ success: true, ticketNumber: 'VA-90011' });
+    expect(res.filedPriority).toBe(expected);
+    expect(storedFiling).toHaveBeenLastCalledWith('ob-new');
+  });
+
+  it('a row that cannot be read confirms nothing', async () => {
+    writeToOutbox.mockResolvedValueOnce({ outboxId: 'ob-new', alreadyExists: false });
+    attemptSend.mockResolvedValueOnce({ success: true, ticketNumber: 'VA-90011', outboxId: 'ob-new' });
+    storedFiling.mockRejectedValueOnce(new Error('database unavailable'));
+    const res = await createTicketDurable(params as never);
+    expect(res).toMatchObject({ success: true, ticketNumber: 'VA-90011' });
+    expect(res.filedPriority).toBeUndefined();
   });
 });

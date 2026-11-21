@@ -352,6 +352,13 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
     // is a count.
     'already_filed',
     'details_added',
+    // v256: the priority a tech filing landed at (`high`, `medium`, or
+    // `unknown` on a repeat whose first filing this process never saw) and
+    // whether the agent may tell the caller it is marked urgent. A closed enum
+    // and a boolean, no PHI: a caller told "urgent" on a medium ticket is then
+    // a join against the transcript, not a lookup in the Support Center.
+    'priority',
+    'marked_urgent',
     // v246: what a returned NPX outreach call's re-check against the movable
     // list said (`current`, `off_list`, `gone`, `unavailable`, or `at_dial` /
     // `demo` where none ran). One string from a closed set, no PHI: an
