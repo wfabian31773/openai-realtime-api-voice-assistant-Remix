@@ -70,8 +70,39 @@ export function ticketIdentityFields(callSid: string, first: string, last: strin
   if (clinic && !validatedPatient.nextAppointment && !validatedPatient.lastVisit) validatedPatient.confirmedClinic = clinic;
   return { validatedPatient };
 }
-/** Shared live filing gate: ask one missing field, never ask for held facts. */
-export function prepareTicketIdentity(input: Record<string, unknown>): { input: Record<string, unknown>; missing?: string; message?: string } {
+/**
+ * v258: the names a create-ticket payload carries beside its validated patient.
+ *
+ * The validated patient carries the record's names (`validatedPatientFor`),
+ * and the ticketing app refuses a payload whose names differ from them
+ * (`applyValidatedPatient`: "Invalid or conflicting validated patient
+ * context"). The held person answers to more than the record's spelling: a
+ * first name the person base accepted with the date of birth (`heardAs`, v199)
+ * and the other chart's last name (`alsoKnownAs`, v179). So a filing in the
+ * caller's spelling was refused, and the request filed only at teardown, after
+ * the caller had gone. The record wins (RULE ZERO step 4).
+ *
+ * Returns the record's names only when the payload's names are names the held
+ * person answers to AND the attached patient is that held person; anything
+ * else is left for the app to refuse, never written over with another
+ * person's name.
+ */
+export function recordNamesFor(
+  callSid: string | undefined, first: string | undefined, last: string | undefined, dob: string | undefined,
+  attached: ValidatedPatient | undefined,
+): { firstName: string; lastName: string } | undefined {
+  if (!attached || !callSid || attached.callSid !== callSid) return undefined;
+  const same = validatedPatientFor(callSid, first, last, dob);
+  if (!same || same.personId !== attached.personId) return undefined;
+  if (nameKey(same.firstName) !== nameKey(attached.firstName) || nameKey(same.lastName) !== nameKey(attached.lastName)) return undefined;
+  return { firstName: attached.firstName, lastName: attached.lastName };
+}
+/**
+ * Shared live filing gate: ask one missing field, never ask for held facts.
+ * `recordNames` (the queue lanes' filing tools, v258) files a validated
+ * patient under the record's names, not the caller's spelling of them.
+ */
+export function prepareTicketIdentity(input: Record<string, unknown>, opts: { recordNames?: boolean } = {}): { input: Record<string, unknown>; missing?: string; message?: string } {
   const match = validatedPatientFor(value(input.call_sid), value(input.first_name), value(input.last_name), value(input.date_of_birth));
   const filled = { ...input };
   if (!value(filled.location)) {
@@ -82,8 +113,8 @@ export function prepareTicketIdentity(input: Record<string, unknown>): { input: 
     }
   }
   if (match) {
-    filled.first_name = value(input.first_name) || match.firstName;
-    filled.last_name = value(input.last_name) || match.lastName;
+    filled.first_name = opts.recordNames ? match.firstName : value(input.first_name) || match.firstName;
+    filled.last_name = opts.recordNames ? match.lastName : value(input.last_name) || match.lastName;
     if (match.dateOfBirth) filled.date_of_birth = match.dateOfBirth;
     const office = match.nextAppointment?.location || match.lastVisit?.location || match.confirmedClinic;
     if (office && !value(filled.location)) {

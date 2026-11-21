@@ -2026,9 +2026,24 @@ import { callEnvironment } from "./callRecord";
  * build-info.json. Above main's v254 (#500, `a1955262`), which it contains,
  * with the vite 8.3.8 lockfile (#501, `04f514af`); v245 is #488 on its open
  * branch. No migration.
+ * On main since #502 (`7d919e1d`).
+ *
+ * v258 — THE RECORD'S NAMES REACH THE APP (2026-11-21). A filing for a
+ * confirmed patient attaches the record's names (validatedPatient) and the
+ * ticketing app refuses a payload whose names differ from them ("Invalid or
+ * conflicting validated patient context", HTTP 400). The held person answers
+ * to the caller's spelling of the first name (heardAs, v199) and the other
+ * chart's last name (alsoKnownAs, v179), so a filing in the caller's spelling
+ * was refused: 42 POSTs on 17 calls, 2026-11-11..19, 7 of them filed only by
+ * the teardown sweep after the caller hung up. The queue lanes' filing gate
+ * now files a validated patient under the record's names, and createTicket
+ * aligns the names for any caller when they are names the attached patient
+ * answers to. Above main's v255 (#502, `7d919e1d`), which it contains, with
+ * the npm 10.9.9 lockfile (#503, `f3bda4ed`); v256 is #504, v257 is #505 and
+ * v245 is #488, all on their open branches. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v255-a-null-build-sha-says-why-20261120";
+  "voice-runtime-v258-the-record-names-reach-the-app-20261121";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

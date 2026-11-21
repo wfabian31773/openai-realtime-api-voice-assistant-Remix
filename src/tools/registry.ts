@@ -301,7 +301,9 @@ export async function runTool(
   noteDraftedRequestFromArgs(name, input);
 
   if (['file_optical_ticket', 'file_surgery_ticket', 'file_tech_ticket', 'file_records_ticket'].includes(name)) {
-    const prepared = prepareTicketIdentity(input);
+    // v258: a validated patient files under the record's names; the app
+    // refuses a payload whose names differ from its validated patient's.
+    const prepared = prepareTicketIdentity(input, { recordNames: true });
     // Optical owns its bounded office ask and the record-office outage exit.
     // Keep that provenance instead of turning a held office into caller input.
     if (name === 'file_optical_ticket' && prepared.input.locationSource === 'history'
