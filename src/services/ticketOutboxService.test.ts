@@ -635,9 +635,14 @@ describe('a send the app answers as a bare replay is recorded on the row (github
     expect(await TicketOutboxService.storedFiling('ob-1')).toEqual({ params: HIGH, priority: undefined });
   });
 
-  it.each([false, undefined])('storedFiling reports the payload priority when priorityUnconfirmed is %s', async flag => {
-    selectResults.push([{ payload: { ...wrapCreateTicketPayload(HIGH), priorityUnconfirmed: flag } }]);
+  it('storedFiling reports the payload priority when the send was recorded as not a bare replay', async () => {
+    selectResults.push([{ payload: { ...wrapCreateTicketPayload(HIGH), priorityUnconfirmed: false } }]);
     expect(await TicketOutboxService.storedFiling('ob-1')).toEqual({ params: HIGH, priority: 'high' });
+  });
+
+  it('storedFiling reports no priority for a row with no verdict: sent before v256, or not sent yet (github-actions P2 on #504, head 670eef2a)', async () => {
+    selectResults.push([{ payload: wrapCreateTicketPayload(HIGH) }]);
+    expect(await TicketOutboxService.storedFiling('ob-1')).toEqual({ params: HIGH, priority: undefined });
   });
 
   it('storedFiling reports nothing for a row that holds no create-ticket payload', async () => {

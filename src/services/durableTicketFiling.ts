@@ -264,17 +264,15 @@ async function forwardRepeatFiling(
 }
 
 /**
- * The priority of the payload an outbox row holds. A fresh row holds this
- * filing's own; a row that already existed may keep the one it was first
- * written with (the worker still owns it), and that is what `attemptSend`
- * sends. A row another worker sent first, whose send the app answered with a
- * bare replay, reports none (`storedFiling`).
+ * The priority an outbox row's send confirmed, read from the row whoever sent
+ * it. The row records the app's verdict on its own send (`priorityUnconfirmed`),
+ * and only an explicit confirmation counts (`storedFiling`). Read even for a
+ * row this call has just written: the worker can claim and send it first, and
+ * the live attempt then answers with no replay metadata, so this filing's own
+ * payload is not evidence of what the app did (github-actions P1 on #504, head
+ * `670eef2a`). A row that cannot be read confirms nothing.
  */
-async function heldPriority(
-  params: CreateTicketParams,
-  write: { outboxId: string; alreadyExists: boolean },
-): Promise<TicketPriority | undefined> {
-  if (!write.alreadyExists) return sentPriority(params);
+async function heldPriority(write: { outboxId: string }): Promise<TicketPriority | undefined> {
   try {
     const { TicketOutboxService } = await import('./ticketOutboxService');
     return (await TicketOutboxService.storedFiling(write.outboxId)).priority;
@@ -373,7 +371,7 @@ export async function createTicketDurable(
       }
       const sent = await TicketOutboxService.attemptSend(write.outboxId, { liveCaller: true });
       if (sent.success && sent.ticketNumber) {
-        return { ...sent, filedPriority: bareReplay(sent) ? undefined : await heldPriority(params, write) };
+        return { ...sent, filedPriority: bareReplay(sent) ? undefined : await heldPriority(write) };
       }
       if (sent.terminal) return { ...sent, queued: false, missingField: missingFieldFromError(sent.error) };
       console.error(

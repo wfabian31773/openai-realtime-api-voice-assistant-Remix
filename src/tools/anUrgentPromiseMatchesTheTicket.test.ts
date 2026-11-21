@@ -61,13 +61,14 @@ vi.mock('../services/ticketOutboxService', () => ({
       }
       return { ...res, outboxId };
     }),
-    // The production rule, read from the module it lives in: a send the app
-    // answered with a bare replay leaves the ticket's priority unknown.
+    // The production rule: only a send recorded as not a bare replay confirms
+    // the payload's priority; a bare replay, or a row with no verdict (sent
+    // before v256), leaves it unknown.
     storedFiling: vi.fn(async (outboxId: string) => {
       const row = outbox.byId.get(outboxId);
       if (!row) return {};
       const params = row.payload.params as { priority?: string };
-      return { params, priority: row.payload.priorityUnconfirmed === true ? undefined : params.priority };
+      return { params, priority: row.payload.priorityUnconfirmed === false ? params.priority : undefined };
     }),
   },
 }));
@@ -331,7 +332,8 @@ describe('the priority said is the one SENT, not the one asked for (Codex P1 and
       id: 'row-elsewhere',
       status: 'sent',
       ticketNumber: 'VA-90002',
-      payload: { params: { priority: 'medium', description: 'Caller wants to know what her prescription is.' } },
+      // Sent after v256: the row records that its send was not a bare replay.
+      payload: { params: { priority: 'medium', description: 'Caller wants to know what her prescription is.' }, priorityUnconfirmed: false },
     };
     outbox.byKey.set(`call-${SID}`, row);
     outbox.byId.set(row.id, row);
@@ -349,7 +351,8 @@ describe('the priority said is the one SENT, not the one asked for (Codex P1 and
       id: 'row-elsewhere',
       status: 'sent',
       ticketNumber: 'VA-90002',
-      payload: { params: { priority: 'medium', description: 'Caller wants to know what her prescription is.' } },
+      // Sent after v256: the row records that its send was not a bare replay.
+      payload: { params: { priority: 'medium', description: 'Caller wants to know what her prescription is.' }, priorityUnconfirmed: false },
     };
     outbox.byKey.set(`call-${SID}`, row);
     outbox.byId.set(row.id, row);
@@ -533,6 +536,56 @@ describe('the priority the tool knows is a floor (github-actions P2s on #504, he
     addition.payload.priorityUnconfirmed = true;
     const again = await file({ call_sid: SID, ...HIGH });
     expect(again.result).toMatchObject({ already_filed: true, priority: 'medium', marked_urgent: false });
+    expect(String(again.result.fix)).toMatch(MUST_NOT);
+  });
+});
+
+describe('only the row\'s own verdict confirms a priority (github-actions P1 and P2 on #504, head 670eef2a)', () => {
+  const SID = 'CA0000000000000000000000000000f505';
+  const HIGH = { request_reason_id: 155, request_description: 'Caller is out of her latanoprost and needs a refill today.' };
+
+  it('a fresh high row the worker sent first, answered as a bare replay, is not called urgent', async () => {
+    const { TicketOutboxService } = await import('../services/ticketOutboxService');
+    // The worker claims the row this call has just written and sends it; the app
+    // answers with a bare replay of an earlier medium ticket. The live attempt
+    // then finds the row sent and answers with no replay metadata.
+    vi.mocked(TicketOutboxService.attemptSend).mockImplementationOnce(async (outboxId: string) => {
+      const row = outbox.byId.get(outboxId)!;
+      row.status = 'sent';
+      row.ticketNumber = 'VA-90011';
+      row.payload.priorityUnconfirmed = true;
+      return { success: true, ticketNumber: 'VA-90011', outboxId };
+    });
+    const r = await file({ call_sid: SID, ...HIGH });
+    expect(r.sent).toBeUndefined();
+    expect(r.result).toMatchObject({ success: true, marked_urgent: false });
+    expect(String(r.result.fix)).toMatch(MUST_NOT);
+  });
+
+  it('control: a fresh high row the worker sent first and the app took is called urgent', async () => {
+    const { TicketOutboxService } = await import('../services/ticketOutboxService');
+    vi.mocked(TicketOutboxService.attemptSend).mockImplementationOnce(async (outboxId: string) => {
+      const row = outbox.byId.get(outboxId)!;
+      row.status = 'sent';
+      row.ticketNumber = 'VA-90012';
+      row.payload.priorityUnconfirmed = false;
+      return { success: true, ticketNumber: 'VA-90012', outboxId };
+    });
+    const r = await file({ call_sid: SID, ...HIGH });
+    expect(r.result).toMatchObject({ success: true, priority: 'high', marked_urgent: true });
+    expect(String(r.result.fix)).toMatch(MAY_SAY);
+  });
+
+  it('a high row sent before v256, which carries no verdict, does not let a repeat say urgent', async () => {
+    await file({ call_sid: SID, ...HIGH }, { success: true, ticketNumber: 'VA-90013' });
+    const first = [...outbox.byId.values()][0];
+    delete first.payload.priorityUnconfirmed;
+    // The first filing was made by the process before the deploy, so this one
+    // holds nothing about the call.
+    resetGateAttempts();
+    const again = await file({ call_sid: SID, ...HIGH });
+    expect(again.sent).toBeUndefined();
+    expect(again.result).toMatchObject({ already_filed: true, marked_urgent: false });
     expect(String(again.result.fix)).toMatch(MUST_NOT);
   });
 });

@@ -49,13 +49,14 @@ vi.mock('../services/ticketOutboxService', () => ({
       }
       return { ...res, outboxId };
     }),
-    // The production rule, read from the module it lives in: a send the app
-    // answered with a bare replay leaves the ticket's priority unknown.
+    // The production rule: only a send recorded as not a bare replay confirms
+    // the payload's priority; a bare replay, or a row with no verdict (sent
+    // before v256), leaves it unknown.
     storedFiling: vi.fn(async (outboxId: string) => {
       const row = outbox.byId.get(outboxId);
       if (!row) return {};
       const params = row.payload.params as { priority?: string };
-      return { params, priority: row.payload.priorityUnconfirmed === true ? undefined : params.priority };
+      return { params, priority: row.payload.priorityUnconfirmed === false ? params.priority : undefined };
     }),
   },
 }));

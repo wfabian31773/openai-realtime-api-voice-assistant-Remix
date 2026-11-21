@@ -449,3 +449,36 @@ describe('an addition the worker already sent reports what its send confirmed (g
     expect(attemptSend).not.toHaveBeenCalled();
   });
 });
+
+describe('a fresh row reports what its row recorded, not what this call wrote (github-actions P1 on #504, head 670eef2a)', () => {
+  const SID = 'CA0000000000000000000000000000a508';
+  const params = {
+    departmentId: 3, requestTypeId: 30, requestReasonId: 155, patientFirstName: 'Testcaller', patientLastName: 'Tech',
+    patientPhone: '5555550147', description: 'Refill of latanoprost.', priority: 'high' as const,
+    callData: { callSid: SID }, idempotencyKey: `call-${SID}`,
+  };
+
+  it.each([
+    // The worker claimed this call's new row first and the app answered a bare
+    // replay; the live attempt then answers plain success with no replay flags.
+    [{ params, priority: undefined }, undefined],
+    [{ params, priority: 'high' }, 'high'],
+  ])('a new row whose stored filing is %o reports %s', async (stored, expected) => {
+    writeToOutbox.mockResolvedValueOnce({ outboxId: 'ob-new', alreadyExists: false });
+    attemptSend.mockResolvedValueOnce({ success: true, ticketNumber: 'VA-90011', outboxId: 'ob-new' });
+    storedFiling.mockResolvedValueOnce(stored);
+    const res = await createTicketDurable(params as never);
+    expect(res).toMatchObject({ success: true, ticketNumber: 'VA-90011' });
+    expect(res.filedPriority).toBe(expected);
+    expect(storedFiling).toHaveBeenLastCalledWith('ob-new');
+  });
+
+  it('a row that cannot be read confirms nothing', async () => {
+    writeToOutbox.mockResolvedValueOnce({ outboxId: 'ob-new', alreadyExists: false });
+    attemptSend.mockResolvedValueOnce({ success: true, ticketNumber: 'VA-90011', outboxId: 'ob-new' });
+    storedFiling.mockRejectedValueOnce(new Error('database unavailable'));
+    const res = await createTicketDurable(params as never);
+    expect(res).toMatchObject({ success: true, ticketNumber: 'VA-90011' });
+    expect(res.filedPriority).toBeUndefined();
+  });
+});

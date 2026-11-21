@@ -286,8 +286,10 @@ export class TicketOutboxService {
 
   /**
    * The create-ticket parameters an outbox row holds, if it holds one, and the
-   * priority the ticket is known to hold from it: the payload's own, or none
-   * when the app answered the row's send with a bare replay.
+   * priority the ticket is known to hold from it: the payload's own only when
+   * the row's send was recorded as not a bare replay; none when it was, when
+   * the row is not sent yet, or when it was sent before v256 and carries no
+   * verdict.
    */
   static async storedFiling(
     outboxId: string,
@@ -299,7 +301,10 @@ export class TicketOutboxService {
       .limit(1);
     if (!row || !isCreateTicketPayload(row.payload)) return {};
     const { params, priorityUnconfirmed } = row.payload;
-    return { params, priority: priorityUnconfirmed === true ? undefined : params.priority };
+    // Only an explicit confirmation counts: a row sent before v256 carries no
+    // flag, and its send may have been a bare replay (github-actions P2 on
+    // #504, head `670eef2a`).
+    return { params, priority: priorityUnconfirmed === false ? params.priority : undefined };
   }
 
   static async attemptSend(outboxId: string, options: { liveCaller?: boolean } = {}): Promise<OutboxSendResult> {
