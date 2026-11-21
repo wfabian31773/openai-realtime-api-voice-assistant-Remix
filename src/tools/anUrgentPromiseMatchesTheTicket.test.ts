@@ -607,6 +607,42 @@ describe('the misspelling reader', () => {
   });
 });
 
+// github-actions P2 on #504, head 90a774b2, declined: the misspelling now
+// outranks the rules after 155, which is what the correct spelling has always
+// done. These tests pin that a misspelling classifies exactly as the correct
+// spelling does, so moving the fuzzy match below the specific rules (the fix
+// the review proposed) would fail here: "Lumigan" post-op would read 155 and
+// "Lomigan" post-op 156. Measured, department 3 agent tickets of 120 days: 0
+// under 156 carried a misspelt glaucoma drug, and 0 under 156, 214, 211, 213
+// or 217 named a correctly spelt one (2,507 did under 155).
+describe('a misspelling classifies as the correct spelling does (github-actions P2 on #504, head 90a774b2)', () => {
+  const templates = [
+    'post-op drop refill for {drug}',
+    'refill of my {drug} after surgery',
+    'new prescription for {drug}',
+    'patient ran out of {drug}',
+    'pharmacy clarification: how often to use {drug}',
+    'prior authorization for {drug}',
+    'transfer my {drug} prescription to another pharmacy',
+  ];
+  const pairs: Array<[string, string]> = [['Lumigan', 'Lomigan'], ['brimonidine', 'bromonidine'], ['Rhopressa', 'Repressa'], ['dorzolamide', 'dazolamide']];
+  for (const t of templates) {
+    for (const [right, wrong] of pairs) {
+      it(`"${t}": ${wrong} reads as ${right}`, () => {
+        const spelt = classifyTech(t.replace('{drug}', right))?.requestReasonId;
+        expect(classifyTech(t.replace('{drug}', wrong))?.requestReasonId).toBe(spelt);
+      });
+    }
+  }
+  it('no post-surgery drug is read as a glaucoma drug', () => {
+    for (const d of ['prednisolone', 'durezol', 'difluprednate', 'eysuvis', 'lotemax', 'loteprednol', 'inveltys', 'moxifloxacin',
+      'vigamox', 'ofloxacin', 'ciprofloxacin', 'tobramycin', 'tobradex', 'besivance', 'ketorolac', 'acuvail', 'prolensa',
+      'bromfenac', 'nevanac', 'ilevro', 'omnipred', 'maxitrol', 'polytrim', 'ocuflox', 'zymaxid', 'econopred']) {
+      expect(namesAGlaucomaDrug(`refill of ${d} drops`), d).toBe(false);
+    }
+  });
+});
+
 describe('the prompt', () => {
   const prompt = buildTechPrompt({ callerPhone: '+17605551234' });
   it('no longer tells the model to say a glaucoma request is marked urgent', () => {
