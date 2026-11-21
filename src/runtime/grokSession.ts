@@ -51,6 +51,7 @@ import { normalizeSpokenLanguage, sttLanguageHint, type SpokenLanguage } from ".
 import type { GrokRuntimeVoiceConfig } from "./config";
 import type { GrokClientEvent, GrokServerEvent, GrokSessionConfig, GrokToolDefinition } from "./wireTypes";
 import { handshakeTimeoutMs } from "./providerConnect";
+import { eventLoopSnapshot, startEventLoopWatch } from "./eventLoopLag";
 
 export interface GrokTransport {
   send(data: string): void;
@@ -80,7 +81,75 @@ export interface GrokTransport {
   commitBuffered?(): void;
   /** xAI / Cloudflare upgrade headers. PHI-free. */
   upgradeHeaders?(): { xTraceId?: string; cfRay?: string };
+  /**
+   * The session saw a provider `error` event it treats as fatal. Its type and
+   * code only: the message can echo what the caller said (v259).
+   */
+  noteProviderError?(type: string | undefined, code: string | undefined): void;
+  /** How the socket ended, for the provider-close row (v259). PHI-free. */
+  closeDiagnostics?(): ProviderCloseDiagnostics;
 }
+
+/**
+ * How an xAI socket ended (v259). Every field is about the connection, never
+ * the call: no audio, no transcript, no provider error message.
+ *
+ * WHY THE RAW SOCKET: once a connection is open, `ws` 8 swallows the TCP
+ * socket's own `error` (`socketOnError` destroys the socket and emits nothing
+ * on the WebSocket), so a reset and an orderly close both arrive as a bare
+ * `close 1006` with no error. Every runtime drop of 2026-11-21 read exactly
+ * that. The raw socket still says which it was: `error` ECONNRESET for a
+ * reset, `end` for a FIN. So `socketErrorCode` and `socketEndReceived` are
+ * the two fields the drops have been missing.
+ */
+export interface ProviderCloseDiagnostics {
+  /** What ended the connection first. */
+  firstSignal:
+    | "provider_error_event"
+    | "socket_error"
+    | "socket_fin"
+    | "socket_close"
+    | "client_close"
+    | null;
+  closeCode: number | null;
+  closeReason: string | null;
+  /** The raw TCP socket's error code (ECONNRESET, ETIMEDOUT, EPIPE). */
+  socketErrorCode: string | null;
+  socketErrorMessage: string | null;
+  /** The peer sent a TCP FIN without a WebSocket close frame. */
+  socketEndReceived: boolean;
+  /** An error the WebSocket itself emitted (a protocol error). */
+  wsErrorMessage: string | null;
+  providerErrorType: string | null;
+  providerErrorCode: string | null;
+  /** We called close() before the socket ended. */
+  closedByUs: boolean;
+  openForMs: number | null;
+  msSinceServerEvent: number | null;
+  msSinceClientSend: number | null;
+  /** Bytes queued for sending when it closed. */
+  bufferedAmount: number | null;
+  /** xAI sockets open in this process when it closed, this one included. */
+  openSockets: number | null;
+  /** The peer's address (a Cloudflare edge). */
+  remoteAddress: string | null;
+  /** This process's event loop when it closed (eventLoopLag.ts). */
+  eventLoopMaxMs: number | null;
+  msSinceLoopTick: number | null;
+  xTraceId: string | null;
+  cfRay: string | null;
+}
+
+/** Text from the network stack, capped; it never carries call content. */
+function capText(text: string | undefined | null, max: number): string | null {
+  if (!text) return null;
+  const flat = text.replace(/\s+/g, " ").trim();
+  if (!flat) return null;
+  return flat.length > max ? `${flat.slice(0, max)}…` : flat;
+}
+
+/** xAI sockets open in this process. Counted for the close row. */
+let openGrokSockets = 0;
 
 export type GrokSessionState =
   | "idle"
@@ -584,6 +653,7 @@ export class GrokVoiceSession {
           break;
         }
         this.state = "error";
+        this.transport.noteProviderError?.(event.error?.type, event.error?.code);
         this.handlers.onError?.(
           new Error(
             `Grok provider error: ${event.error?.message ?? event.error?.type ?? "unknown"}`,
@@ -893,35 +963,105 @@ export class WebSocketGrokTransport implements GrokTransport {
   private committed = false;
   private firstEventWaiters: Array<(arrived: boolean) => void> = [];
   private headers: { xTraceId?: string; cfRay?: string } = {};
+  // v259: how this socket ended. See ProviderCloseDiagnostics.
+  private openedAtMs: number | null = null;
+  private lastInboundAtMs: number | null = null;
+  private lastSendAtMs: number | null = null;
+  private closedAtMs: number | null = null;
+  private firstSignal: ProviderCloseDiagnostics["firstSignal"] = null;
+  private closeCode: number | null = null;
+  private closeReason: string | null = null;
+  private socketErrorCode: string | null = null;
+  private socketErrorMessage: string | null = null;
+  private socketEndReceived = false;
+  private wsErrorMessage: string | null = null;
+  private providerErrorType: string | null = null;
+  private providerErrorCode: string | null = null;
+  private closedByUs = false;
+  private bufferedAtClose: number | null = null;
+  private openSocketsAtClose: number | null = null;
+  private remoteAddress: string | null = null;
+  private loopAtClose: { maxLagMs: number | null; msSinceLastTick: number | null } | null = null;
+  private counted = false;
 
-  constructor(private readonly apiKey: string, private readonly model: string) {}
+  constructor(
+    private readonly apiKey: string,
+    private readonly model: string,
+    /** Tests only: a local server in place of xAI's endpoint. */
+    private readonly endpoint: string = "wss://api.x.ai/v1/realtime",
+  ) {}
+
+  private signal(kind: NonNullable<ProviderCloseDiagnostics["firstSignal"]>): void {
+    if (this.firstSignal === null) this.firstSignal = kind;
+  }
+
+  private uncount(): void {
+    if (!this.counted) return;
+    this.counted = false;
+    openGrokSockets = Math.max(0, openGrokSockets - 1);
+  }
 
   async connect(): Promise<void> {
+    startEventLoopWatch();
     const { WebSocket } = await import("ws");
-    const url = `wss://api.x.ai/v1/realtime?model=${encodeURIComponent(this.model)}`;
+    const url = `${this.endpoint}?model=${encodeURIComponent(this.model)}`;
     this.ws = new WebSocket(url, {
       headers: { Authorization: `Bearer ${this.apiKey}` },
       handshakeTimeout: handshakeTimeoutMs(),
     });
-    this.ws.on("upgrade", (res: { headers: Record<string, string | string[] | undefined> }) => {
-      const raw = res.headers;
-      const headerValue = (v: string | string[] | undefined) =>
-        Array.isArray(v) ? v[0] : v;
-      const trace = headerValue(raw["x-trace-id"]);
-      const ray = headerValue(raw["cf-ray"]);
-      this.headers = {
-        ...(trace ? { xTraceId: trace } : {}),
-        ...(ray ? { cfRay: ray } : {}),
-      };
+    this.ws.on(
+      "upgrade",
+      (res: {
+        headers: Record<string, string | string[] | undefined>;
+        socket?: import("node:net").Socket;
+      }) => {
+        const raw = res.headers;
+        const headerValue = (v: string | string[] | undefined) =>
+          Array.isArray(v) ? v[0] : v;
+        const trace = headerValue(raw["x-trace-id"]);
+        const ray = headerValue(raw["cf-ray"]);
+        this.headers = {
+          ...(trace ? { xTraceId: trace } : {}),
+          ...(ray ? { cfRay: ray } : {}),
+        };
+        // The raw socket is the only thing that still knows a reset from a
+        // FIN once `ws` has swallowed the error (see ProviderCloseDiagnostics).
+        // Listening adds no handler `ws` depends on and changes nothing it does.
+        const socket = res.socket;
+        if (socket) {
+          this.remoteAddress = socket.remoteAddress ?? null;
+          socket.on("error", (err: NodeJS.ErrnoException) => {
+            this.socketErrorCode = err.code ?? null;
+            this.socketErrorMessage = capText(err.message, 160);
+            this.signal("socket_error");
+            console.warn(
+              `[SESSION] socket error code=${err.code ?? "none"} message=${this.socketErrorMessage ?? "none"}`,
+            );
+          });
+          socket.on("end", () => {
+            this.socketEndReceived = true;
+            this.signal("socket_fin");
+          });
+        }
+      },
+    );
+    this.ws.on("open", () => {
+      this.openedAtMs = Date.now();
+      if (!this.counted) {
+        this.counted = true;
+        openGrokSockets += 1;
+      }
     });
     this.ws.on("message", (data: Buffer) => this.handleInbound(data.toString("utf8")));
     this.ws.on("error", (err: Error) => {
+      this.wsErrorMessage = capText(err.message, 160);
       this.wakeFirstEventWaiters(false);
       this.errorHandler?.(err);
     });
     this.ws.on("close", (code: number, reason: Buffer) => {
       const why = reason?.toString("utf8") ?? "";
-      console.log(`[SESSION] closed code=${code} reason=${why || "none"}`);
+      this.recordClose(code, why);
+      console.log(`[SESSION] closed code=${code} reason=${why || "none"} ${this.closeLine()}`);
       this.wakeFirstEventWaiters(false);
       this.closeHandler?.();
     });
@@ -931,7 +1071,75 @@ export class WebSocketGrokTransport implements GrokTransport {
     });
   }
 
+  private recordClose(code: number, reason: string): void {
+    this.closedAtMs = Date.now();
+    this.closeCode = code;
+    this.closeReason = capText(reason, 120);
+    this.signal("socket_close");
+    this.bufferedAtClose = this.ws?.bufferedAmount ?? null;
+    this.openSocketsAtClose = this.counted ? openGrokSockets : null;
+    this.loopAtClose = eventLoopSnapshot(this.closedAtMs);
+    this.uncount();
+  }
+
+  /** The close's PHI-free details, appended to the `[SESSION] closed` line. */
+  private closeLine(): string {
+    const d = this.closeDiagnostics();
+    const ms = (v: number | null) => (v === null ? "?" : `${v}ms`);
+    return [
+      `first=${d.firstSignal ?? "?"}`,
+      `by=${d.closedByUs ? "us" : "peer"}`,
+      `socketError=${d.socketErrorCode ?? "none"}`,
+      `fin=${d.socketEndReceived}`,
+      `open=${ms(d.openForMs)}`,
+      `lastServer=${ms(d.msSinceServerEvent)}`,
+      `lastSend=${ms(d.msSinceClientSend)}`,
+      `buffered=${d.bufferedAmount ?? "?"}`,
+      `sockets=${d.openSockets ?? "?"}`,
+      `loopMax=${ms(d.eventLoopMaxMs)}`,
+      `loopTick=${ms(d.msSinceLoopTick)}`,
+      `peer=${d.remoteAddress ?? "?"}`,
+      `trace=${d.xTraceId ?? "?"}`,
+      `ray=${d.cfRay ?? "?"}`,
+    ].join(" ");
+  }
+
+  noteProviderError(type: string | undefined, code: string | undefined): void {
+    this.providerErrorType = capText(type, 60);
+    this.providerErrorCode = capText(code, 60);
+    this.signal("provider_error_event");
+  }
+
+  closeDiagnostics(): ProviderCloseDiagnostics {
+    const at = this.closedAtMs ?? Date.now();
+    const since = (t: number | null) => (t === null ? null : Math.max(0, at - t));
+    const loop = this.loopAtClose ?? eventLoopSnapshot(at);
+    return {
+      firstSignal: this.firstSignal,
+      closeCode: this.closeCode,
+      closeReason: this.closeReason,
+      socketErrorCode: this.socketErrorCode,
+      socketErrorMessage: this.socketErrorMessage,
+      socketEndReceived: this.socketEndReceived,
+      wsErrorMessage: this.wsErrorMessage,
+      providerErrorType: this.providerErrorType,
+      providerErrorCode: this.providerErrorCode,
+      closedByUs: this.closedByUs,
+      openForMs: since(this.openedAtMs),
+      msSinceServerEvent: since(this.lastInboundAtMs),
+      msSinceClientSend: since(this.lastSendAtMs),
+      bufferedAmount: this.bufferedAtClose,
+      openSockets: this.openSocketsAtClose,
+      remoteAddress: this.remoteAddress,
+      eventLoopMaxMs: loop.maxLagMs,
+      msSinceLoopTick: loop.msSinceLastTick,
+      xTraceId: this.headers.xTraceId ?? null,
+      cfRay: this.headers.cfRay ?? null,
+    };
+  }
+
   private handleInbound(data: string): void {
+    this.lastInboundAtMs = Date.now();
     if (!this.firstEventArrived) {
       this.firstEventArrived = true;
       this.wakeFirstEventWaiters(true);
@@ -975,6 +1183,10 @@ export class WebSocketGrokTransport implements GrokTransport {
     this.errorHandler = null;
     this.closeHandler = null;
     this.wakeFirstEventWaiters(false);
+    this.closedByUs = true;
+    this.signal("client_close");
+    // Its close listener is about to be removed, so it is uncounted here.
+    this.uncount();
     if (this.ws) {
       this.ws.removeAllListeners();
       try {
@@ -991,11 +1203,18 @@ export class WebSocketGrokTransport implements GrokTransport {
   }
 
   send(data: string): void {
-    this.ws?.send(data);
+    if (!this.ws) return;
+    this.lastSendAtMs = Date.now();
+    this.ws.send(data);
   }
 
   close(): void {
-    this.ws?.close();
+    if (!this.ws) return;
+    if (this.closedAtMs === null) {
+      this.closedByUs = true;
+      this.signal("client_close");
+    }
+    this.ws.close();
   }
 
   onMessage(cb: (data: string) => void): void {

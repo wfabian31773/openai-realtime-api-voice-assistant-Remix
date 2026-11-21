@@ -276,6 +276,8 @@ import { makeRecordingStarter } from "./callRecording";
 import { gradeRuntimeCall } from "./runtimeGrading";
 import { logRuntimeFollowUps } from "./followUpTelemetry";
 import { logCallerAudio } from "./callerAudioTelemetry";
+import { logProviderClose } from "./providerCloseTelemetry";
+import type { ProviderCloseDiagnostics } from "./grokSession";
 import { CallerAudioMeter, type CallerAudioCounts } from "./callerAudioEnergy";
 import { withGreetingAlreadyPlayed } from "./greetingAlreadyPlayed";
 import { withNewOrExistingAsk } from "./newOrExistingAsk";
@@ -547,6 +549,17 @@ export interface VoiceRuntimeOptions {
     ids: { callLogId?: string },
     opts?: { after?: Promise<unknown> },
   ) => Promise<unknown>;
+  /**
+   * Why the xAI connection ended, on a call that ended as `provider_failure`
+   * (v259, providerCloseTelemetry.ts) — one PHI-free row, beside the writers
+   * above and under the same rules. Injected for tests.
+   */
+  logProviderClose?: (
+    call: { callSid: string; outcome: string },
+    diagnostics: ProviderCloseDiagnostics | undefined,
+    ids: { callLogId?: string },
+    opts?: { after?: Promise<unknown> },
+  ) => Promise<unknown>;
   /** Bound on opening the call row. Defaults to CALL_ROW_DEADLINE_MS. */
   callRowDeadlineMs?: number;
   /**
@@ -678,6 +691,7 @@ export function mountVoiceRuntime(
   const logIdentity = options.logIdentity ?? logRuntimeIdentity;
   const logAudio = options.logCallerAudio ?? logCallerAudio;
   const logTicketTools = options.logTicketTools ?? logTicketToolOutcomes;
+  const logClose = options.logProviderClose ?? logProviderClose;
   let laneSourcePromise: Promise<LaneSource> | null = null;
   const laneSource = () => {
     if (options.laneSource) return Promise.resolve(options.laneSource);
@@ -2019,8 +2033,22 @@ export function mountVoiceRuntime(
               { callLogId },
               { after: identityWritten },
             ).catch(() => undefined);
-            void logAudio(record, callerAudio.counts(), { callLogId }, { after: ticketToolsWritten })
+            const audioWritten = logAudio(record, callerAudio.counts(), { callLogId }, { after: ticketToolsWritten })
               .catch(() => undefined);
+            /**
+             * AND WHY THE xAI CONNECTION ENDED (v259), only on a call that
+             * ended as `provider_failure`: the raw socket's signal, the
+             * timings, the trace ids and how late the event loop ran. Read
+             * here, after the close, from the transport the session ran on.
+             * Same discipline as the writers above; changes nothing a caller
+             * hears.
+             */
+            void logClose(
+              { callSid: record.callSid, outcome: record.outcome },
+              transport.closeDiagnostics?.(),
+              { callLogId },
+              { after: audioWritten },
+            ).catch(() => undefined);
             // SI Assistant callbacks (and the outbound leg) are reported to
             // the ticketing app so they land on the ticket and in My Messages.
             // Payload is PHI-bounded: no phone, body or transcript.

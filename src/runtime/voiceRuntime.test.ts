@@ -21,6 +21,7 @@ vi.hoisted(() => {
   process.env.XAI_API_KEY ||= 'test-unused';
 });
 import express from "express";
+import { readFileSync } from "node:fs";
 import http from "node:http";
 import { z } from "zod";
 import twilio from "twilio";
@@ -43,6 +44,7 @@ import { deployedBuildSha, deployedBuild } from "./buildIdentity";
 import { VOICE_RUNTIME_DEPLOY_MARKER } from "./readiness";
 import { transferDestinationStatus, transferUnavailableReason } from "./runtimeTransfer";
 import type { GrokServerEvent } from "./wireTypes";
+import type { ProviderCloseDiagnostics } from "./grokSession";
 import type { LaneConfig, LaneSource } from "./laneRegistry";
 import { registerCallHandoff, registeredHandoffCount } from "../tools/handoffBroker";
 import { runSetupFailureFloor, type SetupFailureContext } from "./setupFailureFloor";
@@ -175,6 +177,11 @@ class FakeGrokTransport implements RuntimeTransport {
   emitClose(): void {
     this.onCls?.();
   }
+  /** v259: what the real transport records about how its socket ended. */
+  public diagnostics = { firstSignal: "socket_error", socketErrorCode: "ECONNRESET", closeCode: 1006 };
+  closeDiagnostics(): ProviderCloseDiagnostics {
+    return this.diagnostics as unknown as ProviderCloseDiagnostics;
+  }
   ofType(type: string): Array<Record<string, unknown>> {
     return this.sent.filter((e) => e.type === type);
   }
@@ -216,6 +223,7 @@ interface Harness {
   persistedIdentity: Array<unknown>;
   /** Every caller-audio row the runtime wrote, in order (v64). */
   audioRows: Array<{ callSid: string; outcome: string; counts: unknown }>;
+  closeRows: Array<{ callSid: string; outcome: string; diagnostics: unknown }>;
   /**
    * Calls the teardown request sweep saw, in order.
    *
@@ -267,6 +275,7 @@ async function harness(
     gradeCall?: (record: unknown, ids: unknown) => Promise<unknown>;
     logFollowUps?: (record: unknown, ids: unknown) => Promise<unknown>;
     logCallerAudio?: (call: unknown, counts: unknown, ids: unknown) => Promise<unknown>;
+    logProviderClose?: (call: unknown, diagnostics: unknown, ids: unknown) => Promise<unknown>;
     startRecording?: (callSid: string, host: string | undefined) => Promise<unknown>;
     persistBeforeSweepMs?: number;
     openCallRow?: (row: unknown) => Promise<string | undefined>;
@@ -288,6 +297,7 @@ async function harness(
   const persisted: Array<Record<string, unknown>> = [];
   const persistedIdentity: Array<unknown> = [];
   const audioRows: Array<{ callSid: string; outcome: string; counts: unknown }> = [];
+  const closeRows: Array<{ callSid: string; outcome: string; diagnostics: unknown }> = [];
   const swept: Array<Record<string, unknown>> = [];
   const pcpSwept: Array<Record<string, unknown>> = [];
   const setupFailures: Array<Record<string, unknown>> = [];
@@ -351,6 +361,16 @@ async function harness(
         });
         return true;
       }),
+    logProviderClose:
+      (over.logProviderClose as never) ??
+      (async (call, diagnostics) => {
+        closeRows.push({
+          callSid: (call as { callSid: string }).callSid,
+          outcome: (call as { outcome: string }).outcome,
+          diagnostics,
+        });
+        return true;
+      }),
     persistCall:
       over.persistCall ??
       (async (record, identity) => {
@@ -389,6 +409,7 @@ async function harness(
     persisted,
     persistedIdentity,
     audioRows,
+    closeRows,
     swept,
     pcpSwept,
     base: `http://127.0.0.1:${port}`,
@@ -2886,3 +2907,50 @@ describe("SI Assistant live calls", () => {
     sessions.drop(session.sessionId);
   });
 });
+
+/**
+ * v259: why the xAI connection ended reaches its own row. Driven at the
+ * runtime, because a helper test proves the writer and not that teardown
+ * hands it the transport the session ran on (failure mode 10).
+ */
+describe("the provider-close row (v259)", () => {
+  it("hands a mid-call provider drop to the writer with the transport's own diagnostics", async () => {
+    const h = await harness();
+    const answered = await post(h, "/voice/optical", { CallSid: "CA-close1", From: "+1", To: "+2" });
+    await openStream(h, "CA-close1", tokenFrom(answered.text));
+    await waitFor(() => h.transports.length === 1, "the transport to register");
+    h.transports[0].emit({ type: "session.updated" } as GrokServerEvent);
+    await settle(4);
+    h.transports[0].emitClose();
+    await waitFor(() => h.closeRows.some((r) => r.callSid === "CA-close1"), "the close row");
+    const row = h.closeRows.find((r) => r.callSid === "CA-close1");
+    expect(row?.outcome).toBe("provider_failure");
+    expect(row?.diagnostics).toBe(h.transports[0].diagnostics);
+    await h.close();
+  });
+
+  it("is handed the call's own outcome on a caller hangup, so the writer can decline it", async () => {
+    const h = await harness();
+    const answered = await post(h, "/voice/optical", { CallSid: "CA-close2", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA-close2", tokenFrom(answered.text));
+    await waitFor(() => h.transports.length === 1, "the transport to register");
+    h.transports[0].emit({ type: "session.updated" } as GrokServerEvent);
+    await settle(4);
+    ws.close();
+    await waitFor(() => h.closeRows.some((r) => r.callSid === "CA-close2"), "the close row");
+    expect(h.closeRows.find((r) => r.callSid === "CA-close2")?.outcome).toBe("caller_hangup");
+    await h.close();
+  });
+
+  it("is never awaited by teardown, and runs after the caller-audio row", () => {
+    const runtimeSource = readFileSync(new URL("./voiceRuntime.ts", import.meta.url), "utf8");
+    const at = runtimeSource.indexOf("void logClose(");
+    expect(at).toBeGreaterThan(-1);
+    const call = runtimeSource.slice(at, at + 320);
+    expect(call).toContain("transport.closeDiagnostics?.()");
+    expect(call).toContain("{ after: audioWritten }");
+    expect(call).toContain(".catch(() => undefined)");
+    expect(runtimeSource.indexOf("const audioWritten = logAudio(")).toBeLessThan(at);
+  });
+});
+
