@@ -99,8 +99,8 @@ export function recordNamesFor(
   // least one of them present. A shared record name with neither key (two
   // people charted under one name, a parent and a child) is not proof, so the
   // payload is left for the app to refuse (Codex P1 on #506).
-  const attachedDob = isoDOB(attached.dateOfBirth);
-  if (same.personId !== attached.personId || same.dateOfBirth !== attachedDob) return undefined;
+  // Both come from validatedPatientFor, so the date is already in one form.
+  if (same.personId !== attached.personId || same.dateOfBirth !== attached.dateOfBirth) return undefined;
   if (!same.personId && !same.dateOfBirth) return undefined;
   if (nameKey(same.firstName) !== nameKey(attached.firstName) || nameKey(same.lastName) !== nameKey(attached.lastName)) return undefined;
   return { firstName: attached.firstName, lastName: attached.lastName };
