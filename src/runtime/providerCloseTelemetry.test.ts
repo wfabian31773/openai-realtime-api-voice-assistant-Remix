@@ -125,8 +125,10 @@ describe("the event-loop watch (v259)", () => {
   it("shows a stall while it is still under way, and after it has ended", async () => {
     startEventLoopWatch();
     // The histogram measures a delay against its previous sample, so it needs
-    // to have sampled once; in production it starts at the first call.
-    await new Promise((r) => setTimeout(r, 100));
+    // to have sampled once; in production it starts at the first call. Past a
+    // second, the heartbeat has run, so an unblocked loop reads young.
+    await new Promise((r) => setTimeout(r, 1_100));
+    expect(eventLoopSnapshot().msSinceLastTick).toBeLessThan(900);
     const start = Date.now();
     while (Date.now() - start < 1_300) {
       // Block the loop: nothing else can run, the heartbeat included.

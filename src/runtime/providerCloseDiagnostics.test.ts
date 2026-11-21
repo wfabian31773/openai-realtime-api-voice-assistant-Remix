@@ -128,6 +128,7 @@ describe("why an xAI socket ended (v259)", () => {
     const url = await server((_s, req) => resets.push(() => req.socket.resetAndDestroy()));
     const stalled = await open(url);
     stalled.t.detachAndClose();
+    expect(stalled.t.closeDiagnostics()).toMatchObject({ firstSignal: "client_close", closedByUs: true });
     const live = await open(url);
     resets[1]();
     await live.closed;
