@@ -234,6 +234,48 @@ describe('the rule at the filing step (prepareTicketIdentity)', () => {
     expect(input).toMatchObject({ first_name: 'Chris', last_name: LAST });
   });
 
+  describe('a date of birth that does not read stops the rename at the gate (github-actions review of #506, round 2)', () => {
+    it('a name the person answers to beside a date that does not read is not renamed, and the date is not replaced', () => {
+      hold();
+      const out = prepareTicketIdentity({ call_sid: sid, first_name: 'Chris', last_name: LAST, date_of_birth: 'not a date' }, { recordNames: true });
+      expect(out.input).toMatchObject({ first_name: 'Chris', last_name: LAST, date_of_birth: 'not a date' });
+      // With no spoken date to fall back on, the gate asks for it rather than filing the record's date beside an alias.
+      expect(out.missing).toBe('date_of_birth');
+    });
+
+    it('a partial date beside a name the person answers to is not renamed', () => {
+      hold();
+      const { input } = prepareTicketIdentity({ call_sid: sid, first_name: 'Chris', last_name: LAST, date_of_birth: '1961' }, { recordNames: true });
+      expect(input).toMatchObject({ first_name: 'Chris' });
+      expect(input.date_of_birth).not.toBe(DOB);
+    });
+
+    it('the record\'s own spelling beside a date that does not read still takes the record\'s date, as before', () => {
+      hold();
+      const out = prepareTicketIdentity({ call_sid: sid, first_name: 'Christopher', last_name: LAST, date_of_birth: 'not a date' }, { recordNames: true });
+      expect(out.input).toMatchObject({ first_name: 'Christopher', last_name: LAST, date_of_birth: DOB });
+      expect(out.missing).toBeUndefined();
+    });
+
+    it('a date that reads and is the record\'s, in another form, still renames', () => {
+      hold();
+      const { input } = prepareTicketIdentity({ call_sid: sid, first_name: 'Chris', last_name: LAST, date_of_birth: '04/05/1961' }, { recordNames: true });
+      expect(input).toMatchObject({ first_name: 'Christopher', last_name: LAST, date_of_birth: DOB });
+    });
+
+    it('a held person with no date of birth, beside a date the caller gave, is not renamed', () => {
+      hold({ dateOfBirth: undefined });
+      const { input } = prepareTicketIdentity({ call_sid: sid, first_name: 'Chris', last_name: LAST, date_of_birth: '04/05/1961' }, { recordNames: true });
+      expect(input).toMatchObject({ first_name: 'Chris', last_name: LAST, date_of_birth: '04/05/1961' });
+    });
+
+    it('without the option nothing changes: a date that does not read is still replaced by the record\'s', () => {
+      hold();
+      const { input } = prepareTicketIdentity({ call_sid: sid, first_name: 'Chris', last_name: LAST, date_of_birth: 'not a date' });
+      expect(input).toMatchObject({ first_name: 'Chris', last_name: LAST, date_of_birth: DOB });
+    });
+  });
+
   it('the registry passes the option for the four queue filing tools', async () => {
     const { readFileSync } = await import('node:fs');
     const src = readFileSync(new URL('./registry.ts', import.meta.url), 'utf8');
@@ -316,6 +358,37 @@ describe('the rule at the create-ticket transport (recordNamesFor), for every ca
     expect(recordNamesFor(sid, 'Chris', LAST, undefined, { ...held, callSid: 'CA' + '7'.repeat(32) })).toBeUndefined();
     expect(recordNamesFor(sid, 'Chris', LAST, '1990-02-03', held)).toBeUndefined();
     expect(recordNamesFor(sid, 'Chris', LAST, undefined, undefined)).toBeUndefined();
+  });
+
+  describe('a date of birth given in part stops the rename at the transport (github-actions review of #506, round 2)', () => {
+    async function send(parts: Record<string, string>) {
+      hold();
+      const api = new TicketingApiClient();
+      fakeApp(api);
+      const validatedPatient = validatedPatientFor(sid, 'Chris', LAST)!;
+      await api.createTicket({ ...base, patientFirstName: 'Chris', patientLastName: LAST, validatedPatient, ...parts });
+      return posted[0].body;
+    }
+
+    it('a lone birth year that is not the record\'s is not renamed', async () => {
+      expect(await send({ patientBirthYear: '1990' })).toMatchObject({ patientFirstName: 'Chris' });
+    });
+
+    it('a year and a month with no day are not renamed', async () => {
+      expect(await send({ patientBirthYear: '1961', patientBirthMonth: '04' })).toMatchObject({ patientFirstName: 'Chris' });
+    });
+
+    it('a day alone is not renamed', async () => {
+      expect(await send({ patientBirthDay: '05' })).toMatchObject({ patientFirstName: 'Chris' });
+    });
+
+    it('blank parts are no date at all, and the person id still renames', async () => {
+      expect(await send({ patientBirthYear: ' ', patientBirthMonth: '', patientBirthDay: '' })).toMatchObject({ patientFirstName: 'Christopher' });
+    });
+
+    it('a complete date that is the record\'s still renames', async () => {
+      expect(await send({ patientBirthYear: '1961', patientBirthMonth: '4', patientBirthDay: '5' })).toMatchObject({ patientFirstName: 'Christopher' });
+    });
   });
 
   describe('a shared record name is not proof of the same person (Codex P1 on #506)', () => {

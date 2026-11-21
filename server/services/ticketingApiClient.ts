@@ -833,7 +833,11 @@ export class TicketingApiClient {
     });
     // v258: the payload carries the validated patient's own names when the
     // ones it was given are names that person answers to (recordNamesFor).
-    const recordNames = recordNamesFor(params.callData?.callSid,
+    // A birth year, month or day given alone is a date of birth that does not
+    // read: it stops the rename (github-actions review of #506, round 2).
+    const anyBirthPart = [params.patientBirthYear, params.patientBirthMonth, params.patientBirthDay]
+      .some((part) => (part ?? '').trim());
+    const recordNames = anyBirthPart && !suppliedDob ? undefined : recordNamesFor(params.callData?.callSid,
       params.patientFirstName, params.patientLastName, suppliedDob, params.validatedPatient);
     if (recordNames) params = { ...params, patientFirstName: recordNames.firstName, patientLastName: recordNames.lastName };
     console.info("[TICKETING API] Creating ticket:", {

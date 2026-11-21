@@ -126,9 +126,24 @@ export function prepareTicketIdentity(input: Record<string, unknown>, opts: { re
     }
   }
   if (match) {
-    filled.first_name = opts.recordNames ? match.firstName : value(input.first_name) || match.firstName;
-    filled.last_name = opts.recordNames ? match.lastName : value(input.last_name) || match.lastName;
-    if (match.dateOfBirth) filled.date_of_birth = match.dateOfBirth;
+    // v258: the record's names replace the caller's only when a date of
+    // birth the filing carries reads as a date and is the record's, or none
+    // was given. validatedPatientFor skips the date check when either date
+    // does not read, so without this a name the person answers to beside a
+    // date that does not read would be renamed and given the record's date
+    // (github-actions review of #506, round 2).
+    const givenDob = value(input.date_of_birth);
+    const dobAgrees = !givenDob || (!!match.dateOfBirth && isoDOB(givenDob) === match.dateOfBirth);
+    const rename = !!opts.recordNames && dobAgrees;
+    const callerFirst = value(input.first_name);
+    const callerLast = value(input.last_name);
+    const spellsTheRecord = (!callerFirst || nameKey(callerFirst) === nameKey(match.firstName))
+      && (!callerLast || nameKey(callerLast) === nameKey(match.lastName));
+    filled.first_name = rename ? match.firstName : callerFirst || match.firstName;
+    filled.last_name = rename ? match.lastName : callerLast || match.lastName;
+    // The record's date is filed beside the record's own spelling, as before;
+    // beside another spelling only once the given date agrees.
+    if (match.dateOfBirth && (!opts.recordNames || dobAgrees || spellsTheRecord)) filled.date_of_birth = match.dateOfBirth;
     const office = match.nextAppointment?.location || match.lastVisit?.location || match.confirmedClinic;
     if (office && !value(filled.location)) {
       filled.location = office;
