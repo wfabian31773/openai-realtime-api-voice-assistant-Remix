@@ -32,8 +32,9 @@ const OFFICES = new Set([
   'Montebello', 'Glendora', 'Mission Hills', 'Santa Ana', 'Anaheim', 'Redlands',
   'Fullerton', 'Northridge', 'Huntington Beach', 'Laguna Hills',
 ]);
+const directory = vi.hoisted(() => ({ up: true }));
 vi.mock('../services/consoleDirectory', () => ({
-  isDirectoryConfigured: () => true,
+  isDirectoryConfigured: () => directory.up,
   lookupLocation: async (name: string) => {
     const bare = name.replace(/^azul vision\s+/i, '').trim();
     if (/surgery center/i.test(bare)) return { canonical: bare, facilityKind: 'surgery_center' };
@@ -51,7 +52,7 @@ const { runTool } = await import('../tools/registry');
 await import('../tools/sharedPatientTools');
 const { resetGateAttempts } = await import('../tools/gateAttempts');
 const { resetStatedNames, noteStatedNameFromArgs } = await import('../tools/statedName');
-const { rememberVerifiedIdentity, resetVerifiedIdentities, confirmedClinicFor } = await import('../tools/verifiedIdentity');
+const { rememberVerifiedIdentity, resetVerifiedIdentities, confirmedClinicFor, verifiedClinicFor } = await import('../tools/verifiedIdentity');
 const { resetDraftedRequests, noteDraftedRequestFromArgs } = await import('../tools/draftedRequest');
 const { runRequestSweep } = await import('./sweepRunner');
 import type { SweepFiler } from './sweepRunner';
@@ -149,6 +150,7 @@ async function theCall(row: Row, opts: { confirm?: boolean } = {}) {
 }
 
 beforeEach(() => {
+  directory.up = true;
   resetGateAttempts();
   resetStatedNames();
   resetVerifiedIdentities();
@@ -245,7 +247,116 @@ describe('the real filer sends it on', () => {
 
   it('the store is read through a static import (one module copy on Node 20)', () => {
     const src = readFileSync(new URL('./sweepRunner.ts', import.meta.url), 'utf8');
-    expect(src).toMatch(/import \{[^}]*\bconfirmedClinicFor\b[^}]*\} from "\.\.\/tools\/verifiedIdentity";/);
+    expect(src).toMatch(/import \{[^}]*\bverifiedClinicFor\b[^}]*\} from "\.\.\/tools\/verifiedIdentity";/);
     expect(src).not.toMatch(/import\(\s*['"]\.\.\/tools\/verifiedIdentity['"]\s*\)/);
+  });
+});
+
+/**
+ * CODEX P1 ON #505: ONLY AN OFFICE THE DIRECTORY VERIFIED IS CARRIED.
+ *
+ * The call's office store also keeps the caller's words when
+ * `resolve_location` passes them through unverified: the ask is spent
+ * (`ask_exhausted`), or the Console directory is not configured. The in-call
+ * tools still read those (the ticketing API resolves the office), but the
+ * sweep files after the caller has gone and sends its office as the caller's
+ * own, which skips the Optical filter. Measured, swept agent tickets
+ * 2026-11-07..21 on calls whose `resolve_location` only passed an office
+ * through unverified: 3, all optical (below); none on surgery, tech or
+ * records. Each now files as it did before v257.
+ */
+const UNVERIFIED: { sid: string; ticket: string }[] = [
+  { sid: 'CAf55e006e8dc4db52ba5b4ce591acee29', ticket: 'VA-82586' },
+  { sid: 'CAe491f8bbc8497844c04352e5d4336fbe', ticket: 'VA-87956' },
+  { sid: 'CAcc8cf9fa9f711969c59e1d1a9e25d26b', ticket: 'VA-88009' },
+];
+
+/** Asks for an office the directory does not know until the ask is spent. */
+async function spendTheAsk(sid: string, spoken = 'Example Valley') {
+  let out: Record<string, unknown> = {};
+  for (let i = 0; i < 3; i++) {
+    out = await runTool('resolve_location', { queue: 'optical', spoken_location: spoken, call_sid: sid }) as Record<string, unknown>;
+  }
+  return out;
+}
+
+describe('an office passed through unverified is not carried by the sweep (Codex P1 on #505)', () => {
+  for (const row of UNVERIFIED) {
+    it(`${row.ticket} (${row.sid}): a spent ask's words stay off the swept ticket`, async () => {
+      noteStatedNameFromArgs('lookup_patient', { call_sid: row.sid, first_name: 'Testa', last_name: 'Lake' });
+      const out = await spendTheAsk(row.sid);
+      expect(out).toMatchObject({ success: true, resolved: false, verified: false, ask_exhausted: true });
+      // The in-call tools still get the caller's words; the sweep does not.
+      expect(confirmedClinicFor(row.sid)).toBe('Example Valley');
+      expect(verifiedClinicFor(row.sid)).toBeUndefined();
+      const f = filer();
+      const res = await runRequestSweep(record(row.sid, 'optical'), f);
+      expect(res.filed).toBe(true);
+      expect(f.calls[0].locationOfLastVisit).toBeUndefined();
+      expect(f.calls[0].locationSource).toBeUndefined();
+    });
+  }
+
+  it('with a certain identity, the record\'s office is sent as history, not the unverified words', async () => {
+    const row = { ...CORPUS.find((r) => r.ticket === 'VA-86024')!, sid: 'CA000000000000000000000000000000c1' };
+    await theCall(row, { confirm: false });
+    await spendTheAsk(row.sid);
+    const f = filer();
+    await runRequestSweep(record(row.sid, 'optical'), f);
+    expect(f.calls[0].locationOfLastVisit).toBe('Anaheim');
+    expect(f.calls[0].locationSource).toBe('history');
+  });
+
+  it('a surgery centre passed through on a spent ask is not carried either', async () => {
+    const sid = 'CA000000000000000000000000000000c2';
+    noteStatedNameFromArgs('lookup_patient', { call_sid: sid, first_name: 'Testa', last_name: 'Lake' });
+    let out: Record<string, unknown> = {};
+    for (let i = 0; i < 3; i++) {
+      out = await runTool('resolve_location', { queue: 'optical', spoken_location: 'Example Surgery Center', call_sid: sid }) as Record<string, unknown>;
+    }
+    expect(out).toMatchObject({ verified: false, ask_exhausted: true });
+    const f = filer();
+    await runRequestSweep(record(sid, 'optical'), f);
+    expect(f.calls[0].locationOfLastVisit).toBeUndefined();
+  });
+
+  it('with no directory configured, the words passed through are not carried', async () => {
+    directory.up = false;
+    const sid = 'CA000000000000000000000000000000c3';
+    noteStatedNameFromArgs('lookup_patient', { call_sid: sid, first_name: 'Testa', last_name: 'Lake' });
+    const out = await runTool('resolve_location', { queue: 'optical', spoken_location: 'Montebello', call_sid: sid });
+    expect(out).toMatchObject({ success: true, resolved: false, verified: false });
+    expect(confirmedClinicFor(sid)).toBe('Montebello');
+    const f = filer();
+    await runRequestSweep(record(sid, 'optical'), f);
+    expect(f.calls[0].locationOfLastVisit).toBeUndefined();
+  });
+
+  it('a verified office after an unverified one is carried', async () => {
+    const sid = 'CA000000000000000000000000000000c4';
+    noteStatedNameFromArgs('lookup_patient', { call_sid: sid, first_name: 'Testa', last_name: 'Lake' });
+    directory.up = false;
+    await runTool('resolve_location', { queue: 'optical', spoken_location: 'The one by me', call_sid: sid });
+    directory.up = true;
+    const out = await runTool('resolve_location', { queue: 'optical', spoken_location: 'Glendora', call_sid: sid });
+    expect(out).toMatchObject({ verified: true });
+    const f = filer();
+    await runRequestSweep(record(sid, 'optical'), f);
+    expect(f.calls[0].locationOfLastVisit).toBe('Glendora');
+    expect(f.calls[0].locationSource).toBe('caller');
+  });
+
+  it('an unverified office after a verified one replaces it, so the sweep carries neither', async () => {
+    const sid = 'CA000000000000000000000000000000c5';
+    noteStatedNameFromArgs('lookup_patient', { call_sid: sid, first_name: 'Testa', last_name: 'Lake' });
+    await runTool('resolve_location', { queue: 'optical', spoken_location: 'Glendora', call_sid: sid });
+    expect(verifiedClinicFor(sid)).toBe('Glendora');
+    directory.up = false;
+    await runTool('resolve_location', { queue: 'optical', spoken_location: 'Actually the other one', call_sid: sid });
+    expect(confirmedClinicFor(sid)).toBe('Actually the other one');
+    expect(verifiedClinicFor(sid)).toBeUndefined();
+    const f = filer();
+    await runRequestSweep(record(sid, 'optical'), f);
+    expect(f.calls[0].locationOfLastVisit).toBeUndefined();
   });
 });

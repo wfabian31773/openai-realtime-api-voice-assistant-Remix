@@ -41,7 +41,7 @@ import {
 } from "./requestSweep";
 import type { VoiceCallRecord } from "./mediaStreamBridge";
 import type { CreateTicketParams } from '../../server/services/ticketingApiClient';
-import { confirmedClinicFor, unconfirmedCandidateFor, verifiedIdentityFor } from "../tools/verifiedIdentity";
+import { unconfirmedCandidateFor, verifiedClinicFor, verifiedIdentityFor } from "../tools/verifiedIdentity";
 import { callerSaidTheName } from "./callerSaidTheName";
 import { statedNameFor } from "../tools/statedName";
 import { askModelForThePatientName, nameFromTheRecording, type NameAsker } from "./nameFromTheRecording";
@@ -513,9 +513,14 @@ export async function runRequestSweep(
      * 2026-11-14..21: 16 swept tickets on calls with a verified office; the
      * sweep sent that office on 1, no office on 8 and another office on 7. It
      * is carried with or without a certain identity, and outranks the history
-     * office above.
+     * office above. Only an office the directory VERIFIED is carried
+     * (`verifiedClinicFor`): the caller's words passed through unverified (a
+     * spent ask, or no directory) are not, because nobody is left to ask and
+     * `locationSource: 'caller'` skips the Optical filter (Codex P1 on #505).
+     * Measured, the same window: 3 swept optical calls held only an
+     * unverified office (VA-82586, VA-87956, VA-88009); they file as before.
      */
-    const callerClinic = confirmedClinicFor(record.callSid);
+    const callerClinic = verifiedClinicFor(record.callSid);
     if (callerClinic) Object.assign(ticket, { locationOfLastVisit: callerClinic, locationSource: 'caller' });
     const res = await file(ticket);
     if (!res.success) {
