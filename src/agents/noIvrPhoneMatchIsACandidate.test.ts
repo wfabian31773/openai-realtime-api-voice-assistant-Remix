@@ -61,6 +61,12 @@ const PHONE_MATCH = {
   lastProviderSeen: 'Dr. Xavier Zebrastripe',
 };
 const SECRETS = ['December 31', '2041-12-31', '3:10 PM', 'Quixotic Vision Testville', 'Zebrastripe', 'Dilated Exam', 'Quixote'];
+// The prompt carries the clock ("Current date and time: … at 3:10 PM PST. It is
+// currently afternoon."), so at 3:10 PM Pacific the fixture appointment's time is
+// in it with nothing leaked, and these went red in CI on 2026-11-21. The absence
+// checks read the prompt without that one sentence; nothing else is removed.
+const withoutClock = (prompt: string) =>
+  prompt.replace(/Current date and time: [^\n]*?\. It is currently [a-z]+\./g, '');
 
 const h = vi.hoisted(() => ({
   lookupByPhone: vi.fn(async () => ({ patientFound: false, upcomingAppointments: [], pastAppointments: [], totalAppointmentsFound: 0 })),
@@ -126,7 +132,7 @@ beforeEach(() => {
 describe('a phone match puts a CANDIDATE in the prompt, never the appointment', () => {
   it('the built agent knows the first name and NOT the date, time, office or doctor', async () => {
     const agent = await createNoIvrAgent(async () => {}, META);
-    const prompt = String((agent as any).instructions);
+    const prompt = withoutClock(String((agent as any).instructions));
     expect(prompt).toContain('PHONE MATCH — UNCONFIRMED');
     expect(prompt).toContain('Is this for Zelda?');
     for (const s of SECRETS.filter((x) => x !== 'Quixote')) {
@@ -425,7 +431,7 @@ describe.each([
 
   it('withholds the candidate surname, DOB and schedule before DOB confirmation', async () => {
     const agent = await createNoIvrAgent(async () => {}, { ...RECOGNISED_META, ...pipeline });
-    const prompt = String((agent as any).instructions);
+    const prompt = withoutClock(String((agent as any).instructions));
     expect(prompt).not.toMatch(/Quixote|1958|Zebrastripe|Testville|2041-12-31|3:10 PM/);
 
     const missingDob = await call(agent, 'lookup_schedule', { first_name: 'Zelda', last_name: 'Quixotte' });
