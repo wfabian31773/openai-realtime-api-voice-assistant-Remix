@@ -1,4 +1,4 @@
-import { validatedPatientFor, type ValidatedPatient, type TicketLocationSource } from '../../src/tools/ticketIdentity';
+import { recordNamesFor, validatedPatientFor, type ValidatedPatient, type TicketLocationSource } from '../../src/tools/ticketIdentity';
 import { filterTicketRouting } from '../../src/tools/acceptableLocation';
 import { nameKey } from '../../src/tools/verifiedIdentity';
 import { readDobQuietly } from '../../src/tools/dobParts';
@@ -831,6 +831,15 @@ export class TicketingApiClient {
       params.validatedPatient ?? validatedPatientFor(params.callData?.callSid,
         unnamed ? undefined : params.patientFirstName, unnamed ? undefined : params.patientLastName, suppliedDob),
     });
+    // v258: the payload carries the validated patient's own names when the
+    // ones it was given are names that person answers to (recordNamesFor).
+    // A birth year, month or day given alone is a date of birth that does not
+    // read: it stops the rename (github-actions review of #506, round 2).
+    const anyBirthPart = [params.patientBirthYear, params.patientBirthMonth, params.patientBirthDay]
+      .some((part) => (part ?? '').trim());
+    const recordNames = anyBirthPart && !suppliedDob ? undefined : recordNamesFor(params.callData?.callSid,
+      params.patientFirstName, params.patientLastName, suppliedDob, params.validatedPatient);
+    if (recordNames) params = { ...params, patientFirstName: recordNames.firstName, patientLastName: recordNames.lastName };
     console.info("[TICKETING API] Creating ticket:", {
       patient: maskName(params.patientFirstName, params.patientLastName),
       phone: maskPhone(params.patientPhone),

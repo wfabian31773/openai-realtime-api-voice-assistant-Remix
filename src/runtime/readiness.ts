@@ -2050,11 +2050,26 @@ import { callEnvironment } from "./callRecord";
  * sweep now sends the verified office as the caller's, only one the
  * directory verified, and on an Optical ticket only a kind Optical accepts,
  * judged from the kind kept with the hit. Above main's v256 (#504,
- * `46cd4aa1`), which it contains; v258 is #506 and v245 is #488 on their
- * open branches. No migration.
+ * `46cd4aa1`), which it contains; v245 is #488 on its open branch. No
+ * migration.
+ * On main since #505 (`1c0eea50`).
+ *
+ * v258 — THE RECORD'S NAMES REACH THE APP (2026-11-21). A filing for a
+ * confirmed patient attaches the record's names (validatedPatient) and the
+ * ticketing app refuses a payload whose names differ from them ("Invalid or
+ * conflicting validated patient context", HTTP 400). The held person answers
+ * to the caller's spelling of the first name (heardAs, v199) and the other
+ * chart's last name (alsoKnownAs, v179), so a filing in the caller's spelling
+ * was refused: 42 POSTs on 17 calls, 2026-11-11..19, 7 of them filed only by
+ * the teardown sweep after the caller hung up. The queue lanes' filing gate
+ * now files a validated patient under the record's names, and createTicket
+ * aligns the names for any caller when they are names the attached patient
+ * answers to. Above main's v257 (#505, `1c0eea50`), which it contains along
+ * with v256 (#504, `46cd4aa1`) and v255 (#502, `7d919e1d`); v245 is #488 on
+ * its open branch. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v257-the-sweep-carries-the-confirmed-office-20261121";
+  "voice-runtime-v258-the-record-names-reach-the-app-20261121";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

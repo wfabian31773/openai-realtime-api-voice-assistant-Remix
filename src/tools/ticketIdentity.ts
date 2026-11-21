@@ -70,8 +70,52 @@ export function ticketIdentityFields(callSid: string, first: string, last: strin
   if (clinic && !validatedPatient.nextAppointment && !validatedPatient.lastVisit) validatedPatient.confirmedClinic = clinic;
   return { validatedPatient };
 }
-/** Shared live filing gate: ask one missing field, never ask for held facts. */
-export function prepareTicketIdentity(input: Record<string, unknown>): { input: Record<string, unknown>; missing?: string; message?: string } {
+/**
+ * v258: the names a create-ticket payload carries beside its validated patient.
+ *
+ * The validated patient carries the record's names (`validatedPatientFor`),
+ * and the ticketing app refuses a payload whose names differ from them
+ * (`applyValidatedPatient`: "Invalid or conflicting validated patient
+ * context"). The held person answers to more than the record's spelling: a
+ * first name the person base accepted with the date of birth (`heardAs`, v199)
+ * and the other chart's last name (`alsoKnownAs`, v179). So a filing in the
+ * caller's spelling was refused, and the request filed only at teardown, after
+ * the caller had gone. The record wins (RULE ZERO step 4).
+ *
+ * Returns the record's names only when the payload's names are names the held
+ * person answers to AND the attached patient is that held person, by its person
+ * id and date of birth, not its name alone; anything else is left for the app
+ * to refuse, never written over with another person's name.
+ */
+export function recordNamesFor(
+  callSid: string | undefined, first: string | undefined, last: string | undefined, dob: string | undefined,
+  attached: ValidatedPatient | undefined,
+): { firstName: string; lastName: string } | undefined {
+  if (!attached || !callSid || attached.callSid !== callSid) return undefined;
+  const same = validatedPatientFor(callSid, first, last, dob);
+  if (!same) return undefined;
+  // A date of birth the payload carries must be the held person's, read and
+  // equal, not merely not in conflict: validatedPatientFor skips a date it
+  // cannot compare, which includes a held person with no date of birth
+  // (github-actions review of #506).
+  if (value(dob) && (!isoDOB(dob) || isoDOB(dob) !== same.dateOfBirth)) return undefined;
+  // The attached patient is the held person only when a key says so: the same
+  // person id and the same date of birth, present or absent on both, and at
+  // least one of them present. A shared record name with neither key (two
+  // people charted under one name, a parent and a child) is not proof, so the
+  // payload is left for the app to refuse (Codex P1 on #506).
+  // Both come from validatedPatientFor, so the date is already in one form.
+  if (same.personId !== attached.personId || same.dateOfBirth !== attached.dateOfBirth) return undefined;
+  if (!same.personId && !same.dateOfBirth) return undefined;
+  if (nameKey(same.firstName) !== nameKey(attached.firstName) || nameKey(same.lastName) !== nameKey(attached.lastName)) return undefined;
+  return { firstName: attached.firstName, lastName: attached.lastName };
+}
+/**
+ * Shared live filing gate: ask one missing field, never ask for held facts.
+ * `recordNames` (the queue lanes' filing tools, v258) files a validated
+ * patient under the record's names, not the caller's spelling of them.
+ */
+export function prepareTicketIdentity(input: Record<string, unknown>, opts: { recordNames?: boolean } = {}): { input: Record<string, unknown>; missing?: string; message?: string } {
   const match = validatedPatientFor(value(input.call_sid), value(input.first_name), value(input.last_name), value(input.date_of_birth));
   const filled = { ...input };
   if (!value(filled.location)) {
@@ -82,9 +126,24 @@ export function prepareTicketIdentity(input: Record<string, unknown>): { input: 
     }
   }
   if (match) {
-    filled.first_name = value(input.first_name) || match.firstName;
-    filled.last_name = value(input.last_name) || match.lastName;
-    if (match.dateOfBirth) filled.date_of_birth = match.dateOfBirth;
+    // v258: the record's names replace the caller's only when a date of
+    // birth the filing carries reads as a date and is the record's, or none
+    // was given. validatedPatientFor skips the date check when either date
+    // does not read, so without this a name the person answers to beside a
+    // date that does not read would be renamed and given the record's date
+    // (github-actions review of #506, round 2).
+    const givenDob = value(input.date_of_birth);
+    const dobAgrees = !givenDob || (!!match.dateOfBirth && isoDOB(givenDob) === match.dateOfBirth);
+    const rename = !!opts.recordNames && dobAgrees;
+    const callerFirst = value(input.first_name);
+    const callerLast = value(input.last_name);
+    const spellsTheRecord = (!callerFirst || nameKey(callerFirst) === nameKey(match.firstName))
+      && (!callerLast || nameKey(callerLast) === nameKey(match.lastName));
+    filled.first_name = rename ? match.firstName : callerFirst || match.firstName;
+    filled.last_name = rename ? match.lastName : callerLast || match.lastName;
+    // The record's date is filed beside the record's own spelling, as before;
+    // beside another spelling only once the given date agrees.
+    if (match.dateOfBirth && (!opts.recordNames || dobAgrees || spellsTheRecord)) filled.date_of_birth = match.dateOfBirth;
     const office = match.nextAppointment?.location || match.lastVisit?.location || match.confirmedClinic;
     if (office && !value(filled.location)) {
       filled.location = office;
