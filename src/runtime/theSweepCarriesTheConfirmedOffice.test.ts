@@ -32,10 +32,12 @@ const OFFICES = new Set([
   'Montebello', 'Glendora', 'Mission Hills', 'Santa Ana', 'Anaheim', 'Redlands',
   'Fullerton', 'Northridge', 'Huntington Beach', 'Laguna Hills',
 ]);
-const directory = vi.hoisted(() => ({ up: true }));
+const directory = vi.hoisted(() => ({ up: true, failing: false as false | 'miss' | 'throw' }));
 vi.mock('../services/consoleDirectory', () => ({
   isDirectoryConfigured: () => directory.up,
   lookupLocation: async (name: string) => {
+    if (directory.failing === 'throw') throw new Error('directory unreachable');
+    if (directory.failing === 'miss') return null;
     const bare = name.replace(/^azul vision\s+/i, '').trim();
     if (/surgery center/i.test(bare)) return { canonical: bare, facilityKind: 'surgery_center' };
     const hit = [...OFFICES].find((o) => o.toLowerCase() === bare.toLowerCase());
@@ -151,6 +153,7 @@ async function theCall(row: Row, opts: { confirm?: boolean } = {}) {
 
 beforeEach(() => {
   directory.up = true;
+  directory.failing = false;
   resetGateAttempts();
   resetStatedNames();
   resetVerifiedIdentities();
@@ -247,7 +250,7 @@ describe('the real filer sends it on', () => {
 
   it('the store is read through a static import (one module copy on Node 20)', () => {
     const src = readFileSync(new URL('./sweepRunner.ts', import.meta.url), 'utf8');
-    expect(src).toMatch(/import \{[^}]*\bverifiedClinicFor\b[^}]*\} from "\.\.\/tools\/verifiedIdentity";/);
+    expect(src).toMatch(/import \{[^}]*\bverifiedClinicHitFor\b[^}]*\} from "\.\.\/tools\/verifiedIdentity";/);
     expect(src).not.toMatch(/import\(\s*['"]\.\.\/tools\/verifiedIdentity['"]\s*\)/);
   });
 });
@@ -449,5 +452,68 @@ describe('a verified office must suit the department the ticket files in (Codex 
     await runRequestSweep(record(sid, 'tech'), f);
     expect(f.calls[0].departmentId).toBe(3);
     expect(f.calls[0].locationOfLastVisit).toBe('Example Surgery Center');
+  });
+});
+
+/**
+ * GITHUB-ACTIONS REVIEW OF #505, ROUND 3: THE KIND IS KEPT AT THE VERIFIED HIT.
+ *
+ * Round 2 asked the directory again at teardown, and `mostRecentAcceptable`
+ * accepts the supplied name when the directory misses or throws, so a surgery
+ * centre verified on the tech line reached an Optical ticket whenever the
+ * directory failed during the sweep. The store now keeps the facility kind
+ * `resolve_location` was given when it verified the office, and the sweep
+ * judges it with Optical's own rule, with no second read.
+ */
+describe('the facility kind is kept from the verified hit (github-actions review of #505, round 3)', () => {
+  async function verifiedOnTheTechLine(sid: string, spoken: string) {
+    noteStatedNameFromArgs('lookup_patient', { call_sid: sid, first_name: 'Testa', last_name: 'Lake' });
+    noteDraftedRequestFromArgs('file_tech_ticket', {
+      call_sid: sid, request_description: 'Checking on a glasses order placed last week.',
+    });
+    const out = await runTool('resolve_location', { spoken_location: spoken, call_sid: sid });
+    expect(out).toMatchObject({ success: true, verified: true });
+  }
+
+  for (const failing of ['throw', 'miss'] as const) {
+    it(`a surgery centre is not carried onto an Optical ticket when the directory ${failing === 'throw' ? 'throws' : 'misses'} at teardown`, async () => {
+      const sid = failing === 'throw' ? 'CA000000000000000000000000000000e1' : 'CA000000000000000000000000000000e2';
+      await verifiedOnTheTechLine(sid, 'Example Surgery Center');
+      directory.failing = failing;
+      const f = filer();
+      await runRequestSweep(record(sid, 'tech'), f);
+      expect(f.calls[0].departmentId).toBe(1);
+      expect(f.calls[0].locationOfLastVisit).toBeUndefined();
+      expect(f.calls[0].locationSource).toBeUndefined();
+    });
+
+    it(`a clinic is still carried onto the Optical ticket when the directory ${failing === 'throw' ? 'throws' : 'misses'} at teardown`, async () => {
+      const sid = failing === 'throw' ? 'CA000000000000000000000000000000e3' : 'CA000000000000000000000000000000e4';
+      await verifiedOnTheTechLine(sid, 'Montebello');
+      directory.failing = failing;
+      const f = filer();
+      await runRequestSweep(record(sid, 'tech'), f);
+      expect(f.calls[0].departmentId).toBe(1);
+      expect(f.calls[0].locationOfLastVisit).toBe('Montebello');
+      expect(f.calls[0].locationSource).toBe('caller');
+    });
+  }
+
+  it('the store keeps the kind of a verified office, and none for an office passed through unverified', async () => {
+    const { rememberConfirmedClinic, verifiedClinicHitFor } = await import('../tools/verifiedIdentity');
+    const verified = 'CA000000000000000000000000000000e5';
+    rememberConfirmedClinic(verified, 'Example Surgery Center', { verified: true, facilityKind: 'surgery_center' });
+    expect(verifiedClinicHitFor(verified)).toEqual({ clinic: 'Example Surgery Center', facilityKind: 'surgery_center' });
+    const passed = 'CA000000000000000000000000000000e6';
+    rememberConfirmedClinic(passed, 'Somewhere', { facilityKind: 'clinic' });
+    expect(verifiedClinicHitFor(passed)).toBeUndefined();
+    expect(confirmedClinicFor(passed)).toBe('Somewhere');
+  });
+
+  it('resolve_location stores the kind the directory gave', async () => {
+    const { verifiedClinicHitFor } = await import('../tools/verifiedIdentity');
+    const sid = 'CA000000000000000000000000000000e7';
+    await verifiedOnTheTechLine(sid, 'Example Surgery Center');
+    expect(verifiedClinicHitFor(sid)?.facilityKind).toBe('surgery_center');
   });
 });

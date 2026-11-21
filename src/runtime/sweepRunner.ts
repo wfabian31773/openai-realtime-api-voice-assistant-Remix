@@ -41,7 +41,7 @@ import {
 } from "./requestSweep";
 import type { VoiceCallRecord } from "./mediaStreamBridge";
 import type { CreateTicketParams } from '../../server/services/ticketingApiClient';
-import { unconfirmedCandidateFor, verifiedClinicFor, verifiedIdentityFor } from "../tools/verifiedIdentity";
+import { unconfirmedCandidateFor, verifiedClinicHitFor, verifiedIdentityFor } from "../tools/verifiedIdentity";
 import { callerSaidTheName } from "./callerSaidTheName";
 import { statedNameFor } from "../tools/statedName";
 import { askModelForThePatientName, nameFromTheRecording, type NameAsker } from "./nameFromTheRecording";
@@ -514,24 +514,28 @@ export async function runRequestSweep(
      * sweep sent that office on 1, no office on 8 and another office on 7. It
      * is carried with or without a certain identity, and outranks the history
      * office above. Only an office the directory VERIFIED is carried
-     * (`verifiedClinicFor`): the caller's words passed through unverified (a
+     * (`verifiedClinicHitFor`): the caller's words passed through unverified (a
      * spent ask, or no directory) are not, because nobody is left to ask and
      * `locationSource: 'caller'` skips the Optical filter (Codex P1 on #505).
      * Measured, the same window: 3 swept optical calls held only an
      * unverified office (VA-82586, VA-87956, VA-88009); they file as before.
      */
-    const callerClinic = verifiedClinicFor(record.callSid);
+    const verifiedHit = verifiedClinicHitFor(record.callSid);
+    const callerClinic = verifiedHit?.clinic;
     // The office was verified for the lane that took the call, and since v253
     // a tech-line eyewear request files in Optical: a surgery centre verified
     // on the tech line is no Optical office, and `locationSource: 'caller'`
     // skips the client's Optical filter. So on an Optical ticket the office
-    // must be one Optical accepts, read by the live Optical path's own rule
-    // (Codex P1 on #505). Measured 2026-11-16..21: 0 verified non-clinic
-    // offices on any lane, so this costs no rescue.
+    // must be one Optical accepts (Codex P1 on #505, round 2), judged by
+    // Optical's own rule (`acceptsFacility`) on the facility kind the
+    // directory gave it when it was verified. Not a second directory read at
+    // teardown: that read accepts the name when the directory misses or
+    // throws (github-actions review of #505, round 3). Measured 2026-11-16..21:
+    // 0 verified non-clinic offices on any lane, so this costs no rescue.
     let carryCallerClinic = Boolean(callerClinic);
-    if (callerClinic && ticket.departmentId === OPTICAL_DEPARTMENT_ID) {
-      const { mostRecentAcceptable } = await import('../tools/acceptableLocation');
-      carryCallerClinic = (await mostRecentAcceptable([callerClinic], 'optical')) !== null;
+    if (verifiedHit && ticket.departmentId === OPTICAL_DEPARTMENT_ID) {
+      const { acceptsFacility } = await import('../tools/acceptableLocation');
+      carryCallerClinic = acceptsFacility('optical', verifiedHit.facilityKind);
     }
     if (callerClinic && carryCallerClinic) Object.assign(ticket, { locationOfLastVisit: callerClinic, locationSource: 'caller' });
     const res = await file(ticket);

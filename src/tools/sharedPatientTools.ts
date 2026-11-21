@@ -937,7 +937,7 @@ registerTool({
     // and brand-stripping alone yields "DTLA" — a name the receiver has never
     // heard of, which is how a resolved office still failed to file.
     const fileable = hit.fileAs || sanitizeLocationName(hit.canonical).value || hit.canonical;
-    rememberConfirmedClinic(callSid, fileable, { verified: true });
+    rememberConfirmedClinic(callSid, fileable, { verified: true, facilityKind: hit.facilityKind });
 
     return {
       success: true,

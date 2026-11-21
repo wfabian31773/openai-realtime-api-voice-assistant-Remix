@@ -132,7 +132,7 @@ interface Entry extends VerifiedIdentity {
 }
 
 const verified = new Map<string, Entry>();
-const confirmedClinics = new Map<string, { clinic: string; at: number; verified: boolean }>();
+const confirmedClinics = new Map<string, { clinic: string; at: number; verified: boolean; facilityKind?: string | null }>();
 
 /** Longer than any call, short enough that the map cannot become a leak. */
 const TTL_MS = 30 * 60_000;
@@ -742,11 +742,14 @@ export function resetVerifiedIdentities(): void {
 export function rememberConfirmedClinic(
   callSid: string | undefined,
   clinic: string,
-  opts: { verified?: boolean } = {},
+  opts: { verified?: boolean; facilityKind?: string | null } = {},
 ): void {
   if (!isTwilioCallSid(callSid) || !clinic.trim()) return;
   sweep(Date.now());
-  confirmedClinics.set(callSid, { clinic: clinic.trim(), at: Date.now(), verified: opts.verified === true });
+  confirmedClinics.set(callSid, {
+    clinic: clinic.trim(), at: Date.now(), verified: opts.verified === true,
+    facilityKind: opts.facilityKind ?? null,
+  });
 }
 
 export function confirmedClinicFor(callSid: string | undefined): string | undefined {
@@ -766,9 +769,22 @@ export function confirmedClinicFor(callSid: string | undefined): string | undefi
  * verified one.
  */
 export function verifiedClinicFor(callSid: string | undefined): string | undefined {
+  return verifiedClinicHitFor(callSid)?.clinic;
+}
+
+/**
+ * The verified office with the facility kind the directory gave it when it
+ * was verified. The sweep decides whether another department can use the
+ * office from this kind, read at the hit, never from a second directory read
+ * at teardown, which answers a miss or an outage by accepting the name (the
+ * github-actions review of #505, round 3).
+ */
+export function verifiedClinicHitFor(callSid: string | undefined): { clinic: string; facilityKind: string | null } | undefined {
   if (!isTwilioCallSid(callSid)) return undefined;
   const entry = confirmedClinics.get(callSid);
-  return entry && entry.verified && Date.now() - entry.at <= TTL_MS ? entry.clinic : undefined;
+  return entry && entry.verified && Date.now() - entry.at <= TTL_MS
+    ? { clinic: entry.clinic, facilityKind: entry.facilityKind ?? null }
+    : undefined;
 }
 
 /**
