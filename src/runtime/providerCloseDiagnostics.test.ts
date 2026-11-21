@@ -245,6 +245,55 @@ describe("why an xAI socket ended (v259)", () => {
     expect(lines.some((l) => l.startsWith("[SESSION] socket error code=ECONNRESET"))).toBe(true);
   });
 
+  it("has a refused handshake's close recorded by the time connect rejects", async () => {
+    // The setup-failure row reads the diagnostics in the runtime's catch, so
+    // they must already hold the close when connect's rejection is handled
+    // (#508 review). `ws` emits close straight after the handshake error.
+    const http = await import("node:http");
+    const srv = http.createServer((_req, res) => {
+      res.writeHead(503);
+      res.end();
+    });
+    await new Promise<void>((r) => srv.listen(0, "127.0.0.1", () => r()));
+    const port = (srv.address() as AddressInfo).port;
+    const t = new WebSocketGrokTransport("key", "model", `ws://127.0.0.1:${port}/realtime`);
+    const failure = await t.connect().then(() => null, (e: Error) => e);
+    const d = t.closeDiagnostics();
+    await new Promise<void>((r) => srv.close(() => r()));
+    expect(failure).not.toBeNull();
+    expect(d.closeCode).toBe(1006);
+    expect(d.wsErrorMessage).toContain("503");
+    expect(d.firstSignal).toBe("socket_close");
+  });
+
+  it("has final diagnostics at the detach, because no later close can reach them", async () => {
+    // A first-event stall detaches the socket: every listener is removed
+    // before it is closed, so reading the diagnostics later changes nothing.
+    const url = await server(() => undefined);
+    const { t } = await open(url);
+    t.detachAndClose();
+    const atDetach = JSON.stringify({ ...t.closeDiagnostics(), msSinceLoopTick: 0, eventLoopMaxMs: 0, openForMs: 0, msSinceServerEvent: 0, msSinceClientSend: 0 });
+    await new Promise((r) => setTimeout(r, 100));
+    const later = JSON.stringify({ ...t.closeDiagnostics(), msSinceLoopTick: 0, eventLoopMaxMs: 0, openForMs: 0, msSinceServerEvent: 0, msSinceClientSend: 0 });
+    expect(later).toBe(atDetach);
+    expect(t.closeDiagnostics()).toMatchObject({ firstSignal: "client_close", closedByUs: true });
+  });
+
+  it("leaves a reset after the detach to ws's own handler, so nothing goes unhandled", async () => {
+    const resets: Array<() => void> = [];
+    const url = await server((_s, req) => resets.push(() => req.socket.resetAndDestroy()));
+    const { t } = await open(url);
+    const unhandled: unknown[] = [];
+    const onUncaught = (e: unknown) => void unhandled.push(e);
+    process.on("uncaughtException", onUncaught);
+    t.detachAndClose();
+    resets[0]();
+    await new Promise((r) => setTimeout(r, 100));
+    process.off("uncaughtException", onUncaught);
+    expect(unhandled).toEqual([]);
+    expect(t.closeDiagnostics().socketErrorCode).toBeNull();
+  });
+
   it("keeps every field it reports to the connection", () => {
     const fields: Array<keyof ProviderCloseDiagnostics> = [
       "firstSignal", "closeCode", "closeReasonLength", "socketErrorCode", "socketErrorMessage",

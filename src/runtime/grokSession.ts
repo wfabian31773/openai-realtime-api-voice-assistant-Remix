@@ -994,6 +994,7 @@ export class WebSocketGrokTransport implements GrokTransport {
   private firstSignal: ProviderCloseDiagnostics["firstSignal"] = null;
   private closeCode: number | null = null;
   private closeReasonLength: number | null = null;
+  private detachRawSocket: (() => void) | null = null;
   private socketErrorCode: string | null = null;
   private socketErrorMessage: string | null = null;
   private socketEndReceived = false;
@@ -1053,18 +1054,28 @@ export class WebSocketGrokTransport implements GrokTransport {
         const socket = res.socket;
         if (socket) {
           this.remoteAddress = socket.remoteAddress ?? null;
-          socket.on("error", (err: NodeJS.ErrnoException) => {
+          const onError = (err: NodeJS.ErrnoException) => {
             this.socketErrorCode = err.code ?? null;
             this.socketErrorMessage = capText(err.message, 160);
             this.signal("socket_error");
             console.warn(
               `[SESSION] socket error code=${err.code ?? "none"} message=${this.socketErrorMessage ?? "none"}`,
             );
-          });
-          socket.on("end", () => {
+          };
+          const onEnd = () => {
             this.socketEndReceived = true;
             this.signal("socket_fin");
-          });
+          };
+          socket.on("error", onError);
+          socket.on("end", onEnd);
+          // Removed at a detach, so what our own close of a stalled socket
+          // causes (the peer's FIN echoing it) never reaches the diagnostics
+          // the setup row already read (#508 review). ws keeps its own
+          // listeners on the socket, so an error there is still handled.
+          this.detachRawSocket = () => {
+            socket.removeListener("error", onError);
+            socket.removeListener("end", onEnd);
+          };
         }
       },
     );
@@ -1210,6 +1221,8 @@ export class WebSocketGrokTransport implements GrokTransport {
     this.signal("client_close");
     // Its close listener is about to be removed, so it is uncounted here.
     this.uncount();
+    this.detachRawSocket?.();
+    this.detachRawSocket = null;
     if (this.ws) {
       this.ws.removeAllListeners();
       try {
