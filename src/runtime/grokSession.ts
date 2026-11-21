@@ -1217,8 +1217,19 @@ export class WebSocketGrokTransport implements GrokTransport {
     this.errorHandler = null;
     this.closeHandler = null;
     this.wakeFirstEventWaiters(false);
-    this.closedByUs = true;
-    this.signal("client_close");
+    // A socket the peer already closed keeps that close: it ended on the
+    // peer's side, and this only cleans it up (#508 review). A socket still
+    // open ends here, so this is the moment its diagnostics describe: the
+    // queue, the open sockets and the loop are read now, before it is
+    // uncounted, and a later read changes nothing (#508 review).
+    if (this.closedAtMs === null) {
+      this.closedAtMs = Date.now();
+      this.closedByUs = true;
+      this.signal("client_close");
+      this.bufferedAtClose = this.ws?.bufferedAmount ?? null;
+      this.openSocketsAtClose = this.counted ? openGrokSockets : null;
+      this.loopAtClose = eventLoopSnapshot(this.closedAtMs);
+    }
     // Its close listener is about to be removed, so it is uncounted here.
     this.uncount();
     this.detachRawSocket?.();

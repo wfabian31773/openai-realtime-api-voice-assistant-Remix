@@ -272,11 +272,35 @@ describe("why an xAI socket ended (v259)", () => {
     const url = await server(() => undefined);
     const { t } = await open(url);
     t.detachAndClose();
-    const atDetach = JSON.stringify({ ...t.closeDiagnostics(), msSinceLoopTick: 0, eventLoopMaxMs: 0, openForMs: 0, msSinceServerEvent: 0, msSinceClientSend: 0 });
+    const atDetach = JSON.stringify(t.closeDiagnostics());
     await new Promise((r) => setTimeout(r, 100));
-    const later = JSON.stringify({ ...t.closeDiagnostics(), msSinceLoopTick: 0, eventLoopMaxMs: 0, openForMs: 0, msSinceServerEvent: 0, msSinceClientSend: 0 });
-    expect(later).toBe(atDetach);
-    expect(t.closeDiagnostics()).toMatchObject({ firstSignal: "client_close", closedByUs: true });
+    // The timings and the loop reading included: they are measured at the
+    // detach, not when the setup row is written (#508 review).
+    expect(JSON.stringify(t.closeDiagnostics())).toBe(atDetach);
+    expect(t.closeDiagnostics()).toMatchObject({ firstSignal: "client_close", closedByUs: true, bufferedAmount: 0 });
+    expect(t.closeDiagnostics().openSockets).toBeGreaterThanOrEqual(1);
+    expect(t.closeDiagnostics().msSinceLoopTick).not.toBeNull();
+  });
+
+  it("keeps a close the peer made before the first event when the retry detaches the socket", async () => {
+    // The provider accepts the upgrade and resets the connection before it
+    // sends anything; the retry then detaches the dead socket. The row must
+    // still say the peer ended it (#508 review).
+    const wss = new WebSocketServer({ port: 0 });
+    servers.push(wss);
+    wss.on("connection", (_s, req) => setTimeout(() => req.socket.resetAndDestroy(), 20));
+    await new Promise<void>((r) => wss.once("listening", () => r()));
+    const t = new WebSocketGrokTransport("key", "model", `ws://127.0.0.1:${(wss.address() as AddressInfo).port}/realtime`);
+    t.onClose(() => undefined);
+    await t.connect();
+    expect(await t.waitForFirstEvent(1_000)).toBe(false);
+    const beforeDetach = t.closeDiagnostics();
+    t.detachAndClose();
+    const d = t.closeDiagnostics();
+    expect(d.closedByUs).toBe(false);
+    expect(d.closeCode).toBe(1006);
+    expect(d.firstSignal).not.toBe("client_close");
+    expect(JSON.stringify(d)).toBe(JSON.stringify(beforeDetach));
   });
 
   it("leaves a reset after the detach to ws's own handler, so nothing goes unhandled", async () => {
