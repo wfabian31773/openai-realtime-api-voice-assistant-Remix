@@ -41,7 +41,7 @@ import {
 } from "./requestSweep";
 import type { VoiceCallRecord } from "./mediaStreamBridge";
 import type { CreateTicketParams } from '../../server/services/ticketingApiClient';
-import { unconfirmedCandidateFor, verifiedIdentityFor } from "../tools/verifiedIdentity";
+import { confirmedClinicFor, unconfirmedCandidateFor, verifiedIdentityFor } from "../tools/verifiedIdentity";
 import { callerSaidTheName } from "./callerSaidTheName";
 import { statedNameFor } from "../tools/statedName";
 import { askModelForThePatientName, nameFromTheRecording, type NameAsker } from "./nameFromTheRecording";
@@ -502,6 +502,21 @@ export async function runRequestSweep(
         { ...(dob ? { patientBirthYear: dob.year, patientBirthMonth: dob.month, patientBirthDay: dob.day } : {}),
           ...(office ? { locationOfLastVisit: office, locationSource: 'history' } : {}) });
     }
+    /**
+     * v257: THE OFFICE THE CALLER CONFIRMED ON THE CALL. `resolve_location`
+     * remembers it per call (`rememberConfirmedClinic`), and every in-call
+     * filing tool carries it first, as the caller's own office, ahead of the
+     * record's history (`prepareTicketIdentity`; v12: "an office the caller
+     * names still always wins"). The sweep read only the record's history, so
+     * a caller who named and confirmed Montebello and hung up before the agent
+     * filed got a ticket with no office, or the record's usual one. Measured
+     * 2026-11-14..21: 16 swept tickets on calls with a verified office; the
+     * sweep sent that office on 1, no office on 8 and another office on 7. It
+     * is carried with or without a certain identity, and outranks the history
+     * office above.
+     */
+    const callerClinic = confirmedClinicFor(record.callSid);
+    if (callerClinic) Object.assign(ticket, { locationOfLastVisit: callerClinic, locationSource: 'caller' });
     const res = await file(ticket);
     if (!res.success) {
       console.error(

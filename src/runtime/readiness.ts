@@ -2028,7 +2028,7 @@ import { callEnvironment } from "./callRecord";
  * branch. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v255-a-null-build-sha-says-why-20261120";
+  "voice-runtime-v257-the-sweep-carries-the-confirmed-office-20261121";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

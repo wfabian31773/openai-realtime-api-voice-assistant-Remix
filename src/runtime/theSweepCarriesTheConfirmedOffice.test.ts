@@ -1,0 +1,251 @@
+/**
+ * THE TEARDOWN SWEEP CARRIES THE OFFICE THE CALLER CONFIRMED — v257.
+ *
+ * When the caller names an office, `resolve_location` verifies it and keeps it
+ * for the call (`rememberConfirmedClinic`), and every in-call filing tool
+ * carries it first, as the caller's own office, ahead of the record's history
+ * (`prepareTicketIdentity`; v12: "an office the caller names still always
+ * wins"). The teardown sweep never read it. A caller who confirmed Montebello
+ * and hung up before the agent filed got a ticket with no office, or with the
+ * office on their record.
+ *
+ * THE CORPUS: every swept ticket, 2026-11-14..21, on a call whose
+ * `resolve_location` verified an office (16). What the sweep sent, read from
+ * `voice_agent_api_logs`: the confirmed office on 1 (VA-87644, where the
+ * record's office happened to be the same one), no office on 8, and another
+ * office on 7. The office below is the LAST one each call verified, read from
+ * `tool_call_payloads`; office names are clinics, not patient data. Every
+ * name, request and date below is synthetic.
+ */
+import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { readFileSync } from 'node:fs';
+
+vi.hoisted(() => {
+  process.env.DATABASE_URL ||= 'postgresql://unused:unused@127.0.0.1:5432/unused';
+});
+vi.mock('../../server/db', () => ({ db: {} }));
+vi.mock('../services/scheduleLookupService', () => ({
+  scheduleLookupService: { lookupPatient: vi.fn() },
+}));
+
+const OFFICES = new Set([
+  'Montebello', 'Glendora', 'Mission Hills', 'Santa Ana', 'Anaheim', 'Redlands',
+  'Fullerton', 'Northridge', 'Huntington Beach', 'Laguna Hills',
+]);
+vi.mock('../services/consoleDirectory', () => ({
+  isDirectoryConfigured: () => true,
+  lookupLocation: async (name: string) => {
+    const bare = name.replace(/^azul vision\s+/i, '').trim();
+    if (/surgery center/i.test(bare)) return { canonical: bare, facilityKind: 'surgery_center' };
+    const hit = [...OFFICES].find((o) => o.toLowerCase() === bare.toLowerCase());
+    return hit ? { canonical: `Azul Vision ${hit}`, facilityKind: 'clinic' } : null;
+  },
+  lookupProvider: async () => null,
+}));
+
+const { createTicketDurable } = vi.hoisted(() => ({ createTicketDurable: vi.fn() }));
+vi.mock('../services/durableTicketFiling', () => ({ createTicketDurable }));
+
+const { runTool } = await import('../tools/registry');
+// Registers resolve_location (and lookup_patient) with the registry.
+await import('../tools/sharedPatientTools');
+const { resetGateAttempts } = await import('../tools/gateAttempts');
+const { resetStatedNames, noteStatedNameFromArgs } = await import('../tools/statedName');
+const { rememberVerifiedIdentity, resetVerifiedIdentities, confirmedClinicFor } = await import('../tools/verifiedIdentity');
+const { resetDraftedRequests, noteDraftedRequestFromArgs } = await import('../tools/draftedRequest');
+const { runRequestSweep } = await import('./sweepRunner');
+import type { SweepFiler } from './sweepRunner';
+import type { VoiceCallRecord } from './mediaStreamBridge';
+
+type Lane = 'optical' | 'surgery' | 'tech';
+
+interface Row {
+  sid: string; ticket: string; lane: Lane;
+  /** The last office `resolve_location` verified on the call. */
+  confirmed: string;
+  /** What the sweep sent on main: the record's office, or nothing. */
+  mainSent: string | null;
+  /** Whether the call held a certain identity at teardown (validatedPatient on the POST). */
+  certain: boolean;
+}
+
+const CORPUS: Row[] = [
+  { sid: 'CA8f4f27e8ac6169073026544ba682f514', ticket: 'VA-85525', lane: 'optical', confirmed: 'Montebello', mainSent: null, certain: false },
+  { sid: 'CA5c4e37204b2f8de7b366920f39dab819', ticket: 'VA-85844', lane: 'tech', confirmed: 'Glendora', mainSent: null, certain: true },
+  { sid: 'CAd64e18176644067d73bea1e49764acb0', ticket: 'VA-85965', lane: 'optical', confirmed: 'Mission Hills', mainSent: 'Northridge', certain: true },
+  { sid: 'CA02055d0d78fa7fac6a9d04d0684ee0cf', ticket: 'VA-86024', lane: 'optical', confirmed: 'Santa Ana', mainSent: 'Anaheim', certain: true },
+  { sid: 'CAd47b6d51da008c93f179fcb0e4a2a815', ticket: 'VA-86208', lane: 'optical', confirmed: 'Anaheim', mainSent: 'Huntington Beach', certain: true },
+  { sid: 'CA3f16d9d33f60055b730697c70b3d1a77', ticket: 'VA-86437', lane: 'optical', confirmed: 'Redlands', mainSent: null, certain: true },
+  { sid: 'CAd7c8667796ead2c79ab9f112675fa600', ticket: 'VA-86601', lane: 'optical', confirmed: 'Anaheim', mainSent: null, certain: true },
+  { sid: 'CAb36a92dcf905a35e733e7f71ae192420', ticket: 'VA-86714', lane: 'optical', confirmed: 'Anaheim', mainSent: 'Fullerton', certain: true },
+  { sid: 'CA49fa690896f9db6830523f8aa0f54742', ticket: 'VA-87037', lane: 'optical', confirmed: 'Mission Hills', mainSent: null, certain: true },
+  { sid: 'CAdf34672239ef8b9b864ec2cc8d3bb124', ticket: 'VA-87459', lane: 'optical', confirmed: 'Mission Hills', mainSent: 'Northridge', certain: true },
+  { sid: 'CAfb749f78f08d068fe55390becfddf3e9', ticket: 'VA-87571', lane: 'optical', confirmed: 'Anaheim', mainSent: 'Santa Ana', certain: true },
+  { sid: 'CA5791f42de2c99d753d7dfc5012bf7563', ticket: 'VA-87588', lane: 'optical', confirmed: 'Santa Ana', mainSent: 'Laguna Hills', certain: true },
+  { sid: 'CA6bfdffc8fc0bb7ae1c9cb4b8d546269b', ticket: 'VA-87642', lane: 'surgery', confirmed: 'Redlands', mainSent: null, certain: true },
+  { sid: 'CA861284f1441acb9ef70c141c3861c9cc', ticket: 'VA-87644', lane: 'optical', confirmed: 'Montebello', mainSent: 'Montebello', certain: true },
+  { sid: 'CA78b01ae029bc0d0052a8025d2b62bead', ticket: 'VA-88247', lane: 'optical', confirmed: 'Santa Ana', mainSent: null, certain: true },
+  { sid: 'CA591cd26bbf623a6db39af6959edd0d8a', ticket: 'VA-88260', lane: 'optical', confirmed: 'Mission Hills', mainSent: null, certain: true },
+];
+
+const GREETING = 'AGENT: Thank you for calling Azul Vision. I can take a message and they will follow up with you. Am I speaking with Testa?';
+
+function record(callSid: string, slug: Lane): VoiceCallRecord {
+  const lines = [
+    GREETING,
+    'CALLER: Yes.',
+    'AGENT: How can I help you today?',
+    'CALLER: I need to check on the order I placed last week, it was supposed to be ready.',
+    'AGENT: Which of our offices do you usually visit?',
+    'CALLER: The one by me.',
+    'AGENT: Thank you. Let me get this logged for you, one moment. [interrupted]',
+  ];
+  return {
+    callSid,
+    streamSid: 'MZ0000000000000000000000000000000',
+    slug,
+    callerPhone: '+15555550100',
+    dialedNumber: '+15555550199',
+    outcome: 'caller_hangup',
+    transcript: lines.join('\n'),
+    toolEvents: [
+      { name: 'lookup_patient', ok: true, succeeded: true },
+      { name: 'resolve_location', ok: true, succeeded: true },
+    ],
+    agentTurns: 4,
+    interruptions: 1,
+    startedAtMs: 1_000,
+    endedAtMs: 91_000,
+  } as VoiceCallRecord;
+}
+
+function filer(): SweepFiler & { calls: Record<string, unknown>[] } {
+  const calls: Record<string, unknown>[] = [];
+  const fn = (async (ticket: unknown) => {
+    calls.push(ticket as Record<string, unknown>);
+    return { success: true, ticketNumber: 'VA-SWEEP-1' };
+  }) as SweepFiler & { calls: Record<string, unknown>[] };
+  fn.calls = calls;
+  return fn;
+}
+
+/** The call as it happened: who the caller is, then the office they confirmed. */
+async function theCall(row: Row, opts: { confirm?: boolean } = {}) {
+  if (row.certain) {
+    rememberVerifiedIdentity(row.sid, {
+      firstName: 'Testa', lastName: 'Lake', dateOfBirth: '1960-01-01', certain: true,
+      ...(row.mainSent ? { usualOffice: row.mainSent, lastVisit: { date: '2026-06-01', location: row.mainSent } } : {}),
+    });
+  } else {
+    noteStatedNameFromArgs('lookup_patient', { call_sid: row.sid, first_name: 'Testa', last_name: 'Lake' });
+  }
+  noteDraftedRequestFromArgs(`file_${row.lane}_ticket`, {
+    call_sid: row.sid, request_description: 'Checking on an order placed last week.',
+  });
+  if (opts.confirm !== false) {
+    const out = await runTool('resolve_location', { queue: row.lane === 'tech' ? undefined : row.lane, spoken_location: row.confirmed, call_sid: row.sid });
+    expect(out).toMatchObject({ success: true, verified: true, location: row.confirmed });
+  }
+}
+
+beforeEach(() => {
+  resetGateAttempts();
+  resetStatedNames();
+  resetVerifiedIdentities();
+  resetDraftedRequests();
+  createTicketDurable.mockReset();
+});
+
+describe('the corpus: every swept ticket on a call that verified an office, 2026-11-14..21', () => {
+  it('is the 16 measured, and main sent the confirmed office on 1 of them', () => {
+    expect(CORPUS).toHaveLength(16);
+    expect(CORPUS.filter((r) => r.mainSent === r.confirmed).map((r) => r.ticket)).toEqual(['VA-87644']);
+    expect(CORPUS.filter((r) => r.mainSent === null)).toHaveLength(8);
+    expect(CORPUS.filter((r) => r.mainSent !== null && r.mainSent !== r.confirmed)).toHaveLength(7);
+  });
+
+  for (const row of CORPUS) {
+    it(`${row.ticket} (${row.sid}) files with the office the caller confirmed, ${row.confirmed}`, async () => {
+      await theCall(row);
+      const f = filer();
+      const out = await runRequestSweep(record(row.sid, row.lane), f);
+      expect(out.filed).toBe(true);
+      expect(f.calls).toHaveLength(1);
+      expect(f.calls[0].locationOfLastVisit).toBe(row.confirmed);
+      expect(f.calls[0].locationSource).toBe('caller');
+    });
+  }
+});
+
+describe('what the sweep did before is unchanged when nothing was confirmed', () => {
+  const recordOffice = CORPUS.find((r) => r.ticket === 'VA-86024')!;
+  const noOffice = CORPUS.find((r) => r.ticket === 'VA-85525')!;
+
+  it('a certain identity with no confirmed office still files the record\'s office as history', async () => {
+    await theCall(recordOffice, { confirm: false });
+    const f = filer();
+    await runRequestSweep(record(recordOffice.sid, recordOffice.lane), f);
+    expect(f.calls[0].locationOfLastVisit).toBe('Anaheim');
+    expect(f.calls[0].locationSource).toBe('history');
+  });
+
+  it('no identity and no confirmed office files no office', async () => {
+    await theCall(noOffice, { confirm: false });
+    const f = filer();
+    await runRequestSweep(record(noOffice.sid, noOffice.lane), f);
+    expect(f.calls).toHaveLength(1);
+    expect(f.calls[0].locationOfLastVisit).toBeUndefined();
+    expect(f.calls[0].locationSource).toBeUndefined();
+  });
+});
+
+describe('only an office resolve_location kept is carried', () => {
+  it('a surgery centre refused on the optical line is not the caller\'s office', async () => {
+    const row = { ...CORPUS[0], sid: 'CA000000000000000000000000000000b1' };
+    await theCall(row, { confirm: false });
+    const refused = await runTool('resolve_location', { queue: 'optical', spoken_location: 'Example Surgery Center', call_sid: row.sid });
+    expect(refused.success).toBe(false);
+    expect(confirmedClinicFor(row.sid)).toBeUndefined();
+    const f = filer();
+    await runRequestSweep(record(row.sid, 'optical'), f);
+    expect(f.calls[0].locationOfLastVisit).toBeUndefined();
+  });
+
+  it('a later confirmation replaces an earlier one, as on VA-86601 (Fullerton, then Anaheim)', async () => {
+    const row = CORPUS.find((r) => r.ticket === 'VA-86601')!;
+    await theCall({ ...row, confirmed: 'Fullerton' });
+    await runTool('resolve_location', { queue: 'optical', spoken_location: 'Anaheim', call_sid: row.sid });
+    const f = filer();
+    await runRequestSweep(record(row.sid, row.lane), f);
+    expect(f.calls[0].locationOfLastVisit).toBe('Anaheim');
+  });
+
+  it('another call\'s confirmed office is not this call\'s', async () => {
+    const [a, b] = [CORPUS[2], CORPUS[3]];
+    await theCall(a);
+    await theCall(b, { confirm: false });
+    const f = filer();
+    await runRequestSweep(record(b.sid, b.lane), f);
+    expect(f.calls[0].locationOfLastVisit).toBe('Anaheim');
+    expect(f.calls[0].locationSource).toBe('history');
+  });
+});
+
+describe('the real filer sends it on', () => {
+  it('createTicketDurable receives the office and its source', async () => {
+    const row = CORPUS.find((r) => r.ticket === 'VA-87588')!;
+    await theCall(row);
+    createTicketDurable.mockResolvedValue({ success: true, ticketNumber: 'VA-SWEEP-2' });
+    const out = await runRequestSweep(record(row.sid, row.lane));
+    expect(out.filed).toBe(true);
+    const payload = createTicketDurable.mock.calls[0][0] as Record<string, unknown>;
+    expect(payload.locationOfLastVisit).toBe('Santa Ana');
+    expect(payload.locationSource).toBe('caller');
+  });
+
+  it('the store is read through a static import (one module copy on Node 20)', () => {
+    const src = readFileSync(new URL('./sweepRunner.ts', import.meta.url), 'utf8');
+    expect(src).toMatch(/import \{[^}]*\bconfirmedClinicFor\b[^}]*\} from "\.\.\/tools\/verifiedIdentity";/);
+    expect(src).not.toMatch(/import\(\s*['"]\.\.\/tools\/verifiedIdentity['"]\s*\)/);
+  });
+});
