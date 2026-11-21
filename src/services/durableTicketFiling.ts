@@ -234,7 +234,14 @@ async function forwardRepeatFiling(
       wrapCreateTicketPayload(params),
       `${outboxKey}-add-${fingerprint}`,
     );
-    if (write.alreadyExists && write.status === 'sent') return { addition: 'nothing_new', filedPriority: firstPriority };
+    if (write.alreadyExists && write.status === 'sent') {
+      // This addition was sent before, perhaps by the worker after a live
+      // attempt failed. Its row records whether the app confirmed it, so a
+      // confirmed high addition is not reported as the first row's medium
+      // (github-actions P2 on #504, head `07e615b6`).
+      const added = await TicketOutboxService.storedFiling(write.outboxId);
+      return { addition: 'nothing_new', filedPriority: higherPriority(firstPriority, added.priority) };
+    }
 
     const sent = await TicketOutboxService.attemptSend(write.outboxId, { liveCaller: true });
     if (sent.success && sent.detailsAdded === true) {

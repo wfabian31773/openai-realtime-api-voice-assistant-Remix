@@ -424,3 +424,28 @@ describe('a row another worker sent reports the priority its send confirmed (git
     expect(res.filedPriority).toBe(expected);
   });
 });
+
+describe('an addition the worker already sent reports what its send confirmed (github-actions P2 on #504, head 07e615b6)', () => {
+  const SID = 'CA0000000000000000000000000000a507';
+  const base = {
+    departmentId: 3, requestTypeId: 30, patientFirstName: 'Testcaller', patientLastName: 'Tech',
+    patientPhone: '5555550147', callData: { callSid: SID }, idempotencyKey: `call-${SID}`,
+  };
+  const first = { ...base, requestReasonId: 154, description: 'Refill of artificial tears drops.', priority: 'medium' as const };
+  const addition = { ...base, requestReasonId: 155, description: 'Refill of latanoprost.', priority: 'high' as const };
+
+  it.each([
+    [{ params: addition, priority: 'high' }, 'high'],
+    [{ params: addition, priority: undefined }, 'medium'],
+  ])('the addition row stored %o reports %s', async (stored, expected) => {
+    writeToOutbox.mockResolvedValueOnce({ outboxId: 'ob-first', alreadyExists: true, status: 'sent', ticketNumber: 'VA-90010' });
+    storedFiling.mockResolvedValueOnce({ params: first, priority: 'medium' });
+    writeToOutbox.mockResolvedValueOnce({ outboxId: 'ob-add', alreadyExists: true, status: 'sent', ticketNumber: 'VA-90010' });
+    storedFiling.mockResolvedValueOnce(stored);
+    const res = await createTicketDurable(addition as never);
+    expect(res).toMatchObject({ success: true, ticketNumber: 'VA-90010' });
+    expect(res.filedPriority).toBe(expected);
+    expect(storedFiling).toHaveBeenLastCalledWith('ob-add');
+    expect(attemptSend).not.toHaveBeenCalled();
+  });
+});

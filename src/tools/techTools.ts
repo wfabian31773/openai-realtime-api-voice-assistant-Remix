@@ -524,16 +524,16 @@ registerTool({
       res.filedPriority,
     );
     if (filedPriority) noteCallValue(callSid, FILED_PRIORITY, filedPriority);
-    // Three answers, not two: a priority the ticket system did not confirm
-    // (a bare replay, an outbox row it cannot read) says no priority at all,
-    // rather than calling the ticket normal (github-actions P2 on #504, head
-    // `5065f2d4`).
+    // The filing layer knows a FLOOR on the ticket's priority, never a
+    // ceiling: a filing consolidated onto a ticket that is already high, or an
+    // addition the worker sends later, can leave the ticket above what this
+    // call saw. So the agent is told a priority only when it is high, and a
+    // ticket not known to be high is never called normal (github-actions P2s
+    // on #504, heads `5065f2d4` and `07e615b6`).
     const markedUrgent = filedPriority === 'high';
     const urgencyFix = markedUrgent
       ? 'This request is filed at high priority. You may tell the caller it is marked urgent.'
-      : filedPriority
-        ? 'This request is filed at normal priority. Do not tell the caller it is urgent or marked urgent.'
-        : 'The ticket system did not confirm this request\'s priority. Do not tell the caller it is urgent or marked urgent, and do not say what priority it has.';
+      : 'This request is not confirmed as high priority. Do not tell the caller it is urgent or marked urgent, and do not say what priority it has.';
 
     return {
       success: true,

@@ -484,10 +484,56 @@ describe('a later filing after a bare replay (github-actions P1 and P2 on #504, 
     }
   });
 
-  it('control: a known medium ticket is still called normal priority', async () => {
+  it('a known medium ticket is not called normal either: the medium is only a floor (github-actions P2 on #504, head 07e615b6)', async () => {
     const r = await file({ call_sid: SID, request_reason_id: 154, request_description: 'Refill of artificial tears drops.' });
     expect(r.result).toMatchObject({ priority: 'medium', marked_urgent: false });
-    expect(String(r.result.fix)).toMatch(/filed at normal priority/);
+    expect(String(r.result.fix)).toMatch(MUST_NOT);
+    expect(String(r.result.fix)).toMatch(/do not say what priority it has/);
+    expect(String(r.result.fix)).not.toMatch(/normal priority/);
+  });
+});
+
+describe('the priority the tool knows is a floor (github-actions P2s on #504, head 07e615b6)', () => {
+  const SID = 'CA0000000000000000000000000000f504';
+  const MEDIUM = { request_reason_id: 154, request_description: 'Refill of artificial tears drops.' };
+  const HIGH = { request_reason_id: 155, request_description: 'Caller is out of her latanoprost and needs a refill today.' };
+
+  it('a medium filing consolidated onto a ticket that may already be high is never called normal', async () => {
+    // Measured, department 3 create-ticket POSTs answered 200, 2026-11-06 22:00
+    // to 11-20 22:00 UTC: 88 consolidated, 55 of them asking for medium, and 29
+    // of those 55 landed on a ticket that now reads high or urgent.
+    const r = await file({ call_sid: SID, ...MEDIUM }, { success: true, ticketNumber: 'VA-90009', consolidated: true });
+    expect(r.result).toMatchObject({ success: true, priority: 'medium', marked_urgent: false });
+    expect(String(r.result.fix)).toMatch(MUST_NOT);
+    expect(String(r.result.fix)).not.toMatch(/normal priority/);
+  });
+
+  it('a high addition the worker sent and the app confirmed makes the next identical filing high', async () => {
+    await file({ call_sid: SID, ...MEDIUM }, { success: true, ticketNumber: 'VA-90010' });
+    // The high addition's live send fails, so the outbox keeps it for the worker.
+    const queued = await file({ call_sid: SID, ...HIGH }, { success: false, error: 'The ticketing system did not answer in time' });
+    expect(queued.result).toMatchObject({ already_filed: true, marked_urgent: false });
+    // The worker sends it and the app confirms it reached the ticket.
+    const addition = [...outbox.byId.values()].find((row) => row.status === 'pending')!;
+    addition.status = 'sent';
+    addition.ticketNumber = 'VA-90010';
+    addition.payload.priorityUnconfirmed = false;
+    const again = await file({ call_sid: SID, ...HIGH });
+    expect(again.sent).toBeUndefined();
+    expect(again.result).toMatchObject({ already_filed: true, priority: 'high', marked_urgent: true });
+    expect(String(again.result.fix)).toMatch(MAY_SAY);
+  });
+
+  it('control: the worker\'s send answered as a bare replay leaves the ticket at its floor', async () => {
+    await file({ call_sid: SID, ...MEDIUM }, { success: true, ticketNumber: 'VA-90010' });
+    await file({ call_sid: SID, ...HIGH }, { success: false, error: 'The ticketing system did not answer in time' });
+    const addition = [...outbox.byId.values()].find((row) => row.status === 'pending')!;
+    addition.status = 'sent';
+    addition.ticketNumber = 'VA-90010';
+    addition.payload.priorityUnconfirmed = true;
+    const again = await file({ call_sid: SID, ...HIGH });
+    expect(again.result).toMatchObject({ already_filed: true, priority: 'medium', marked_urgent: false });
+    expect(String(again.result.fix)).toMatch(MUST_NOT);
   });
 });
 
