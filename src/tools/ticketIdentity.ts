@@ -83,9 +83,9 @@ export function ticketIdentityFields(callSid: string, first: string, last: strin
  * the caller had gone. The record wins (RULE ZERO step 4).
  *
  * Returns the record's names only when the payload's names are names the held
- * person answers to AND the attached patient is that held person; anything
- * else is left for the app to refuse, never written over with another
- * person's name.
+ * person answers to AND the attached patient is that held person, by its person
+ * id and date of birth, not its name alone; anything else is left for the app
+ * to refuse, never written over with another person's name.
  */
 export function recordNamesFor(
   callSid: string | undefined, first: string | undefined, last: string | undefined, dob: string | undefined,
@@ -93,7 +93,15 @@ export function recordNamesFor(
 ): { firstName: string; lastName: string } | undefined {
   if (!attached || !callSid || attached.callSid !== callSid) return undefined;
   const same = validatedPatientFor(callSid, first, last, dob);
-  if (!same || same.personId !== attached.personId) return undefined;
+  if (!same) return undefined;
+  // The attached patient is the held person only when a key says so: the same
+  // person id and the same date of birth, present or absent on both, and at
+  // least one of them present. A shared record name with neither key (two
+  // people charted under one name, a parent and a child) is not proof, so the
+  // payload is left for the app to refuse (Codex P1 on #506).
+  const attachedDob = isoDOB(attached.dateOfBirth);
+  if (same.personId !== attached.personId || same.dateOfBirth !== attachedDob) return undefined;
+  if (!same.personId && !same.dateOfBirth) return undefined;
   if (nameKey(same.firstName) !== nameKey(attached.firstName) || nameKey(same.lastName) !== nameKey(attached.lastName)) return undefined;
   return { firstName: attached.firstName, lastName: attached.lastName };
 }

@@ -317,4 +317,54 @@ describe('the rule at the create-ticket transport (recordNamesFor), for every ca
     expect(recordNamesFor(sid, 'Chris', LAST, '1990-02-03', held)).toBeUndefined();
     expect(recordNamesFor(sid, 'Chris', LAST, undefined, undefined)).toBeUndefined();
   });
+
+  describe('a shared record name is not proof of the same person (Codex P1 on #506)', () => {
+    it('an attached patient with another date of birth, no person id on either side, is not renamed', () => {
+      hold({ personId: undefined });
+      const held = validatedPatientFor(sid, 'Chris', LAST)!;
+      expect(held.personId).toBeUndefined();
+      // The parent and the child share the record name; the attached one is the other person.
+      const stale = { ...held, dateOfBirth: '1960-04-05' };
+      expect(recordNamesFor(sid, 'Chris', LAST, undefined, stale)).toBeUndefined();
+    });
+
+    it('an attached patient with no date of birth, beside a held one that has it, is not renamed', () => {
+      hold({ personId: undefined });
+      const held = validatedPatientFor(sid, 'Chris', LAST)!;
+      const { dateOfBirth: _dropped, ...noDob } = held;
+      expect(recordNamesFor(sid, 'Chris', LAST, undefined, noDob)).toBeUndefined();
+    });
+
+    it('an attached patient with no person id, beside a held one that has it, is not renamed', () => {
+      hold();
+      const held = validatedPatientFor(sid, 'Chris', LAST)!;
+      const { personId: _dropped, ...noPerson } = held;
+      expect(recordNamesFor(sid, 'Chris', LAST, undefined, noPerson)).toBeUndefined();
+    });
+
+    it('a held person with neither a person id nor a date of birth renames nothing', () => {
+      hold({ personId: undefined, dateOfBirth: undefined });
+      const held = validatedPatientFor(sid, 'Chris', LAST)!;
+      expect(held.personId).toBeUndefined();
+      expect(held.dateOfBirth).toBeUndefined();
+      expect(recordNamesFor(sid, 'Chris', LAST, undefined, held)).toBeUndefined();
+    });
+
+    it('a held person known by date of birth alone still renames the same person', () => {
+      hold({ personId: undefined });
+      const held = validatedPatientFor(sid, 'Chris', LAST)!;
+      expect(recordNamesFor(sid, 'Chris', LAST, undefined, held)).toEqual({ firstName: 'Christopher', lastName: LAST });
+    });
+
+    it('a stale patient from the other person, sent with no date-of-birth columns, is refused by the app, not accepted', async () => {
+      hold({ personId: undefined });
+      const held = validatedPatientFor(sid, 'Chris', LAST)!;
+      const api = new TicketingApiClient();
+      fakeApp(api);
+      await api.createTicket({ ...base, patientFirstName: 'Chris', patientLastName: LAST,
+        validatedPatient: { ...held, dateOfBirth: '1960-04-05' } });
+      expect(posted[0].body).toMatchObject({ patientFirstName: 'Chris' });
+      expect(posted[0].refused).toBe('name');
+    });
+  });
 });
