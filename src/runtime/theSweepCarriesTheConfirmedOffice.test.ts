@@ -360,3 +360,94 @@ describe('an office passed through unverified is not carried by the sweep (Codex
     expect(f.calls[0].locationOfLastVisit).toBeUndefined();
   });
 });
+
+/**
+ * CODEX P1 ON #505 (round 2): THE OFFICE MUST SUIT THE DEPARTMENT THE TICKET
+ * FILES IN, NOT ONLY THE LANE THAT VERIFIED IT.
+ *
+ * `resolve_location` verifies an office for the lane that took the call, and
+ * the tech line accepts any facility kind. Since v253 a tech-line eyewear
+ * request swept at teardown files in Optical, which routes by office and takes
+ * clinics only; `locationSource: 'caller'` skips the client's Optical filter.
+ * So a surgery centre verified on the tech line reached an Optical ticket as
+ * the caller's own office. Measured, `tool_call_payloads` 2026-11-16..21: the
+ * verified offices were clinics on every lane (optical 85, surgery 12, tech 11,
+ * records 1, one with no kind), so the shape has occurred 0 times; it is closed
+ * because it fails safe and costs no rescue.
+ */
+describe('a verified office must suit the department the ticket files in (Codex P1 on #505)', () => {
+  async function aTechGlassesCall(sid: string, spoken: string, certainOffice?: string) {
+    if (certainOffice) {
+      rememberVerifiedIdentity(sid, {
+        firstName: 'Testa', lastName: 'Lake', dateOfBirth: '1960-01-01', certain: true,
+        usualOffice: certainOffice, lastVisit: { date: '2026-06-01', location: certainOffice },
+      });
+    } else {
+      noteStatedNameFromArgs('lookup_patient', { call_sid: sid, first_name: 'Testa', last_name: 'Lake' });
+    }
+    noteDraftedRequestFromArgs('file_tech_ticket', {
+      call_sid: sid, request_description: 'Checking on a glasses order placed last week.',
+    });
+    const out = await runTool('resolve_location', { spoken_location: spoken, call_sid: sid });
+    expect(out).toMatchObject({ success: true, verified: true });
+    expect(verifiedClinicFor(sid)).toBe(spoken);
+  }
+
+  it('a surgery centre verified on the tech line is not carried onto an Optical ticket', async () => {
+    const sid = 'CA000000000000000000000000000000d1';
+    await aTechGlassesCall(sid, 'Example Surgery Center');
+    const f = filer();
+    await runRequestSweep(record(sid, 'tech'), f);
+    expect(f.calls[0].departmentId).toBe(1);
+    expect(f.calls[0].locationOfLastVisit).toBeUndefined();
+    expect(f.calls[0].locationSource).toBeUndefined();
+  });
+
+  it('with a certain identity, the record\'s clinic is sent as history instead', async () => {
+    const sid = 'CA000000000000000000000000000000d2';
+    await aTechGlassesCall(sid, 'Example Surgery Center', 'Glendora');
+    const f = filer();
+    await runRequestSweep(record(sid, 'tech'), f);
+    expect(f.calls[0].departmentId).toBe(1);
+    expect(f.calls[0].locationOfLastVisit).toBe('Glendora');
+    expect(f.calls[0].locationSource).toBe('history');
+  });
+
+  it('a clinic verified on the tech line is carried onto the Optical ticket', async () => {
+    const sid = 'CA000000000000000000000000000000d3';
+    await aTechGlassesCall(sid, 'Montebello');
+    const f = filer();
+    await runRequestSweep(record(sid, 'tech'), f);
+    expect(f.calls[0].departmentId).toBe(1);
+    expect(f.calls[0].locationOfLastVisit).toBe('Montebello');
+    expect(f.calls[0].locationSource).toBe('caller');
+  });
+
+  it('a surgery centre verified on the surgery line is carried onto a Surgery ticket', async () => {
+    const sid = 'CA000000000000000000000000000000d4';
+    noteStatedNameFromArgs('lookup_patient', { call_sid: sid, first_name: 'Testa', last_name: 'Lake' });
+    noteDraftedRequestFromArgs('file_surgery_ticket', {
+      call_sid: sid, request_description: 'Checking on an order placed last week.',
+    });
+    const out = await runTool('resolve_location', { queue: 'surgery', spoken_location: 'Example Surgery Center', call_sid: sid });
+    expect(out).toMatchObject({ success: true, verified: true });
+    const f = filer();
+    await runRequestSweep(record(sid, 'surgery'), f);
+    expect(f.calls[0].departmentId).toBe(2);
+    expect(f.calls[0].locationOfLastVisit).toBe('Example Surgery Center');
+    expect(f.calls[0].locationSource).toBe('caller');
+  });
+
+  it('a surgery centre verified on the tech line stays on a Technicians ticket', async () => {
+    const sid = 'CA000000000000000000000000000000d5';
+    noteStatedNameFromArgs('lookup_patient', { call_sid: sid, first_name: 'Testa', last_name: 'Lake' });
+    noteDraftedRequestFromArgs('file_tech_ticket', {
+      call_sid: sid, request_description: 'Checking on an order placed last week.',
+    });
+    await runTool('resolve_location', { spoken_location: 'Example Surgery Center', call_sid: sid });
+    const f = filer();
+    await runRequestSweep(record(sid, 'tech'), f);
+    expect(f.calls[0].departmentId).toBe(3);
+    expect(f.calls[0].locationOfLastVisit).toBe('Example Surgery Center');
+  });
+});

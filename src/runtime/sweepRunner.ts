@@ -521,7 +521,19 @@ export async function runRequestSweep(
      * unverified office (VA-82586, VA-87956, VA-88009); they file as before.
      */
     const callerClinic = verifiedClinicFor(record.callSid);
-    if (callerClinic) Object.assign(ticket, { locationOfLastVisit: callerClinic, locationSource: 'caller' });
+    // The office was verified for the lane that took the call, and since v253
+    // a tech-line eyewear request files in Optical: a surgery centre verified
+    // on the tech line is no Optical office, and `locationSource: 'caller'`
+    // skips the client's Optical filter. So on an Optical ticket the office
+    // must be one Optical accepts, read by the live Optical path's own rule
+    // (Codex P1 on #505). Measured 2026-11-16..21: 0 verified non-clinic
+    // offices on any lane, so this costs no rescue.
+    let carryCallerClinic = Boolean(callerClinic);
+    if (callerClinic && ticket.departmentId === OPTICAL_DEPARTMENT_ID) {
+      const { mostRecentAcceptable } = await import('../tools/acceptableLocation');
+      carryCallerClinic = (await mostRecentAcceptable([callerClinic], 'optical')) !== null;
+    }
+    if (callerClinic && carryCallerClinic) Object.assign(ticket, { locationOfLastVisit: callerClinic, locationSource: 'caller' });
     const res = await file(ticket);
     if (!res.success) {
       console.error(
