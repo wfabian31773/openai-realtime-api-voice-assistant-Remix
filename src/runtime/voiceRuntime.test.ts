@@ -3081,9 +3081,17 @@ describe("the mid-call reconnect (v263)", () => {
     await waitFor(() => next.ofType("session.update").length > 0, "the new session's setup");
     const update = next.ofType("session.update")[0] as { session: { instructions: string } };
     expect(update.session.instructions).toContain("## The line dropped and you are back");
-    expect(update.session.instructions).toContain("I want to check on my glasses order.");
+    // The call so far is conversation, never instructions (#511 review, P1).
+    expect(update.session.instructions).not.toContain("I want to check on my glasses order.");
     next.emit({ type: "session.updated" } as GrokServerEvent);
     await settle(4);
+    const restored = next
+      .ofType("conversation.item.create")
+      .map((e) => e.item as { type?: string; role?: string; content?: Array<{ text?: string }> })
+      .filter((i) => i.type === "message");
+    expect(restored).toContainEqual(
+      expect.objectContaining({ role: "user", content: [expect.objectContaining({ text: "I want to check on my glasses order." })] }),
+    );
     // The greeting is not played again, and the call has not ended.
     expect(next.ofType("conversation.item.create").filter((e) => (e.item as { type?: string })?.type === "force_message"))
       .toHaveLength(0);
@@ -3197,6 +3205,11 @@ describe("the mid-call reconnect (v263)", () => {
     await new Promise((r) => setTimeout(r, 400));
     expect(h.transports).toHaveLength(2);
     expect(h.transports.some((t) => t.connectedAfterClose)).toBe(false);
+    // The drop is still counted (#511 review).
+    await waitFor(() => h.reconnectRows.some((r) => r.callSid === "CA-reconnect6"), "the reconnect row");
+    const events = h.reconnectRows.find((r) => r.callSid === "CA-reconnect6")!.events as Array<Record<string, unknown>>;
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({ attempt: 1, result: "call_ended" });
     await h.close();
   });
 });

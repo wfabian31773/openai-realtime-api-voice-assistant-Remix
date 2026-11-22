@@ -2103,7 +2103,8 @@ import { callEnvironment } from "./callRecord";
  * names a lane ("1", "all", or a comma list of slugs). When the xAI socket of
  * a configured call closes on the far side, the session wrapper
  * (reconnectingSession.ts) opens a new one through the first-event retry,
- * configures it with the agent's prompt plus the call so far, and carries on:
+ * configures it with the agent's prompt, restores the call so far as
+ * conversation items (never in the instructions), and carries on:
  * caller audio is held and the turn the caller was in the middle of is
  * replayed, lines the bridge asked for are said on the new session, a tool
  * answer from the dropped one reaches the model as a note, and the greeting

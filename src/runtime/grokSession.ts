@@ -465,6 +465,12 @@ export class GrokVoiceSession {
   /** The line sent while awaitingSayStart, kept until its response starts
    * so a dropped connection can hand it to the next session (v263). */
   private sayInFlight: PendingSay | null = null;
+  /** The line whose response the wire has started (`response.created`) and
+   * that has produced nothing yet: no audio, no transcript, no tool call. A
+   * drop in that window cost the caller none of it, so the next session
+   * says it; without this an opening greeting that dropped there was lost
+   * and the resumed session told it had greeted (#511 review, P1). */
+  private sayAwaitingOutput: PendingSay | null = null;
   /** True from sending `response.cancel` until the current response cycle
    * ends (the next `response.created`) or the provider rejects the cancel
    * outright. Only while this is owed may that specific rejection be
@@ -700,6 +706,9 @@ export class GrokVoiceSession {
       case "response.created":
         this.wireResponseActive = true;
         this.responseEpoch += 1;
+        // sayInFlight is set only while awaitingSayStart is, so it names the
+        // line this response is for, or nothing.
+        this.sayAwaitingOutput = this.sayInFlight;
         this.awaitingSayStart = false;
         this.sayInFlight = null;
         // A NEW response cycle settles whatever became of any earlier
@@ -712,6 +721,7 @@ export class GrokVoiceSession {
         break;
       case "response.done":
         this.wireResponseActive = false;
+        this.sayAwaitingOutput = null;
         // Deliberately does NOT clear cancelDoneOwed (Codex review, PR
         // #213): a response.done is not proof the cancel was honored — it
         // is just as likely the NATURAL completion that raced it, in which
@@ -753,6 +763,7 @@ export class GrokVoiceSession {
           );
           break;
         }
+        this.sayAwaitingOutput = null;
         this.handlers.onToolCall(event.call_id, event.name, args as Record<string, unknown>);
         break;
       }
@@ -762,6 +773,7 @@ export class GrokVoiceSession {
         this.handlers.onSpeechStarted?.();
         break;
       case "response.output_audio.delta":
+        this.sayAwaitingOutput = null;
         this.handlers.onAudioDelta?.(event.delta);
         break;
       case "response.output_audio_transcript.done":
@@ -790,7 +802,10 @@ export class GrokVoiceSession {
         // knew every word before it was spoken. Here the model writes the
         // line, so these deltas are the only record of a line that gets
         // cut off mid-sentence by a barge-in.
-        if (event.delta) this.handlers.onAgentTranscriptDelta?.(event.delta);
+        if (event.delta) {
+          this.sayAwaitingOutput = null;
+          this.handlers.onAgentTranscriptDelta?.(event.delta);
+        }
         break;
     }
   }
@@ -943,6 +958,31 @@ export class GrokVoiceSession {
     });
   }
 
+  /**
+   * THE CALL SO FAR, AS CONVERSATION ITEMS (v263, #511 review P1): used only
+   * by the reconnect to restore a dropped call on its new session. The
+   * caller's lines go in as user messages and the agent's as assistant
+   * messages, so they keep the authority they had: the caller's words never
+   * reach the instructions. Adding items starts no response (xAI answers
+   * only response.create or its own turn detection; probed 2026-11-22).
+   */
+  restoreConversation(messages: ReadonlyArray<{ role: "user" | "assistant"; text: string }>): void {
+    if (this.state !== "configured") throw new Error("session_not_running");
+    for (const m of messages) {
+      if (m.role === "user") {
+        this.send({
+          type: "conversation.item.create",
+          item: { type: "message", role: "user", content: [{ type: "input_text", text: m.text }] },
+        });
+      } else {
+        this.send({
+          type: "conversation.item.create",
+          item: { type: "message", role: "assistant", content: [{ type: "output_text", text: m.text }] },
+        });
+      }
+    }
+  }
+
   /** Forward one chunk of caller audio (base64 μ-law 8kHz, the input
    * format buildSessionConfig declares) into the model's input buffer.
    * Pass-through, no transcoding here. */
@@ -984,6 +1024,9 @@ export class GrokVoiceSession {
     // can forget exactly those follow-up requests and keep any already sent.
     const discardedOpen = this.pendingSays.filter((p) => p.mode === "open").length;
     this.pendingSays.length = 0;
+    // The caller spoke over it: the line the open response is for is
+    // abandoned too, and a drop now must not say it again.
+    this.sayAwaitingOutput = null;
     if (!this.wireResponseActive) return discardedOpen;
     // At most ONE cancel per response cycle (Codex review, PR #213 r2). A
     // stale audio delta re-arms the bridge's assistantAudioPlaying after a
@@ -1000,15 +1043,18 @@ export class GrokVoiceSession {
   }
 
   /**
-   * THE LINES THIS SESSION NEVER STARTED (v263): the one sent and not yet
+   * THE LINES THIS SESSION NEVER STARTED (v263): the one whose response
+   * started and produced nothing yet, or the one sent and not yet
    * acknowledged by a `response.created`, then every line still queued
    * behind an open response, in order. Taken (and cleared) by the reconnect
    * when this session's connection drops, so the next session says them.
    */
   takeUnstartedSays(): UnstartedSay[] {
     const out: UnstartedSay[] = [];
+    if (this.sayAwaitingOutput !== null) out.push(this.sayAwaitingOutput);
     if (this.sayInFlight !== null) out.push(this.sayInFlight);
     out.push(...this.pendingSays.splice(0));
+    this.sayAwaitingOutput = null;
     this.sayInFlight = null;
     this.awaitingSayStart = false;
     return out;
