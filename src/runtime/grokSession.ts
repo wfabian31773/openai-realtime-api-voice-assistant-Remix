@@ -729,7 +729,9 @@ export class GrokVoiceSession {
       case "response.done":
         this.wireResponseActive = false;
         this.sayAwaitingOutput = null;
-        this.sayPlaying = null;
+        // Not `sayPlaying`: a line whose audio began ends at its own
+        // transcript.done (just before this), and one whose done never came
+        // is still open in the bridge too, which treats it as cut.
         // Deliberately does NOT clear cancelDoneOwed (Codex review, PR
         // #213): a response.done is not proof the cancel was honored — it
         // is just as likely the NATURAL completion that raced it, in which

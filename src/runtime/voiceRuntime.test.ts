@@ -3228,7 +3228,7 @@ describe("the mid-call reconnect (v263)", () => {
     const GREETING = "Thank you for calling Azul Vision. All calls are being recorded for quality assurance purposes. How can I help you today?";
     const h = await harness({ env: RECONNECT_ENV, laneSource: laneSource({ greeting: GREETING }) });
     const answered = await post(h, "/voice/optical", { CallSid: "CA-reconnect8", From: "+1", To: "+2" });
-    const { ws } = await openStream(h, "CA-reconnect8", tokenFrom(answered.text));
+    const { ws, frames } = await openStream(h, "CA-reconnect8", tokenFrom(answered.text));
     await waitFor(() => h.transports.length === 1, "the transport to register");
     const grok = h.transports[0];
     grok.emit({ type: "session.updated" } as GrokServerEvent);
@@ -3249,6 +3249,12 @@ describe("the mid-call reconnect (v263)", () => {
     // The new session is told the first one was cut, not that it was heard.
     expect(restoredMessages(next)).toContainEqual({ role: "assistant", text: `${GREETING} [interrupted]` });
     expect(restoredMessages(next)).not.toContainEqual({ role: "assistant", text: GREETING });
+    // Twilio plays the cut greeting's tail and echoes its mark: that is not
+    // the greeting delivered, so the lock does not release on it.
+    const cutMark = frames.filter((f) => f.event === "mark").pop() as { mark: { name: string } };
+    expect(cutMark).toBeTruthy();
+    ws.send(JSON.stringify({ event: "mark", streamSid: "MZ1", mark: { name: cutMark.mark.name } }));
+    await settle(4);
     // It plays on the new session; the caller talks over it and the lock holds.
     next.emit({ type: "response.created" } as GrokServerEvent);
     next.emit({ type: "response.output_audio.delta", delta: Buffer.alloc(800, 0x7f).toString("base64") } as GrokServerEvent);
@@ -3257,6 +3263,11 @@ describe("the mid-call reconnect (v263)", () => {
     expect(next.ofType("response.cancel")).toHaveLength(0);
     next.emit({ type: "response.output_audio_transcript.done", transcript: GREETING } as GrokServerEvent);
     next.emit({ type: "response.done" } as GrokServerEvent);
+    await settle(4);
+    // Its own mark echoes: the greeting is delivered.
+    const heardMark = frames.filter((f) => f.event === "mark").pop() as { mark: { name: string } };
+    expect(heardMark.mark.name).not.toBe(cutMark.mark.name);
+    ws.send(JSON.stringify({ event: "mark", streamSid: "MZ1", mark: { name: heardMark.mark.name } }));
     await settle(4);
     ws.close();
     await waitFor(() => h.persisted.some((r) => r.callSid === "CA-reconnect8"), "the call to persist");

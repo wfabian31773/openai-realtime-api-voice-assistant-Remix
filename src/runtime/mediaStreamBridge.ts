@@ -2063,10 +2063,6 @@ export class VoiceCallBridge {
     if (greetingText === null) return;
     this.greetingPending = greetingText;
     this.greetingEpoch = this.session.getResponseEpoch() + 1;
-    this.greetingLine = null;
-    // The agent owes the caller the greeting again: the agent's clock, not
-    // the caller's silence window, the same as at the handshake.
-    this.armDeadAir("response");
   }
 
   /** `cut` is a line a provider drop ended (see `handleProviderDrop`); `null`
