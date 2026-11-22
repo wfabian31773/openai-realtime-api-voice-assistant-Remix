@@ -51,6 +51,7 @@ const NOT_FOUND = { patientFound: false, upcomingAppointments: [], pastAppointme
 const h = vi.hoisted(() => ({
   lookupByNameAndDOB: vi.fn(),
   verifyPatient: vi.fn(),
+  nameOnTheNumber: vi.fn(),
   submitSimplifiedTicket: vi.fn(async (_p: Record<string, unknown>) => ({ success: true, ticketNumber: 'VA-TEST' })),
 }));
 
@@ -78,6 +79,7 @@ vi.mock('../services/syncAgentService', () => ({
 vi.mock('../services/patientVerification', async (importOriginal) => ({
   ...(await importOriginal<typeof import('../services/patientVerification')>()),
   verifyPatient: (...a: unknown[]) => h.verifyPatient(...(a as [])),
+  nameOnTheNumber: (...a: unknown[]) => h.nameOnTheNumber(...(a as [])),
 }));
 vi.mock('../services/scheduleLookupService', async (importOriginal) => {
   const actual = await importOriginal<typeof import('../services/scheduleLookupService')>();
@@ -144,6 +146,8 @@ beforeEach(() => {
   h.lookupByNameAndDOB.mockReset().mockImplementation(async (first: string) =>
     first.trim().toLowerCase() === 'zelda' ? contextFor(PATIENT) : NOT_FOUND);
   h.verifyPatient.mockReset().mockResolvedValue(NOBODY_ON_FILE);
+  // On all 3 corpus calls nobody on file had the calling number.
+  h.nameOnTheNumber.mockReset().mockResolvedValue('no');
   h.submitSimplifiedTicket.mockClear();
   resetVerifiedIdentities();
   vi.spyOn(console, 'log').mockImplementation(() => undefined);
@@ -159,6 +163,7 @@ describe('the corpus: a ticket filed under another name beside the looked-up pat
     const t = await call(agent, 'create_ticket', ticket('Marta', 'Ruiz', '01/04/1958', { doctor_name: 'Zebrastripe' }));
     expect(t.success).toBe(true);
     expect(h.verifyPatient).toHaveBeenCalledWith({ firstName: 'Marta', lastName: 'Ruiz', dob: '1958-01-04' });
+    expect(h.nameOnTheNumber).toHaveBeenCalledWith('+15551234567', 'Marta', 'Ruiz', 'p-zelda');
     expect(payload().patientFullName).toBe('Zelda Quixote');
     expect(payload().patientDOB).toBe('01/04/1958');
     expect(payload().additionalDetails).toMatch(/NAME CORRECTED TO THE RECORD: the agent filed this as "Marta Ruiz"/);
@@ -330,6 +335,49 @@ describe('what stays as the agent sent it', () => {
   });
 });
 
+describe('#512 review, round 2: a sibling with their own chart on the household\'s number', () => {
+  // The reviewer's shape: the caller moves from the looked-up patient to a
+  // sibling at the same clinic, and the agent carries the first patient's date
+  // of birth onto the sibling's filing. The sibling's chart is under their own
+  // date of birth, so the person base finds nobody with the filed name and that
+  // date; the household's number is where the sibling is found.
+  it('a sibling on file at the calling number keeps the name the agent filed', async () => {
+    h.nameOnTheNumber.mockResolvedValue('yes');
+    const agent = await agentFor('CA00000000000000000000000000a10264');
+    await lookUpZelda(agent);
+    await call(agent, 'create_ticket', ticket('Bruno', 'Quixote', '01/04/1958'));
+    expect(h.nameOnTheNumber).toHaveBeenCalledWith('+15551234567', 'Bruno', 'Quixote', 'p-zelda');
+    expect(payload().patientFullName).toBe('Bruno Quixote');
+    expect(payload().additionalDetails ?? '').not.toMatch(/NAME CORRECTED/);
+  });
+
+  it('a number the person base cannot read renames nothing', async () => {
+    h.nameOnTheNumber.mockResolvedValue('unknown');
+    const agent = await agentFor('CA00000000000000000000000000a20264');
+    await lookUpZelda(agent);
+    await call(agent, 'create_ticket', ticket('Marta', 'Ruiz', '01/04/1958'));
+    expect(payload().patientFullName).toBe('Marta Ruiz');
+  });
+
+  it('a household check that throws renames nothing and the ticket still files', async () => {
+    h.nameOnTheNumber.mockRejectedValue(new Error('connection reset'));
+    const agent = await agentFor('CA00000000000000000000000000a30264');
+    await lookUpZelda(agent);
+    const t = await call(agent, 'create_ticket', ticket('Marta', 'Ruiz', '01/04/1958'));
+    expect(t.success).toBe(true);
+    expect(payload().patientFullName).toBe('Marta Ruiz');
+  });
+
+  it('is asked only after the person base cleared the filed name', async () => {
+    h.verifyPatient.mockResolvedValue({ verified: false, reason: 'ambiguous', candidates: 2 });
+    const agent = await agentFor('CA00000000000000000000000000a40264');
+    await lookUpZelda(agent);
+    await call(agent, 'create_ticket', ticket('Marta', 'Ruiz', '01/04/1958'));
+    expect(h.nameOnTheNumber).not.toHaveBeenCalled();
+    expect(payload().patientFullName).toBe('Marta Ruiz');
+  });
+});
+
 describe('the rule on its own', () => {
   const held = async (callSid: string, p: Partial<typeof PATIENT> = PATIENT) => {
     const { rememberVerifiedIdentity } = await import('../tools/verifiedIdentity');
@@ -339,6 +387,7 @@ describe('the rule on its own', () => {
     recordNameForTheFiling({
       callSid, firstName: 'Marta', lastName: 'Ruiz', dateOfBirth: '01/04/1958',
       lookedUpFirstNames: new Set(['zelda']), verify: h.verifyPatient as any,
+      callerPhone: '+15551234567', nameOnTheNumber: h.nameOnTheNumber as any,
       doctorName: 'Dr. Xavier Zebrastripe', recordContext: contextFor(PATIENT) as any, ...over,
     });
 
@@ -422,7 +471,7 @@ describe('the confirmed lookup names whose first name to file', () => {
 
   it('the person base is imported statically (the v141 rule) and every lookup notes its first name', () => {
     const src = readFileSync(new URL('./noIvrAgent.ts', import.meta.url), 'utf8');
-    expect(src).toMatch(/^import \{ verifyPatient \} from '\.\.\/services\/patientVerification';$/m);
+    expect(src).toMatch(/^import \{ nameOnTheNumber, verifyPatient \} from '\.\.\/services\/patientVerification';$/m);
     expect(src).not.toMatch(/import\(['"]\.\.\/services\/patientVerification['"]\)/);
     const lookup = src.indexOf('name: "lookup_schedule"');
     const noted = src.indexOf('lookedUpFirstNames.add(nameKey(params.first_name))');

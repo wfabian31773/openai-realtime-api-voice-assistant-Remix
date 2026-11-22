@@ -1,5 +1,5 @@
 import { nameKey, rememberVerifiedIdentity } from '../tools/verifiedIdentity';
-import { verifyPatient } from '../services/patientVerification';
+import { nameOnTheNumber, verifyPatient } from '../services/patientVerification';
 import { filedUnderAnotherNameNote, recordNameForTheFiling } from './afterHoursFiledName';
 import { callerAffirmedThePhoneMatch } from '../tools/greetingAffirmation';
 import { dobKey } from '../services/callFactsLedger';
@@ -2374,7 +2374,9 @@ The ticket will include schedule context (last appointment info) automatically.`
         location: params.location,
         recordContext: scheduleContext,
         lookedUpFirstNames,
+        callerPhone: metadata.callerPhone,
         verify: verifyPatient,
+        nameOnTheNumber,
       });
       if (recordName) {
         // The record's names and date of birth now match the held identity,

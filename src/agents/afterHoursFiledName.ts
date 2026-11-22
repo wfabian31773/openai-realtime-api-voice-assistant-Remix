@@ -38,7 +38,13 @@
  *     or it resolves the filed name to the held patient. A twin (same last name
  *     and date of birth, another first name, on file) resolves to the twin and
  *     is never renamed; an ambiguous answer, an unreachable mirror or the
- *     appointment-book fallback renames nothing.
+ *     appointment-book fallback renames nothing;
+ *  7. nobody else on file at the calling number answers to the filed name
+ *     (`nameOnTheNumber`: first name folded or by its first three letters,
+ *     last name folded). A sibling with their own chart on the household's
+ *     number keeps the name the agent filed (#512 review, round 2). On all 3
+ *     corpus calls nobody on file had the calling number; a withheld number or
+ *     an unreachable person base renames nothing.
  *
  * What it returns is the record's names and the name the agent filed, for the
  * staff note. The caller's words are never read (standing instruction 3).
@@ -123,7 +129,11 @@ export async function recordNameForTheFiling(input: {
   recordContext?: PatientScheduleContext;
   /** nameKey of every first name `lookup_schedule` was called with on this call. */
   lookedUpFirstNames: ReadonlySet<string>;
+  /** The number the call came from, for the household check. */
+  callerPhone?: string;
   verify: (q: VerifyInput) => Promise<VerificationResult>;
+  nameOnTheNumber: (phone: string | undefined, firstName: string, lastName: string, exceptPersonId?: string) =>
+    Promise<'yes' | 'no' | 'unknown'>;
 }): Promise<FiledName | undefined> {
   const { callSid, firstName, lastName, dateOfBirth } = input;
   const held = verifiedIdentityFor(callSid);
@@ -150,6 +160,13 @@ export async function recordNameForTheFiling(input: {
         nameKey(found.patient.lastName) === nameKey(held.lastName) &&
         found.patient.dob === heldDob);
   if (!nobodyOnFile && !isTheHeldPatient) return undefined;
+  let onTheNumber: 'yes' | 'no' | 'unknown';
+  try {
+    onTheNumber = await input.nameOnTheNumber(input.callerPhone, firstName, lastName, held.personId);
+  } catch {
+    return undefined;
+  }
+  if (onTheNumber !== 'no') return undefined;
   return { firstName: held.firstName, lastName: held.lastName, dateOfBirth: heldDob, filedAs: `${firstName.trim()} ${lastName.trim()}` };
 }
 
