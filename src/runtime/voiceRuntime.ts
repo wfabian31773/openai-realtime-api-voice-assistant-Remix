@@ -71,6 +71,7 @@ import {
 } from "./runtimeTransfer";
 import { releaseCallHandoff } from "../tools/handoffBroker";
 import { releaseCallerSpeech } from "../services/symptomCorroboration";
+import { releaseCallLanguage } from "../services/callLanguage";
 import {
   missingMandatoryCopy,
   personaliseLaneGreeting,
@@ -1854,6 +1855,10 @@ export function mountVoiceRuntime(
             // v226: ending it runs the Azul cancel a booking on the call held
             // until hang-up. Not awaited; it never throws.
             void endOutreachSession(entry.callSid);
+            // v261: the language the call was spoken in. Released after
+            // endOutreachSession has read it, which it does before it awaits
+            // anything, so a booking's text still follows the call's language.
+            releaseCallLanguage(entry.callSid);
             // The call is over, whatever ended it: any office leg still
             // ringing for this caller is abandoned NOW, not after the
             // accept window — the staffer must not keep ringing toward,

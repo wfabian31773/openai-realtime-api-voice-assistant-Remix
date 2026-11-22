@@ -105,6 +105,8 @@ import {
   spokenSlotTime,
   spokenWhen,
   textedWhen,
+  textedWhenEs,
+  spanishMonth,
   localParts,
   minutesOf,
   slotDateTime,
@@ -116,9 +118,12 @@ import type { BookingOpening, BookingPageLane } from '../runtime/outbound/bookin
 import {
   CALL_AWAIT_CANCEL_MAX_MS,
   CALL_CONFIRMATION_DELAY_MS,
+  confirmationLanguageOf,
   confirmationOf,
   type BookingConfirmationRecord,
+  type ConfirmationLanguage,
 } from '../runtime/outbound/bookingConfirmation';
+import { callLanguageFor } from '../services/callLanguage';
 import {
   HELD_CANCEL_BUDGET_MS,
   HELD_CANCEL_FALLBACK_MS,
@@ -1870,6 +1875,16 @@ export function textedDay(ymd: string): string {
   return d.toLocaleDateString('en-US', { timeZone: 'UTC', month: 'short', day: 'numeric' });
 }
 
+/** "6 de enero": the Azul appointment a Spanish text names (v261); '' when
+ * the date does not read, and the text then says "su cita actual". */
+export function textedDayEs(ymd: string): string {
+  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(ymd);
+  if (!m) return '';
+  const day = Number(m[3]);
+  const month = spanishMonth(Number(m[2]));
+  return month && day >= 1 && day <= 31 ? `${day} de ${month}` : '';
+}
+
 /** What a booking's confirmation text will say, rendered when it is booked (v222). */
 export function confirmationRecordFor(args: {
   contact: OutboundContact;
@@ -1880,6 +1895,10 @@ export function confirmationRecordFor(args: {
   /** v226: a call booking's Azul cancel is held until the call ends, so its
    * confirmation waits for the hang-up to release it with the real result. */
   awaitCancel?: boolean;
+  /** v261: the language the call was spoken in; a Spanish call's text goes
+   * in Spanish. A call booking renders the Spanish words whatever the
+   * language, so the hang-up can still switch the text (endOutreachSession). */
+  language?: ConfirmationLanguage;
   now?: Date;
 }): BookingConfirmationRecord {
   const now = args.now ?? new Date();
@@ -1895,6 +1914,14 @@ export function confirmationRecordFor(args: {
     place: [args.slot.partnerName, spokenAddress(args.slot)].filter(Boolean).join(', '),
     phone: args.slot.phone ?? '',
     replaced_day: textedDay(field(args.contact, 'appointment_date')),
+    // A text-link booking is made on an English page and is texted in English.
+    ...(byLink
+      ? {}
+      : {
+          when_es: textedWhenEs(args.slot),
+          replaced_day_es: textedDayEs(field(args.contact, 'appointment_date')),
+          ...(args.language ? { language: args.language } : {}),
+        }),
     cancel: !awaiting && args.cancelled ? 'cancelled' : 'pending',
     queued_at: now.toISOString(),
     // A call's confirmation waits for the call to end; a link's goes now. One
@@ -2049,6 +2076,8 @@ export async function bookOutreachSlot(args: {
     });
     await st.queueConfirmation(contact.contactId, confirmationRecordFor({
       contact, slot: bookedSlot, bookingId: book.bookingId, callRef, cancelled: false, awaitCancel: true, now: heldAt,
+      // v261: the language the bridge is speaking the call in right now.
+      language: confirmationLanguageOf(callLanguageFor(callRef)),
     }));
     return settled;
   })().catch((e) => {
@@ -2667,6 +2696,9 @@ export async function runHeldAzulCancel(
   contactId: string,
   record: HeldAzulCancelRecord,
   by: 'hang_up' | 'fallback',
+  /** v261: the language the call ended in, read at the hang-up; the fallback
+   * has none and the language the booking recorded stands. */
+  language?: ConfirmationLanguage,
 ): Promise<AzulCancelResult> {
   const deadline = Date.now() + HELD_CANCEL_BUDGET_MS;
   let cancel: AzulCancelResult;
@@ -2697,7 +2729,7 @@ export async function runHeldAzulCancel(
         by,
         ...(cancel.cancelled ? {} : { reason: cancel.reason }),
       });
-      await st.releaseConfirmation(contactId, record.booking_id, cancel.cancelled ? 'cancelled' : 'pending', new Date());
+      await st.releaseConfirmation(contactId, record.booking_id, cancel.cancelled ? 'cancelled' : 'pending', new Date(), language);
     })().catch((e) => {
       console.warn(`[NPX OUTREACH] booking ${record.booking_id}: could not record the held Azul cancel —`, e instanceof Error ? e.message : e);
     }),
@@ -2720,6 +2752,11 @@ export async function runHeldAzulCancel(
  * drop if the store was down. Never throws.
  */
 export async function endOutreachSession(callSid: string): Promise<void> {
+  // v261: read before anything is awaited. The runtime releases the call's
+  // language straight after calling this, and a caller who switched to
+  // Spanish only after booking (CA0824b4d82426b74333b0ee53ba9d45df) is texted
+  // in the language the call ended in.
+  const language = confirmationLanguageOf(callLanguageFor(callSid));
   const s = sessions.get(callSid);
   sessions.delete(callSid);
   if (!s) return;
@@ -2769,7 +2806,7 @@ export async function endOutreachSession(callSid: string): Promise<void> {
       return;
     }
     const record = (claim !== 'unanswered' && claim.row ? heldCancelOf(claim.row.customData) : null) ?? held.record;
-    await runHeldAzulCancel(s.contact.contactId, record, 'hang_up');
+    await runHeldAzulCancel(s.contact.contactId, record, 'hang_up', language);
   } catch (e) {
     console.warn(`[NPX OUTREACH] ${callSid}: the end-of-call step failed —`, e instanceof Error ? e.message : e);
   }

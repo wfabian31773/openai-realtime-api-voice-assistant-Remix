@@ -513,6 +513,8 @@ export class FakeOutboundStore implements OutboundStore {
         state: "due",
         cancel: held.cancel ?? record.cancel,
         due_at: held.released_at ?? record.due_at,
+        // v261: the language the call ended in, which the hang-up wrote.
+        ...(held.language ? { language: held.language } : {}),
       });
       return true;
     }
@@ -560,7 +562,7 @@ export class FakeOutboundStore implements OutboundStore {
     return true;
   }
 
-  async releaseConfirmation(contactId: string, bookingId: string, cancel: "cancelled" | "pending", now: Date): Promise<boolean> {
+  async releaseConfirmation(contactId: string, bookingId: string, cancel: "cancelled" | "pending", now: Date, language?: "en" | "es"): Promise<boolean> {
     const c = this.contacts.get(contactId);
     const r = c ? this.confirmationOf(c) : null;
     if (!c) return false;
@@ -570,6 +572,7 @@ export class FakeOutboundStore implements OutboundStore {
         state: "released",
         cancel,
         released_at: now.toISOString(),
+        ...(language ? { language } : {}),
       } as BookingConfirmationRecord);
       return true;
     }
@@ -577,6 +580,7 @@ export class FakeOutboundStore implements OutboundStore {
     this.writeConfirmation(c, {
       ...r,
       cancel,
+      ...(language ? { language } : {}),
       ...(r.state === "awaiting_cancel" ? { state: "due" as const, due_at: now.toISOString() } : {}),
     });
     return true;
