@@ -344,7 +344,9 @@ export interface OutboundStore {
    * none queued for this booking yet, a `released` placeholder the late queue
    * takes over as due. True when it was written.
    */
-  releaseConfirmation(contactId: string, bookingId: string, cancel: "cancelled" | "pending", now: Date): Promise<boolean>;
+  /** v261: `language`, when given, is the language the call ended in and
+   * replaces the one the booking recorded; omitted, the recorded one stands. */
+  releaseConfirmation(contactId: string, bookingId: string, cancel: "cancelled" | "pending", now: Date, language?: "en" | "es"): Promise<boolean>;
   /** The caller undid this booking on the call (v226): its confirmation is
    * never sent. One not yet sent or of unknown fate (a claimed one included,
    * so a put-back cannot revive it); with none queued for this booking yet, a
@@ -1075,6 +1077,10 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
                                                               to_jsonb(${record.cancel}::text)),
                                            'due_at', COALESCE(custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'released_at',
                                                               ${record.due_at}::text))
+                                      -- v261: the language the call ended in, which the hang-up wrote.
+                                      || CASE WHEN custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ? 'language'
+                                              THEN jsonb_build_object('language', custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text -> 'language')
+                                              ELSE '{}'::jsonb END
                                ELSE ${JSON.stringify(record)}::jsonb
                           END),
                    true)
@@ -1173,7 +1179,7 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
       return held.length > 0;
     },
 
-    async releaseConfirmation(contactId, bookingId, cancel, now) {
+    async releaseConfirmation(contactId, bookingId, cancel, now, language) {
       // With no confirmation for this booking yet (its queue is still on its
       // way, after the booking tool's settle budget ran out, and the caller
       // hung up first), a `released` placeholder keeps what the cancel came
@@ -1191,11 +1197,15 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
                           CASE WHEN custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'booking_id' = ${bookingId}::text
                                THEN (custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text)
                                       || jsonb_build_object('cancel', ${cancel}::text)
+                                      || CASE WHEN ${language ?? null}::text IS NULL THEN '{}'::jsonb
+                                              ELSE jsonb_build_object('language', ${language ?? null}::text) END
                                       || CASE WHEN custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text ->> 'state' = 'awaiting_cancel'
                                               THEN jsonb_build_object('state', 'due', 'due_at', ${now.toISOString()}::text)
                                               ELSE '{}'::jsonb END
                                ELSE jsonb_build_object('booking_id', ${bookingId}::text, 'state', 'released',
                                                        'cancel', ${cancel}::text, 'released_at', ${now.toISOString()}::text)
+                                      || CASE WHEN ${language ?? null}::text IS NULL THEN '{}'::jsonb
+                                              ELSE jsonb_build_object('language', ${language ?? null}::text) END
                           END),
                    true)
            WHERE id = ${contactId}::varchar

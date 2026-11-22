@@ -112,6 +112,7 @@ import { noteSpokenDob } from "../tools/spokenDob";
 import { notePatientStatus } from "../tools/spokenPatientStatus";
 import { noteRecordsDelivery } from "../tools/spokenRecordsDelivery";
 import { noteCallerTranscript } from "../services/symptomCorroboration";
+import { noteCallLanguage } from "../services/callLanguage";
 import { ghostCallRefusal } from "../services/ghostCallProtection";
 import { callerConclusion, completesGoodbye, type CallerConclusion } from "./goodbye";
 import { CallUsage, usageSummaryMarker, type UsageTotals } from "./tokenUsage";
@@ -2977,6 +2978,9 @@ export class VoiceCallBridge {
         if (next && next !== this.spokenLanguage) {
           this.spokenLanguage = next;
           this.session.setSpokenLanguage(next);
+          // v261: what a tool reads when it writes something the caller will
+          // read after the call (the NPX booking confirmation text).
+          noteCallLanguage(this.deps.context.callSid, next);
           console.info(languageMarker(next));
         }
       }

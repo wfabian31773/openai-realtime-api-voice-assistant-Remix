@@ -275,6 +275,40 @@ export function textedWhen(s: NpxSlot): string {
   return `${day} at ${spokenSlotTime(s)}`;
 }
 
+/**
+ * SPANISH, FOR A TEXT (v261). Every word is inside GSM-7: one character
+ * outside it sends the whole text as UCS-2, at 70 characters a segment
+ * (gsm7.ts). é and ñ are in it; á, í, ó and ú are not, so Saturday is
+ * written "sabado".
+ */
+const WEEKDAY_ES: Record<Weekday, string> = {
+  monday: 'lunes',
+  tuesday: 'martes',
+  wednesday: 'miércoles',
+  thursday: 'jueves',
+  friday: 'viernes',
+  saturday: 'sabado',
+  sunday: 'domingo',
+};
+const MONTH_ES = [
+  'enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio',
+  'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre',
+] as const;
+
+/** "diciembre" for 12; undefined for a month that is not one. */
+export function spanishMonth(month: number): string | undefined {
+  return Number.isInteger(month) && month >= 1 && month <= 12 ? MONTH_ES[month - 1] : undefined;
+}
+
+/** "miércoles 2 de diciembre a las 10:00 AM" ("a la 1:00 PM"): the new
+ * visit as a Spanish text says it (v261). */
+export function textedWhenEs(s: NpxSlot): string {
+  const { day, weekday, minutes } = localParts(s);
+  const [, month, date] = day.split('-').map(Number);
+  const hour12 = Math.floor(minutes / 60) % 12 || 12;
+  return `${WEEKDAY_ES[weekday]} ${date} de ${spanishMonth(month)} ${hour12 === 1 ? 'a la' : 'a las'} ${spokenSlotTime(s)}`;
+}
+
 /** The slot's date and 24-hour time in the clinic's own time zone
  * ("2026-12-01", "10:00"): what book_sooner_exam is called with (v218). */
 export function slotDateTime(s: NpxSlot): { date: string; time: string } {

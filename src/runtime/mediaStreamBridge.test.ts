@@ -1,3 +1,4 @@
+import { callLanguageFor, resetCallLanguagesForTests } from "../services/callLanguage";
 import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   decodeToolOutput,
@@ -2777,6 +2778,30 @@ describe("set_spoken_language", () => {
     h.handlers().onToolCall("c1", "set_spoken_language", { language: "English" });
     await settle();
     expect(h.session.setSpokenLanguage).not.toHaveBeenCalled();
+  });
+
+  it("v261: notes the call's language under its CallSid, for the text a booking sends after the call", async () => {
+    resetCallLanguagesForTests();
+    const sid = "CAbc83d5fb3913698181ce23444571fe9f";
+    const h = makeBridge({ agent: languageAgent({ success: true, language: "es" }), callSid: sid });
+    expect(callLanguageFor(sid)).toBeUndefined();
+    h.handlers().onToolCall("c1", "set_spoken_language", { language: "Spanish" });
+    await settle();
+    expect(callLanguageFor(sid)).toBe("es");
+    resetCallLanguagesForTests();
+  });
+
+  it("v261: a refused switch, or one to the language already in use, notes nothing", async () => {
+    resetCallLanguagesForTests();
+    const sid = "CA90b8e05920d8611e94b56e541dc3b3d8";
+    const refused = makeBridge({ agent: languageAgent({ success: false, error: "unsupported_language", language: "ko" }), callSid: sid });
+    refused.handlers().onToolCall("c1", "set_spoken_language", { language: "Korean" });
+    await settle();
+    const same = makeBridge({ agent: languageAgent({ success: true, language: "en" }), callSid: sid });
+    same.handlers().onToolCall("c1", "set_spoken_language", { language: "English" });
+    await settle();
+    expect(callLanguageFor(sid)).toBeUndefined();
+    resetCallLanguagesForTests();
   });
 
   it("switches back after a switch away", async () => {
