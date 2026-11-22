@@ -2239,24 +2239,6 @@ The ticket will include schedule context (last appointment info) automatically.`
           console.info(`[No-IVR Agent] date_of_birth taken from the caller's answer on ${metadata.callSid ?? 'unknown'}`);
         }
       }
-      // v264: the looked-up patient's date of birth beside a name nobody on
-      // file has with it (the caller's own, when they call for the patient)
-      // files under the record's name, with a note for staff. See
-      // afterHoursFiledName.ts for every condition.
-      const recordName = await recordNameForTheFiling({
-        callSid: metadata.callSid,
-        firstName: params.first_name,
-        lastName: params.last_name,
-        dateOfBirth: params.date_of_birth,
-        lookedUpFirstNames,
-        verify: verifyPatient,
-      });
-      if (recordName) {
-        // The record's names and date of birth now match the held identity,
-        // so the identity lock below and completedIdentity carry its office.
-        params = { ...params, first_name: recordName.firstName, last_name: recordName.lastName, date_of_birth: recordName.dateOfBirth };
-        console.info(`[No-IVR Agent] filed under the record's name, not the name the agent sent, on ${metadata.callSid ?? 'unknown'}`);
-      }
       // Lazy import to avoid module initialization during agent bootstrap
       const { SyncAgentService } = await import("../services/syncAgentService");
       
@@ -2373,6 +2355,32 @@ The ticket will include schedule context (last appointment info) automatically.`
         }
         emailEscaped = true;
         console.info(emailEscapeMarker(metadata.callSid ?? ''));
+      }
+
+      // v264: the looked-up patient's date of birth beside a name nobody on
+      // file has with it (the caller's own, when they call for the patient),
+      // on a filing that names the patient's own doctor or office, files under
+      // the record's name with a note for staff. See afterHoursFiledName.ts for
+      // every condition. It runs after every gate that returns without a
+      // ticket (an answered question, the date-of-birth ask, the email ask), so
+      // the person base is never asked for a filing that is not going out
+      // (#512 review, P2), and not on a date of birth the escape replaced.
+      const recordName = dobEscapeStatus ? undefined : await recordNameForTheFiling({
+        callSid: metadata.callSid,
+        firstName: params.first_name,
+        lastName: params.last_name,
+        dateOfBirth: params.date_of_birth,
+        doctorName: params.doctor_name,
+        location: params.location,
+        recordContext: scheduleContext,
+        lookedUpFirstNames,
+        verify: verifyPatient,
+      });
+      if (recordName) {
+        // The record's names and date of birth now match the held identity,
+        // so the identity lock below and completedIdentity carry its office.
+        params = { ...params, first_name: recordName.firstName, last_name: recordName.lastName, date_of_birth: recordName.dateOfBirth };
+        console.info(`[No-IVR Agent] filed under the record's name, not the name the agent sent, on ${metadata.callSid ?? 'unknown'}`);
       }
 
       // SECONDARY LOOKUP: Enrich schedule context using name+DOB

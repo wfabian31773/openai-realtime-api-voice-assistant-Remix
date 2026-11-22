@@ -35,6 +35,11 @@ const contextFor = (p: typeof PATIENT) => ({
     { date: 'Tuesday, December 31, 2041', isoDate: '2041-12-31', dayOfWeek: 'Tuesday', timeOfDay: 'morning',
       startTime: '8:50 AM', location: 'Quixotic Vision Testville', provider: 'Dr. Xavier Zebrastripe',
       status: 'Active', appointmentType: 'Dilated Exam' },
+    // A second appointment, so a filing can name a provider and office that are
+    // on the record but not the next appointment (VA-87782's shape).
+    { date: 'Thursday, January 9, 2042', isoDate: '2042-01-09', dayOfWeek: 'Thursday', timeOfDay: 'morning',
+      startTime: '7:15 AM', location: 'Fabletown Surgery Center', provider: 'Yolanda Ironwood, MD',
+      status: 'Active', appointmentType: 'Cataract Surgery' },
   ],
   pastAppointments: [],
   totalAppointmentsFound: 1,
@@ -113,10 +118,20 @@ const THE_HELD_PATIENT = {
   patient: { personId: 'p-zelda', personNbr: '1', firstName: 'Zelda', lastName: 'Quixote', dob: '1958-01-04', hasMedicalRecord: true },
 };
 
-const ticket = (first: string, last: string, dob: string) => ({
-  first_name: first, last_name: last, date_of_birth: dob, callback_number: '5551234567',
-  request_category: 'cancel_appointment', request_summary: 'Cancel the appointment; the patient is unwell.',
-});
+/**
+ * The filing names the patient's own doctor and office by default, as all 3
+ * corpus filings did (#512 review, P1), so each test below is about the one
+ * condition it names. `over` replaces or removes (undefined) them.
+ */
+const ticket = (first: string, last: string, dob: string, over: Record<string, unknown> = {}) => {
+  const t: Record<string, unknown> = {
+    first_name: first, last_name: last, date_of_birth: dob, callback_number: '5551234567',
+    request_category: 'cancel_appointment', request_summary: 'Cancel the appointment; the patient is unwell.',
+    doctor_name: 'Dr. Xavier Zebrastripe', location: 'Quixotic Vision Testville', ...over,
+  };
+  for (const k of Object.keys(t)) if (t[k] === undefined) delete t[k];
+  return t;
+};
 const payload = () => h.submitSimplifiedTicket.mock.calls[0][0] as Record<string, any>;
 
 async function lookUpZelda(agent: any) {
@@ -140,7 +155,8 @@ describe('the corpus: a ticket filed under another name beside the looked-up pat
   it('VA-87261 CA4ce0a96441ccf3658a4763d341d9034a: the caller\'s whole name, nobody on file with it', async () => {
     const agent = await agentFor('CA4ce0a96441ccf3658a4763d341d9034a');
     await lookUpZelda(agent);
-    const t = await call(agent, 'create_ticket', ticket('Marta', 'Ruiz', '01/04/1958'));
+    // The filing named the doctor by surname alone, and the office.
+    const t = await call(agent, 'create_ticket', ticket('Marta', 'Ruiz', '01/04/1958', { doctor_name: 'Zebrastripe' }));
     expect(t.success).toBe(true);
     expect(h.verifyPatient).toHaveBeenCalledWith({ firstName: 'Marta', lastName: 'Ruiz', dob: '1958-01-04' });
     expect(payload().patientFullName).toBe('Zelda Quixote');
@@ -152,7 +168,9 @@ describe('the corpus: a ticket filed under another name beside the looked-up pat
     h.verifyPatient.mockResolvedValue(THE_HELD_PATIENT);
     const agent = await agentFor('CA8203233402d094524387c2d4a611741b');
     await lookUpZelda(agent);
-    await call(agent, 'create_ticket', ticket('Marta', 'Quixote', '01/04/1958'));
+    // The filing named a provider and office from the record's second appointment.
+    await call(agent, 'create_ticket', ticket('Marta', 'Quixote', '01/04/1958',
+      { doctor_name: 'Yolanda Ironwood, MD', location: 'Fabletown Surgery Center' }));
     expect(payload().patientFullName).toBe('Zelda Quixote');
     expect(payload().additionalDetails).toMatch(/"Marta Quixote"/);
   });
@@ -161,7 +179,7 @@ describe('the corpus: a ticket filed under another name beside the looked-up pat
     h.verifyPatient.mockResolvedValue(THE_HELD_PATIENT);
     const agent = await agentFor('CAcbaf44534d401fb7a2d4369eb44b2374');
     await lookUpZelda(agent);
-    await call(agent, 'create_ticket', ticket('Bea', 'Quixote', 'January 4, 1958'));
+    await call(agent, 'create_ticket', ticket('Bea', 'Quixote', 'January 4, 1958', { doctor_name: 'Xavier Zebrastripe, MD' }));
     expect(payload().patientFullName).toBe('Zelda Quixote');
     expect(payload().patientDOB).toBe('01/04/1958');
     // The record's office reaches the ticket with the record's name.
@@ -238,6 +256,53 @@ describe('what stays as the agent sent it', () => {
     });
   }
 
+  it('the review\'s case: a second patient never looked up, filed with the first patient\'s date of birth, naming another doctor and office', async () => {
+    const agent = await agentFor('CA00000000000000000000000000a20264');
+    await lookUpZelda(agent);
+    await call(agent, 'create_ticket', ticket('Marta', 'Ruiz', '01/04/1958',
+      { doctor_name: 'Dr. Ulysses Thornbury', location: 'Elsewhere Eye Center' }));
+    expect(h.verifyPatient).not.toHaveBeenCalled();
+    expect(payload().patientFullName).toBe('Marta Ruiz');
+    expect(payload().additionalDetails ?? '').not.toMatch(/NAME CORRECTED/);
+  });
+
+  it('a filing that names no doctor and no office', async () => {
+    const agent = await agentFor('CA00000000000000000000000000a30264');
+    await lookUpZelda(agent);
+    await call(agent, 'create_ticket', ticket('Marta', 'Ruiz', '01/04/1958', { doctor_name: undefined, location: undefined }));
+    expect(h.verifyPatient).not.toHaveBeenCalled();
+    expect(payload().patientFullName).toBe('Marta Ruiz');
+  });
+
+  it('a filing that names only the office, or only the doctor, is enough', async () => {
+    const office = await agentFor('CA00000000000000000000000000a40264');
+    await lookUpZelda(office);
+    await call(office, 'create_ticket', ticket('Marta', 'Ruiz', '01/04/1958', { doctor_name: undefined }));
+    expect(payload().patientFullName).toBe('Zelda Quixote');
+
+    h.submitSimplifiedTicket.mockClear();
+    resetVerifiedIdentities();
+    const doctor = await agentFor('CA00000000000000000000000000a50264');
+    await lookUpZelda(doctor);
+    await call(doctor, 'create_ticket', ticket('Marta', 'Ruiz', '01/04/1958', { location: undefined }));
+    expect(payload().patientFullName).toBe('Zelda Quixote');
+  });
+
+  it('the person base is not asked for a filing that a gate turns back first (#512 review, P2)', async () => {
+    const agent = await agentFor('CA00000000000000000000000000a60264');
+    await lookUpZelda(agent);
+    // The email ask returns with no ticket; nothing is looked up for it.
+    const ask = await call(agent, 'create_ticket', ticket('Marta', 'Ruiz', '01/04/1958', { preferred_contact: 'email' }));
+    expect(ask.success).toBe(false);
+    // A question fully answered with no callback files nothing either.
+    const answered = await call(agent, 'create_ticket', ticket('Marta', 'Ruiz', '01/04/1958', {
+      request_category: 'general_question', question_fully_answered: true, requires_callback: false,
+    }));
+    expect(answered.ticketCreated).toBe(false);
+    expect(h.verifyPatient).not.toHaveBeenCalled();
+    expect(h.submitSimplifiedTicket).not.toHaveBeenCalled();
+  });
+
   it('a person base that throws', async () => {
     h.verifyPatient.mockRejectedValue(new Error('connection reset'));
     const agent = await agentFor('CA00000000000000000000000000e00264');
@@ -256,7 +321,8 @@ describe('the rule on its own', () => {
   const ask = (callSid: string, over: Partial<Parameters<typeof recordNameForTheFiling>[0]> = {}) =>
     recordNameForTheFiling({
       callSid, firstName: 'Marta', lastName: 'Ruiz', dateOfBirth: '01/04/1958',
-      lookedUpFirstNames: new Set(['zelda']), verify: h.verifyPatient as any, ...over,
+      lookedUpFirstNames: new Set(['zelda']), verify: h.verifyPatient as any,
+      doctorName: 'Dr. Xavier Zebrastripe', recordContext: contextFor(PATIENT) as any, ...over,
     });
 
   it('needs a held identity that is certain', async () => {
@@ -287,6 +353,39 @@ describe('the rule on its own', () => {
     expect(await ask('CA00000000000000000000000000f40264')).toEqual({ firstName: 'Zelda', lastName: 'Quixote', dateOfBirth: '1958-01-04', filedAs: 'Marta Ruiz' });
     h.verifyPatient.mockResolvedValue({ ...THE_HELD_PATIENT, patient: { ...THE_HELD_PATIENT.patient, dob: '1958-01-05' } });
     expect(await ask('CA00000000000000000000000000f40264')).toBeUndefined();
+  });
+
+  it('reads a doctor by surname and an office by its whole name', async () => {
+    const { doctorSurname, officeKey } = await import('./afterHoursFiledName');
+    expect(doctorSurname('Dr. Nayer')).toBe('nayer');
+    expect(doctorSurname('Jay Patel, MD')).toBe('patel');
+    expect(doctorSurname('Doctor Samuel Asanad')).toBe('asanad');
+    expect(doctorSurname('OCT-VF')).toBeUndefined();
+    expect(doctorSurname('Dr.')).toBeUndefined();
+    expect(officeKey('Azul Vision Covina Office')).toBe(officeKey('Covina'));
+    expect(officeKey('West Covina')).not.toBe(officeKey('Covina'));
+    expect(officeKey('Long Beach')).toBe('long beach');
+    expect(officeKey(' ')).toBeUndefined();
+  });
+
+  it('reads the call\'s schedule only when it is the held patient\'s', async () => {
+    await held('CA00000000000000000000000000f60264');
+    const other = { ...contextFor(PATIENT), patientData: { ...PATIENT, personId: 'p-someone-else' } };
+    const filing = { doctorName: 'Yolanda Ironwood, MD', location: 'Fabletown Surgery Center' };
+    h.verifyPatient.mockResolvedValue(NOBODY_ON_FILE);
+    expect(await ask('CA00000000000000000000000000f60264', { ...filing, recordContext: other as any })).toBeUndefined();
+    expect(h.verifyPatient).not.toHaveBeenCalled();
+    expect(await ask('CA00000000000000000000000000f60264', { ...filing, recordContext: contextFor(PATIENT) as any }))
+      .toMatchObject({ firstName: 'Zelda', lastName: 'Quixote' });
+  });
+
+  it('a doctor with another surname, or an office that only contains the record\'s, is no evidence', async () => {
+    await held('CA00000000000000000000000000f70264', { ...PATIENT, lastProviderSeen: 'Xavier Zebrastripe, MD', usualOffice: 'Testville' } as any);
+    const noSchedule = { recordContext: undefined };
+    expect(await ask('CA00000000000000000000000000f70264', { ...noSchedule, doctorName: 'Xavier Zebra', location: 'West Testville' })).toBeUndefined();
+    expect(h.verifyPatient).not.toHaveBeenCalled();
+    expect(await ask('CA00000000000000000000000000f70264', { ...noSchedule, doctorName: undefined, location: 'Azul Vision Testville Office' }))
+      .toMatchObject({ firstName: 'Zelda' });
   });
 
   it('folds the first name the way the lookups were noted', async () => {
