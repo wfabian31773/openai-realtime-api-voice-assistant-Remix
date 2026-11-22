@@ -134,6 +134,19 @@ describe('v265: a heard caller is never a ghost, and is never told to call back'
     expect(check).toBeGreaterThan(gate);
   });
 
+  it('resumes the step it was on after the check, and asks what they need only when nothing was asked', async () => {
+    // #513 review, round 2: a caller mid-intake who repeats "Hello?" while
+    // waiting is not asked for their request again. After the check the agent
+    // resumes; a caller who made no request is asked what they need.
+    const body = await grokBody('CA0000000000000000000000000000beef');
+    expect(body).toContain('"I\'m here. Can you hear me?" once, then resume, or ask what they need;');
+    const check = body.indexOf('"I\'m here. Can you hear me?"');
+    const resume = body.indexOf('then resume', check);
+    const ask = body.indexOf('or ask what they need', check);
+    expect(resume).toBeGreaterThan(check);
+    expect(ask).toBeGreaterThan(resume);
+  });
+
   it('still ends a true ghost and a robot, and still never escalates for either', async () => {
     const body = await grokBody('CA0000000000000000000000000000beef');
     expect(body).toContain('"What can I help you with today?", then "Take care, goodbye." and call terminate_call with reason "ghost_call"');

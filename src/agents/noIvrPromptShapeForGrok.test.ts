@@ -144,7 +144,7 @@ describe("the Grok body is the shape xAI's Prompting Guide prescribes", () => {
       expect(grok).toContain(`Non-urgent callbacks will be made ${callback}.`);
       expect(grok.length).toBeLessThan(legacy.length / 2);
       // RATCHET: measured 2026-11-22 (v265) with this fixture and pinned
-      // clocks, the built Grok body is 14,958 characters by day and 14,988
+      // clocks, the built Grok body is 14,954 characters by day and 14,984
       // overnight (v263 on main: 14,967 and 14,997; the 2026-10-28 trim: 14,767
       // and 14,797). The triage block and urgent symptoms are shared verbatim
       // with legacy. Never raise this silently.
