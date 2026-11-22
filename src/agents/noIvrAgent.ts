@@ -1,4 +1,6 @@
 import { nameKey, rememberVerifiedIdentity } from '../tools/verifiedIdentity';
+import { verifyPatient } from '../services/patientVerification';
+import { filedUnderAnotherNameNote, recordNameForTheFiling } from './afterHoursFiledName';
 import { callerAffirmedThePhoneMatch } from '../tools/greetingAffirmation';
 import { dobKey } from '../services/callFactsLedger';
 import { recognisedFirstName } from '../services/greetingPersonalisation';
@@ -931,8 +933,9 @@ function answersToTheGreetingPerson(confirmed: PatientScheduleContext, named: st
  * record holds.
  */
 export const RECORD_HOLDS_THE_IDENTITY_FIX =
-  "Confirmed: the record holds this caller's last name and date of birth, and create_ticket fills both from it. " +
-  'Do not ask the caller for either; file with their first name, and leave the date of birth out of your summary. ' +
+  "Confirmed: the record holds this patient's last name and date of birth, and create_ticket fills both from it. " +
+  "Do not ask the caller for either; file with the looked-up patient's first name (the patient's, never the caller's own " +
+  'when they call for someone), and leave the date of birth out of your summary. ' +
   "Only if the request is about someone else, take that patient's name and date of birth. Never read this aloud.";
 
 /**
@@ -1749,6 +1752,8 @@ export async function createNoIvrAgent(
   let scheduleContext: PatientScheduleContext | undefined;
   /** The schedule the caller's yes to the greeting confirmed on this call (v172). */
   let greetingConfirmed: PatientScheduleContext | undefined;
+  /** v264: every first name `lookup_schedule` was sent on this call, folded. */
+  const lookedUpFirstNames = new Set<string>();
   let callerMemory: CallerMemory | null = null;
 
   if (callerPhone) {
@@ -1864,6 +1869,7 @@ is not an identity. Confirm the name and date of birth, then call again with the
         hasName: !!(params.first_name && params.last_name),
         hasDob: !!params.date_of_birth,
       });
+      if (params.first_name?.trim()) lookedUpFirstNames.add(nameKey(params.first_name));
 
       try {
         let result: PatientScheduleContext;
@@ -2233,6 +2239,24 @@ The ticket will include schedule context (last appointment info) automatically.`
           console.info(`[No-IVR Agent] date_of_birth taken from the caller's answer on ${metadata.callSid ?? 'unknown'}`);
         }
       }
+      // v264: the looked-up patient's date of birth beside a name nobody on
+      // file has with it (the caller's own, when they call for the patient)
+      // files under the record's name, with a note for staff. See
+      // afterHoursFiledName.ts for every condition.
+      const recordName = await recordNameForTheFiling({
+        callSid: metadata.callSid,
+        firstName: params.first_name,
+        lastName: params.last_name,
+        dateOfBirth: params.date_of_birth,
+        lookedUpFirstNames,
+        verify: verifyPatient,
+      });
+      if (recordName) {
+        // The record's names and date of birth now match the held identity,
+        // so the identity lock below and completedIdentity carry its office.
+        params = { ...params, first_name: recordName.firstName, last_name: recordName.lastName, date_of_birth: recordName.dateOfBirth };
+        console.info(`[No-IVR Agent] filed under the record's name, not the name the agent sent, on ${metadata.callSid ?? 'unknown'}`);
+      }
       // Lazy import to avoid module initialization during agent bootstrap
       const { SyncAgentService } = await import("../services/syncAgentService");
       
@@ -2586,6 +2610,7 @@ The ticket will include schedule context (last appointment info) automatically.`
           callbackMismatchStaffNote(callbackNormalized, metadata.callerPhone),
           dobEscapeStatus ? dobStatusNote(dobEscapeStatus) : null,
           emailEscaped ? EMAIL_ESCAPE_NOTE : null,
+          recordName ? filedUnderAnotherNameNote(recordName.filedAs) : null,
           params.appointment_time ? `Appointment: ${params.appointment_time}` : null,
         ].filter(Boolean).join('\n') || undefined,
         callSid: metadata.callSid,
