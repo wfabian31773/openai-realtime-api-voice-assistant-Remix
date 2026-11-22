@@ -2118,8 +2118,9 @@ import { callEnvironment } from "./callRecord";
  * had heard (14 no-ivr calls 2026-11-08..22, 4 with no ticket), against
  * standing instruction 10. The body now scripts the ghost exchange with no
  * call-back line, and tells the model a caller who said anything, even one
- * word, is never a ghost: say "I'm here. Can you hear me?" once and ask what
- * they need. The runtime's ghost_call refusal (v131) is unchanged. Above
+ * word, is never a ghost. Only when the caller repeats "Hello?" or makes no
+ * request, it says "I'm here. Can you hear me?" once, then resumes the step it
+ * was on. The runtime's ghost_call refusal (v131) is unchanged. Above
  * main's v263 (#511, `1c4abb7b`), which it contains; v264 is #512 and v245
  * is #488 on their open branches, both held for the operator. No migration.
  */
