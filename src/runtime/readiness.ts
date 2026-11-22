@@ -2083,9 +2083,21 @@ import { callEnvironment } from "./callRecord";
  * stalled) now writes the close row, marked stage "setup". Above main's v259
  * (#507, `2589baf`), which it contains; v245 is #488 on its open branch. No
  * migration.
+ * On main since #508 (`168a27c7`).
+ *
+ * v262 — A PROTOCOL ERROR IS NOT OUR CLOSE (2026-11-22). Logging only. A
+ * frame from the provider that breaks the WebSocket protocol makes ws start
+ * the close itself and emit an error; the error woke the first-event retry,
+ * which detached the socket before ws's close event, and the detach recorded
+ * client_close and closedByUs (the #508 review, unanswered at its merge). A
+ * WebSocket error is now a first signal of its own, ws_error, recorded before
+ * the retry is woken, and neither a detach nor close() marks a socket ws is
+ * already closing after an error as ours. Above main's v260 (#508,
+ * `168a27c7`), which it contains; v261 is #509 and v245 is #488 on their
+ * open branches. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v260-the-close-review-answered-20261121";
+  "voice-runtime-v262-a-protocol-error-is-not-our-close-20261122";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

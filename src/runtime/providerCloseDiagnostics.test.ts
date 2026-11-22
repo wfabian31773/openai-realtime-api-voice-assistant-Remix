@@ -355,6 +355,16 @@ describe("why an xAI socket ended (v259)", () => {
     expect(d.closeCode).not.toBeNull();
   });
 
+  it("does not call a close ours when the peer had already closed it", async () => {
+    // The teardown's close() after a peer reset only cleans up (v259's rule,
+    // pinned in v262 beside the error guard it now sits with).
+    const url = await server((_s, req) => setTimeout(() => req.socket.resetAndDestroy(), 30));
+    const { t, closed } = await open(url);
+    await closed;
+    t.close();
+    expect(t.closeDiagnostics()).toMatchObject({ firstSignal: "socket_error", closedByUs: false });
+  });
+
   it("still calls a detach ours when nothing went wrong on the socket first", async () => {
     // The control for the guard: a healthy socket that only stalled.
     const wss = new WebSocketServer({ port: 0 });
