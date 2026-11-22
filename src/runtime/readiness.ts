@@ -2080,12 +2080,19 @@ import { callEnvironment } from "./callRecord";
  * is kept, an object dropped, and the note can never block onError); the
  * peer's close reason is kept as its length only; and a setup that fails
  * after a socket was opened (a refused handshake, every first-event retry
- * stalled) now writes the close row, marked stage "setup". Above main's v259
- * (#507, `2589baf`), which it contains; v245 is #488 on its open branch. No
- * migration.
+ * stalled) now writes the close row, marked stage "setup". On main since #508
+ * (`168a27c7`).
+ *
+ * v261 — A SPANISH CALL IS TEXTED IN SPANISH (2026-11-22). An NPX booking made
+ * on a call the agent served in Spanish is confirmed by a Spanish text: the
+ * bridge records the language each call is spoken in, the confirmation record
+ * carries the Spanish words, and the hang-up writes the language the call
+ * ended in. A link booking and a record from before v261 stay English. Above
+ * main's v260 (#508, `168a27c7`), which it contains; v245 is #488 on its open
+ * branch. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v260-the-close-review-answered-20261121";
+  "voice-runtime-v261-a-spanish-call-is-texted-in-spanish-20261122";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

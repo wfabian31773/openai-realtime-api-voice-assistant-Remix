@@ -443,6 +443,19 @@ describe("the booking confirmation (v222)", () => {
     expect(m).toContain("RETURNING id");
   });
 
+  it("writes the language the call ended in onto the confirmation and the placeholder, and never clears one (v261)", () => {
+    const m = method("releaseConfirmation");
+    // Typed, so an absent language is a typed NULL (the v52 lesson), and an
+    // absent language merges nothing over the language the booking recorded.
+    const languageCase = "|| CASE WHEN ${language ?? null}::text IS NULL THEN '{}'::jsonb";
+    expect(m.split(languageCase).length - 1).toBe(2);
+    expect(m).toContain("ELSE jsonb_build_object('language', ${language ?? null}::text) END");
+    // The late queue takes the placeholder's language over its own.
+    const q = method("queueConfirmation");
+    expect(q).toContain("${CONFIRMATION_FIELD}::text ? 'language'");
+    expect(q).toContain("THEN jsonb_build_object('language', custom_data -> ${OUTREACH_TEXT_KEY}::text -> ${CONFIRMATION_FIELD}::text -> 'language')");
+  });
+
   it("writes a released placeholder when the queue has not landed yet, never a sendable state (Codex P2 on #474)", () => {
     const m = method("releaseConfirmation");
     expect(m).toContain("IS DISTINCT FROM ${bookingId}::text");

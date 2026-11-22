@@ -99,10 +99,60 @@ export interface BookingConfirmationRecord {
   /** A short code, never a body. */
   reason?: string;
   tries?: number;
+  /** v261: "es" when the call was spoken in Spanish, set at the booking and
+   * again at the hang-up from the language the call ended in. Absent or "en":
+   * the English text. */
+  language?: ConfirmationLanguage;
+  /** v261: "miércoles 2 de diciembre a las 10:00 AM", rendered with `when`
+   * on a call booking. Absent on a record written before v261, which is then
+   * texted in English whatever its language. */
+  when_es?: string;
+  /** v261: "6 de enero", or "" when the date does not read. */
+  replaced_day_es?: string;
+}
+
+/** The two languages the confirmation is written in (v261). */
+export type ConfirmationLanguage = "en" | "es";
+
+/**
+ * The confirmation's language from the language the bridge is speaking the
+ * call in (v261, callLanguage.ts): Spanish for any Spanish tag, English for
+ * any other language, and undefined when the call never switched, so a caller
+ * that passes undefined changes nothing already recorded.
+ */
+export function confirmationLanguageOf(callLanguage: string | undefined): ConfirmationLanguage | undefined {
+  if (typeof callLanguage !== "string" || !callLanguage.trim()) return undefined;
+  return callLanguage.trim().toLowerCase().split(/[-_]/)[0] === "es" ? "es" : "en";
+}
+
+type BodyFields = Pick<
+  BookingConfirmationRecord,
+  "when" | "place" | "phone" | "replaced_day" | "cancel" | "language" | "when_es" | "replaced_day_es"
+>;
+
+/**
+ * THE SPANISH TEXT (v261), clause for clause the approved English one: when
+ * and where, the practice's phone, what became of the Azul appointment, who
+ * to call, and STOP, which stays the keyword the opt-out reads
+ * (textReplies.ts). Only GSM-7 characters (é, ñ and ¿ are in it; á, í, ó and
+ * ú are not), and at most two segments at the longest place, phone and date
+ * the campaign has sent. The wording is the operator's to overrule.
+ */
+function spanishConfirmationBody(r: BodyFields): string {
+  const appointment = r.replaced_day_es ? `su cita del ${r.replaced_day_es} con nosotros` : "su cita actual con nosotros";
+  const cancelLine =
+    r.cancel === "cancelled"
+      ? `${appointment.charAt(0).toUpperCase()}${appointment.slice(1)} fue cancelada.`
+      : `Cancelaremos ${appointment}.`;
+  const phone = r.phone ? ` Teléfono: ${r.phone}.` : "";
+  return sanitizeForSms(
+    `Azul Vision: tiene cita el ${r.when_es} en ${r.place}.${phone} ${cancelLine} ¿Preguntas? Llame a este teléfono. Responda STOP para darse de baja.`,
+  ).value;
 }
 
 /** The text, as the person reads it. GSM-7 after sanitizeForSms. */
-export function confirmationBody(r: Pick<BookingConfirmationRecord, "when" | "place" | "phone" | "replaced_day" | "cancel">): string {
+export function confirmationBody(r: BodyFields): string {
+  if (r.language === "es" && r.when_es) return spanishConfirmationBody(r);
   const cancelLine =
     r.cancel === "cancelled"
       ? `Your ${r.replaced_day} appointment with us is cancelled.`
