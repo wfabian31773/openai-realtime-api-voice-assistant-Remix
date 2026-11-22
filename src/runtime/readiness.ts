@@ -2087,12 +2087,22 @@ import { callEnvironment } from "./callRecord";
  * on a call the agent served in Spanish is confirmed by a Spanish text: the
  * bridge records the language each call is spoken in, the confirmation record
  * carries the Spanish words, and the hang-up writes the language the call
- * ended in. A link booking and a record from before v261 stay English. Above
- * main's v260 (#508, `168a27c7`), which it contains; v245 is #488 on its open
- * branch. No migration.
+ * ended in. A link booking and a record from before v261 stay English. On
+ * main since #509 (`9102e0e3`).
+ *
+ * v262 — A PROTOCOL ERROR IS NOT OUR CLOSE (2026-11-22). Logging only. A
+ * frame from the provider that breaks the WebSocket protocol makes ws start
+ * the close itself and emit an error; the error woke the first-event retry,
+ * which detached the socket before ws's close event, and the detach recorded
+ * client_close and closedByUs (the #508 review, unanswered at its merge). A
+ * WebSocket error is now a first signal of its own, ws_error, recorded before
+ * the retry is woken, and neither a detach nor close() marks a socket ws is
+ * already closing after an error as ours. Above main's v261 (#509,
+ * `9102e0e3`), which it contains along with v260 (#508, `168a27c7`); v245 is
+ * #488 on its open branch. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v261-a-spanish-call-is-texted-in-spanish-20261122";
+  "voice-runtime-v262-a-protocol-error-is-not-our-close-20261122";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

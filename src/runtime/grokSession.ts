@@ -103,12 +103,17 @@ export interface GrokTransport {
  * the two fields the drops have been missing.
  */
 export interface ProviderCloseDiagnostics {
-  /** What ended the connection first. */
+  /**
+   * What ended the connection first. `ws_error` is an error the WebSocket
+   * itself emitted: a refused handshake, or a frame from the peer that broke
+   * the protocol, after which `ws` starts the close on its own (v262).
+   */
   firstSignal:
     | "provider_error_event"
     | "socket_error"
     | "socket_fin"
     | "socket_close"
+    | "ws_error"
     | "client_close"
     | null;
   closeCode: number | null;
@@ -127,7 +132,10 @@ export interface ProviderCloseDiagnostics {
   wsErrorMessage: string | null;
   providerErrorType: string | null;
   providerErrorCode: string | null;
-  /** We called close() before the socket ended. */
+  /**
+   * We called close() before the socket ended, and nothing had gone wrong on
+   * it first: a socket `ws` is already closing after an error is not ours.
+   */
   closedByUs: boolean;
   openForMs: number | null;
   msSinceServerEvent: number | null;
@@ -1089,6 +1097,10 @@ export class WebSocketGrokTransport implements GrokTransport {
     this.ws.on("message", (data: Buffer) => this.handleInbound(data.toString("utf8")));
     this.ws.on("error", (err: Error) => {
       this.wsErrorMessage = capText(err.message, 160);
+      // Recorded before the retry is woken: the retry detaches the socket
+      // while `ws` is still closing it, and the close event that would have
+      // said who started it never arrives (#508 review, v262).
+      this.signal("ws_error");
       this.wakeFirstEventWaiters(false);
       this.errorHandler?.(err);
     });
@@ -1221,11 +1233,15 @@ export class WebSocketGrokTransport implements GrokTransport {
     // peer's side, and this only cleans it up (#508 review). A socket still
     // open ends here, so this is the moment its diagnostics describe: the
     // queue, the open sockets and the loop are read now, before it is
-    // uncounted, and a later read changes nothing (#508 review).
+    // uncounted, and a later read changes nothing (#508 review). A socket
+    // `ws` is already closing after an error ended on that error, not on
+    // this detach, so it is not marked ours (#508 review, v262).
     if (this.closedAtMs === null) {
       this.closedAtMs = Date.now();
-      this.closedByUs = true;
-      this.signal("client_close");
+      if (this.wsErrorMessage === null) {
+        this.closedByUs = true;
+        this.signal("client_close");
+      }
       this.bufferedAtClose = this.ws?.bufferedAmount ?? null;
       this.openSocketsAtClose = this.counted ? openGrokSockets : null;
       this.loopAtClose = eventLoopSnapshot(this.closedAtMs);
@@ -1257,7 +1273,9 @@ export class WebSocketGrokTransport implements GrokTransport {
 
   close(): void {
     if (!this.ws) return;
-    if (this.closedAtMs === null) {
+    // Not ours when `ws` is already closing after an error: the teardown that
+    // calls this follows the error (v262).
+    if (this.closedAtMs === null && this.wsErrorMessage === null) {
       this.closedByUs = true;
       this.signal("client_close");
     }
