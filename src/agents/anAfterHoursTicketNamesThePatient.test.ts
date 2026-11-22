@@ -303,6 +303,23 @@ describe('what stays as the agent sent it', () => {
     expect(h.submitSimplifiedTicket).not.toHaveBeenCalled();
   });
 
+  it('a date of birth the escape replaced is not the patient\'s, so nothing is renamed (#512 review, P2)', async () => {
+    h.verifyPatient.mockResolvedValue(NOBODY_ON_FILE);
+    const agent = await agentFor('CA00000000000000000000000000b60264');
+    await lookUpZelda(agent);
+    // A date said wholly in words: the after-hours parser refuses it, so the
+    // escape asks once and then files with "Unknown"; the name rule's reader
+    // would read it as the held date.
+    const worded = 'January fourth, nineteen fifty-eight';
+    const askedOnce = await call(agent, 'create_ticket', ticket('Marta', 'Quixote', worded));
+    expect(askedOnce.success).toBe(false);
+    const t = await call(agent, 'create_ticket', ticket('Marta', 'Quixote', worded));
+    expect(t.success).toBe(true);
+    expect(h.verifyPatient).not.toHaveBeenCalled();
+    expect(payload().patientFullName).toBe('Marta Quixote');
+    expect(payload().patientDOB).toBe('Unknown');
+  });
+
   it('a person base that throws', async () => {
     h.verifyPatient.mockRejectedValue(new Error('connection reset'));
     const agent = await agentFor('CA00000000000000000000000000e00264');
