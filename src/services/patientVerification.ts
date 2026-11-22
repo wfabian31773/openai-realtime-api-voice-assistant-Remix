@@ -448,6 +448,71 @@ export function __resetPoolForTests(): void {
  * Two or more people means `ambiguous` and a candidate count — never a guess,
  * which is instruction 6 and the rule the rest of this file already keeps.
  */
+/** The most rows `rowsOnTheNumber` reads; a read that fills it may have left rows out. */
+export const ROWS_ON_THE_NUMBER_LIMIT = 50;
+
+/** Every patients_master row carrying this ten-digit number in one of its five phone columns, at most `ROWS_ON_THE_NUMBER_LIMIT`. Throws on a failed or slow read. */
+async function rowsOnTheNumber(last10: string): Promise<Row[]> {
+  const q = getPool().query<Row>(
+      `SELECT person_id::text            AS person_id,
+              person_nbr,
+              first_name,
+              last_name,
+              to_char(date_of_birth, 'YYYY-MM-DD') AS date_of_birth,
+              has_medical_record,
+              language,
+              ARRAY[cell_phone, home_phone, day_phone, alt_phone, sec_home_phone] AS phones,
+              to_char(source_updated_at, 'YYYY-MM-DD"T"HH24:MI:SS') AS source_updated_at
+         FROM public.patients_master
+        WHERE right(regexp_replace(coalesce(cell_phone,''),     '\\D', '', 'g'), 10) = $1
+           OR right(regexp_replace(coalesce(home_phone,''),     '\\D', '', 'g'), 10) = $1
+           OR right(regexp_replace(coalesce(sec_home_phone,''), '\\D', '', 'g'), 10) = $1
+           OR right(regexp_replace(coalesce(day_phone,''),      '\\D', '', 'g'), 10) = $1
+           OR right(regexp_replace(coalesce(alt_phone,''),      '\\D', '', 'g'), 10) = $1
+        LIMIT ${ROWS_ON_THE_NUMBER_LIMIT}`,
+      [last10],
+    );
+  return (
+    await Promise.race([
+      q,
+      new Promise<never>((_, rej) => setTimeout(() => rej(new Error('timeout')), lookupTimeoutMs())),
+    ])
+  ).rows;
+}
+
+/**
+ * v264 (#512 review, round 2): whether somebody on file at the calling number,
+ * other than `exceptPersonId`, answers to this first and last name (folded;
+ * the first name also by its first three letters, the narrowing `verifyPatient`
+ * uses). `unknown` when the number cannot identify a line or the person base
+ * cannot answer, so a caller of it can refuse on anything but `no`.
+ */
+export async function nameOnTheNumber(
+  rawPhone: string | undefined | null,
+  firstName: string,
+  lastName: string,
+  exceptPersonId?: string,
+): Promise<'yes' | 'no' | 'unknown'> {
+  const digits = phoneDigits(rawPhone);
+  const first = foldName(firstName);
+  const last = foldName(lastName);
+  if (digits.length < 10 || !first || !last) return 'unknown';
+  if (!isVerificationConfigured() || mirrorIsDown()) return 'unknown';
+  let rows: Row[];
+  try {
+    rows = await rowsOnTheNumber(digits.slice(-10));
+  } catch (e) {
+    noteMirrorDown();
+    console.error(`[VERIFY] mirror phone lookup FAILED (${(e as Error).message}) — not reading the number`);
+    return 'unknown';
+  }
+  const stem = first.slice(0, 3);
+  if (rows.some((r) => r.person_id !== exceptPersonId && foldName(r.last_name) === last &&
+    (foldName(r.first_name) === first || foldName(r.first_name).startsWith(stem)))) return 'yes';
+  // A full read may have left the name out (#512 review, round 3): not knowing is not no.
+  return rows.length >= ROWS_ON_THE_NUMBER_LIMIT ? 'unknown' : 'no';
+}
+
 /**
  * `firstName` is RULE ZERO step 2 inside the person base: a number shared by
  * several people (28 of 135 phone matches resolve to 2-3, the operator's own to
@@ -477,31 +542,7 @@ export async function findByPhone(rawPhone: string | undefined | null, firstName
 
   let rows: Row[];
   try {
-    const q = getPool().query<Row>(
-      `SELECT person_id::text            AS person_id,
-              person_nbr,
-              first_name,
-              last_name,
-              to_char(date_of_birth, 'YYYY-MM-DD') AS date_of_birth,
-              has_medical_record,
-              language,
-              ARRAY[cell_phone, home_phone, day_phone, alt_phone, sec_home_phone] AS phones,
-              to_char(source_updated_at, 'YYYY-MM-DD"T"HH24:MI:SS') AS source_updated_at
-         FROM public.patients_master
-        WHERE right(regexp_replace(coalesce(cell_phone,''),     '\\D', '', 'g'), 10) = $1
-           OR right(regexp_replace(coalesce(home_phone,''),     '\\D', '', 'g'), 10) = $1
-           OR right(regexp_replace(coalesce(sec_home_phone,''), '\\D', '', 'g'), 10) = $1
-           OR right(regexp_replace(coalesce(day_phone,''),      '\\D', '', 'g'), 10) = $1
-           OR right(regexp_replace(coalesce(alt_phone,''),      '\\D', '', 'g'), 10) = $1
-        LIMIT 50`,
-      [last10],
-    );
-    rows = (
-      await Promise.race([
-        q,
-        new Promise<never>((_, rej) => setTimeout(() => rej(new Error('timeout')), lookupTimeoutMs())),
-      ])
-    ).rows;
+    rows = await rowsOnTheNumber(last10);
   } catch (e) {
     noteMirrorDown();
     // A caller is waiting and the ladder already has an answer for them.
