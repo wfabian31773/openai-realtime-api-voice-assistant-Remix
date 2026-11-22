@@ -76,6 +76,11 @@ describe('nameOnTheNumber', () => {
     delete process.env.OBS_CONSOLE_DATABASE_URL;
     expect(await nameOnTheNumber('5555550100', 'Marta', 'Ruiz')).toBe('unknown');
     expect(query).not.toHaveBeenCalled();
+    // An unconfigured process is not a failed read: it must not trip the
+    // mirror's breaker for the reads after it.
+    process.env.OBS_CONSOLE_DATABASE_URL = 'postgres://fake/console';
+    query.mockResolvedValue({ rows: [] });
+    expect(await nameOnTheNumber('5555550100', 'Marta', 'Ruiz')).toBe('no');
   });
 
   it('a read that fails is unknown, and the mirror is then skipped', async () => {
