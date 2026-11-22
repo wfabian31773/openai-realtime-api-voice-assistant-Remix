@@ -166,8 +166,13 @@ export interface ReconnectingSessionDeps {
   connect: () => Promise<GrokTransport>;
   /** Whether a reconnect may start at all (false once the caller hung up). */
   mayReconnect?: () => boolean;
-  /** The conversation so far, rendered (`AGENT: ...` / `CALLER: ...`). */
-  history: () => string;
+  /**
+   * The conversation so far, one turn per line the bridge wrote, with its
+   * speaker. Structured, never the rendered transcript (#511 review, round
+   * 3): a caller's words can hold a newline followed by "AGENT:", and a
+   * speaker read back from rendered text would make them the agent's.
+   */
+  history: () => readonly HistoryTurn[];
   /** Builds a session; the real GrokVoiceSession unless a test injects one. */
   buildSession?: (
     transport: GrokTransport,
@@ -234,6 +239,12 @@ export function resumeBlock(): string {
   ].join("\n");
 }
 
+/** One line of the call so far, as the bridge wrote it, with its speaker. */
+export interface HistoryTurn {
+  role: "caller" | "agent";
+  text: string;
+}
+
 /** One line of the call so far, as a conversation item. */
 export interface HistoryMessage {
   role: "user" | "assistant";
@@ -241,25 +252,19 @@ export interface HistoryMessage {
 }
 
 /**
- * The bridge's transcript (`CALLER: …` / `AGENT: …`, one line each) as
- * role-tagged messages: the caller's lines as user items, the agent's as
- * assistant items. A line with neither prefix continues the one before it.
- * The tail of a long call, whole messages, the first one kept clipped from
- * the front, within RESUME_HISTORY_CHARS.
+ * The bridge's turns as role-tagged messages: the caller's turns as user
+ * items, the agent's as assistant items. The speaker is the turn's own, and
+ * nothing in a turn's words can change it (#511 review, round 3). Whitespace
+ * inside a turn is collapsed and an empty turn is dropped. The tail of a long
+ * call, whole messages, the first one kept clipped from the front, within
+ * RESUME_HISTORY_CHARS.
  */
-export function historyMessages(history: string): HistoryMessage[] {
+export function historyMessages(turns: readonly HistoryTurn[]): HistoryMessage[] {
   const all: HistoryMessage[] = [];
-  for (const raw of history.split("\n")) {
-    const line = raw.trim();
-    if (!line) continue;
-    const m = /^(CALLER|AGENT):\s*(.*)$/i.exec(line);
-    if (m) {
-      const text = m[2].trim();
-      if (text) all.push({ role: m[1].toUpperCase() === "CALLER" ? "user" : "assistant", text });
-      continue;
-    }
-    const prev = all[all.length - 1];
-    if (prev) prev.text = `${prev.text} ${line}`;
+  for (const turn of turns) {
+    const text = turn.text.replace(/\s+/g, " ").trim();
+    if (!text) continue;
+    all.push({ role: turn.role === "caller" ? "user" : "assistant", text });
   }
   let total = 0;
   let start = all.length;
@@ -645,7 +650,11 @@ export class ReconnectingSession implements BridgeSession {
     // 3. The caller turn the drop cut off, then what they said during the
     //    gap: one continuous stretch of their audio, which the new session's
     //    turn detection hears as they said it.
+    // The ring starts again with the new session (#511 review, round 3): it
+    // holds only audio this session was sent, so a later drop's replay can
+    // never reach back past this swap to a turn already answered.
     this.openCallerTurns = [];
+    this.ring.length = 0;
     for (const audio of gap.replay) this.sendAudio(audio);
     for (const audio of gap.audio) this.sendAudio(audio);
     // Nothing queued: ask for the agent's turn when it owed the caller words
@@ -742,21 +751,17 @@ export class ReconnectingSession implements BridgeSession {
     return this.configuredAtMs === null ? null : this.now() - this.configuredAtMs;
   }
 
-  private safeHistory(): string {
+  private safeHistory(): readonly HistoryTurn[] {
     try {
-      return this.deps.history();
+      return this.deps.history() ?? [];
     } catch {
-      return "";
+      return [];
     }
   }
 
   private callerSpokeLast(): boolean {
-    const lines = this.safeHistory()
-      .split("\n")
-      .map((l) => l.trim())
-      .filter(Boolean);
-    const last = lines[lines.length - 1] ?? "";
-    return /^CALLER:/i.test(last);
+    const said = this.safeHistory().filter((t) => t.text.trim() !== "");
+    return said[said.length - 1]?.role === "caller";
   }
 
   private toolEntries(): ToolRunEntry[] {

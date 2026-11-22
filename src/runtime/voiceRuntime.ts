@@ -1860,7 +1860,7 @@ export function mountVoiceRuntime(
                 config: sessionConfig,
                 onFirstConfigured: () => clearSetupDeadline(),
                 mayReconnect: () => !socketGone,
-                history: () => bridge?.getTranscript() ?? "",
+                history: () => bridge?.getTranscriptTurns() ?? [],
                 budgetMs: clampEnvMs(
                   env.RUNTIME_RECONNECT_BUDGET_MS,
                   DEFAULT_RECONNECT_BUDGET_MS,
