@@ -989,15 +989,84 @@ describe("the #511 review", () => {
     expect(h.events[0]).toMatchObject({ queuedTurns: 0, cutMidTurn: true });
   });
 
-  it("P1: a line whose words began is not said again", async () => {
+  it("P1: a line whose words reached the transcript and not the caller's ear is said again", async () => {
+    // The caller hears audio, not the transcript: a transcript delta with no
+    // audio cost them none of the line (#511 review, round 2).
     const h = harness();
     h.configureFirst();
     h.s.speak("Your ticket number is VA-1.");
     h.first.emit({ type: "response.created" });
     h.first.emit({ type: "response.output_audio_transcript.delta", delta: "Your" });
     const t2 = await h.dropAndReconnect();
+    const force = t2.ofType("conversation.item.create").filter((e) => e.item.type === "force_message");
+    expect(force.map((e) => e.item.content[0].text)).toEqual(["Your ticket number is VA-1."]);
+    expect(h.events[0].queuedTurns).toBe(1);
+  });
+
+  it("round 2, P1: a greeting the drop cut mid-audio is said again whole, first, and still not interruptible", async () => {
+    const h = harness({ history: "" });
+    h.configureFirst();
+    h.s.speak("Thank you for calling. This call is recorded.", { interruptible: false });
+    h.first.emit({ type: "response.created" });
+    h.first.emit({ type: "response.output_audio.delta", delta: SILENCE });
+    h.first.drop();
+    // A line the bridge asks for in the gap comes after it.
+    h.s.speak("One moment.");
+    await settle();
+    const t2 = h.next[0];
+    t2.emit({ type: "session.updated" });
+    const force = t2.ofType("conversation.item.create").filter((e) => e.item.type === "force_message");
+    expect(force.map((e) => e.item.content[0].text)).toEqual(["Thank you for calling. This call is recorded."]);
+    expect(force[0].item.interruptible).toBe(false);
+    // Only one goes out until it is done; the gap's line waits behind it.
+    t2.emit({ type: "response.created" });
+    t2.emit({ type: "response.done" });
+    const after = t2.ofType("conversation.item.create").filter((e) => e.item.type === "force_message");
+    expect(after.map((e) => e.item.content[0].text)).toEqual(["Thank you for calling. This call is recorded.", "One moment."]);
+    expect(h.events[0]).toMatchObject({ queuedTurns: 2, resumedTurn: false, cutMidTurn: true });
+  });
+
+  it("round 2, P1: a greeting whose audio completed before the drop is not said again", async () => {
+    const h = harness({ history: "" });
+    h.configureFirst();
+    h.s.speak("Thank you for calling. This call is recorded.", { interruptible: false });
+    h.first.emit({ type: "response.created" });
+    h.first.emit({ type: "response.output_audio.delta", delta: SILENCE });
+    h.first.emit({ type: "response.output_audio_transcript.done", transcript: "Thank you for calling. This call is recorded." });
+    const t2 = await h.dropAndReconnect();
     expect(t2.ofType("conversation.item.create").filter((e) => e.item.type === "force_message")).toHaveLength(0);
-    expect(h.events[0].queuedTurns).toBe(0);
+  });
+
+  it("round 2, P1: a greeting the caller could not have cut (a tool call, a barge-in) is not said again", async () => {
+    for (const end of ["tool", "cancel"] as const) {
+      const h = harness({ history: "" });
+      h.configureFirst();
+      h.s.speak("Thank you for calling.", { interruptible: false });
+      h.first.emit({ type: "response.created" });
+      h.first.emit({ type: "response.output_audio.delta", delta: SILENCE });
+      if (end === "tool") {
+        h.first.emit({ type: "response.function_call_arguments.done", call_id: "call_x", name: "lookup_patient", arguments: "{}" });
+      } else h.s.cancelResponse();
+      const t2 = await h.dropAndReconnect();
+      expect(t2.ofType("conversation.item.create").filter((e) => e.item.type === "force_message")).toHaveLength(0);
+    }
+  });
+
+  it("round 2: the bridge is told of the drop, and nothing else closes the cut line for it", async () => {
+    const calls: Calls = [];
+    const handlers = { ...recordingHandlers(calls), onProviderDrop: () => calls.push({ name: "onProviderDrop", args: [] }) };
+    const h = harness({ handlers });
+    h.configureFirst();
+    h.s.requestResponse();
+    h.first.emit({ type: "response.created" });
+    h.first.emit({ type: "response.output_audio.delta", delta: SILENCE });
+    h.first.drop();
+    await settle();
+    const names = calls.map((c) => c.name);
+    expect(names).toContain("onProviderDrop");
+    expect(names).not.toContain("onAudioDone");
+    // The response the drop left open still settles, after the drop is told.
+    expect(names.indexOf("onResponseDone")).toBeGreaterThan(names.indexOf("onProviderDrop"));
   });
 
   it("P1: a turn that called a tool is not asked for again", async () => {

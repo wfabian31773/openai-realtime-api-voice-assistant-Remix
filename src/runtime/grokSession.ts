@@ -466,11 +466,18 @@ export class GrokVoiceSession {
    * so a dropped connection can hand it to the next session (v263). */
   private sayInFlight: PendingSay | null = null;
   /** The line whose response the wire has started (`response.created`) and
-   * that has produced nothing yet: no audio, no transcript, no tool call. A
-   * drop in that window cost the caller none of it, so the next session
-   * says it; without this an opening greeting that dropped there was lost
-   * and the resumed session told it had greeted (#511 review, P1). */
+   * that has played nothing yet: no audio and no tool call. A drop in that
+   * window cost the caller none of it, so the next session says it; without
+   * this an opening greeting that dropped there was lost and the resumed
+   * session told it had greeted (#511 review, P1). A transcript delta does
+   * not end it: the caller hears audio, not the transcript. */
   private sayAwaitingOutput: PendingSay | null = null;
+  /** That line once its audio has started, until it completes. A drop here
+   * cut it; only a line that may not be interrupted (the greeting, which
+   * carries the recording disclosure) is said again, whole, by the next
+   * session (#511 review, round 2). An interruptible one the caller heard
+   * part of is recorded as cut and the agent goes on from it. */
+  private sayPlaying: PendingSay | null = null;
   /** True from sending `response.cancel` until the current response cycle
    * ends (the next `response.created`) or the provider rejects the cancel
    * outright. Only while this is owed may that specific rejection be
@@ -722,6 +729,7 @@ export class GrokVoiceSession {
       case "response.done":
         this.wireResponseActive = false;
         this.sayAwaitingOutput = null;
+        this.sayPlaying = null;
         // Deliberately does NOT clear cancelDoneOwed (Codex review, PR
         // #213): a response.done is not proof the cancel was honored — it
         // is just as likely the NATURAL completion that raced it, in which
@@ -764,6 +772,7 @@ export class GrokVoiceSession {
           break;
         }
         this.sayAwaitingOutput = null;
+        this.sayPlaying = null;
         this.handlers.onToolCall(event.call_id, event.name, args as Record<string, unknown>);
         break;
       }
@@ -773,12 +782,16 @@ export class GrokVoiceSession {
         this.handlers.onSpeechStarted?.();
         break;
       case "response.output_audio.delta":
-        this.sayAwaitingOutput = null;
+        if (this.sayAwaitingOutput !== null) {
+          this.sayPlaying = this.sayAwaitingOutput;
+          this.sayAwaitingOutput = null;
+        }
         this.handlers.onAudioDelta?.(event.delta);
         break;
       case "response.output_audio_transcript.done":
         // The per-utterance completion signal (see module doc) — the
         // bridge places its Twilio mark on this, and records the words.
+        this.sayPlaying = null;
         this.handlers.onAudioDone?.(event.transcript);
         break;
       case "input_audio_buffer.speech_stopped":
@@ -802,10 +815,7 @@ export class GrokVoiceSession {
         // knew every word before it was spoken. Here the model writes the
         // line, so these deltas are the only record of a line that gets
         // cut off mid-sentence by a barge-in.
-        if (event.delta) {
-          this.sayAwaitingOutput = null;
-          this.handlers.onAgentTranscriptDelta?.(event.delta);
-        }
+        if (event.delta) this.handlers.onAgentTranscriptDelta?.(event.delta);
         break;
     }
   }
@@ -1027,6 +1037,7 @@ export class GrokVoiceSession {
     // The caller spoke over it: the line the open response is for is
     // abandoned too, and a drop now must not say it again.
     this.sayAwaitingOutput = null;
+    this.sayPlaying = null;
     if (!this.wireResponseActive) return discardedOpen;
     // At most ONE cancel per response cycle (Codex review, PR #213 r2). A
     // stale audio delta re-arms the bridge's assistantAudioPlaying after a
@@ -1043,14 +1054,18 @@ export class GrokVoiceSession {
   }
 
   /**
-   * THE LINES THIS SESSION NEVER STARTED (v263): the one whose response
-   * started and produced nothing yet, or the one sent and not yet
+   * THE LINES THIS SESSION NEVER STARTED (v263): a line that may not be
+   * interrupted whose audio the drop cut (said again whole), the one whose
+   * response started and played nothing yet, or the one sent and not yet
    * acknowledged by a `response.created`, then every line still queued
    * behind an open response, in order. Taken (and cleared) by the reconnect
    * when this session's connection drops, so the next session says them.
    */
   takeUnstartedSays(): UnstartedSay[] {
     const out: UnstartedSay[] = [];
+    const cut = this.sayPlaying;
+    if (cut !== null && cut.mode === "scripted" && cut.interruptible === false) out.push(cut);
+    this.sayPlaying = null;
     if (this.sayAwaitingOutput !== null) out.push(this.sayAwaitingOutput);
     if (this.sayInFlight !== null) out.push(this.sayInFlight);
     out.push(...this.pendingSays.splice(0));

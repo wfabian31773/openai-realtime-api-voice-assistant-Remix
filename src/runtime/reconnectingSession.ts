@@ -570,9 +570,14 @@ export class ReconnectingSession implements BridgeSession {
         `${this.gap.msIntoCall ?? "?"} ms into the call; reconnecting (attempt ${attempt}/${this.maxReconnects})`,
     );
     // What the dropped session left open, closed in the bridge's terms. The
-    // words the caller heard of a cut line are the bridge's own (it kept the
-    // deltas); completing with no transcript commits exactly those.
-    if (this.utteranceOpen) {
+    // bridge kept the words the caller heard of a cut line (the deltas) and
+    // records them as cut, and arms a greeting the drop caught to be written
+    // again when it is said again (#511 review). A bridge without that hook
+    // gets the utterance completed with no transcript, as before.
+    if (h.onProviderDrop) {
+      this.utteranceOpen = false;
+      h.onProviderDrop();
+    } else if (this.utteranceOpen) {
       this.utteranceOpen = false;
       h.onAudioDone(undefined);
     }

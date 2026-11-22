@@ -3212,4 +3212,137 @@ describe("the mid-call reconnect (v263)", () => {
     expect(events[0]).toMatchObject({ attempt: 1, result: "call_ended" });
     await h.close();
   });
+
+  /** The message items a transport was sent, as role and text. */
+  const restoredMessages = (t: { ofType: (type: string) => unknown[] }) =>
+    (t.ofType("conversation.item.create") as Array<{ item: { type?: string; role?: string; content?: Array<{ text?: string }> } }>)
+      .map((e) => e.item)
+      .filter((i) => i.type === "message")
+      .map((i) => ({ role: i.role, text: i.content?.[0]?.text }));
+  const forceMessages = (t: { ofType: (type: string) => unknown[] }) =>
+    (t.ofType("conversation.item.create") as Array<{ item: { type?: string; interruptible?: boolean; content?: Array<{ text?: string }> } }>)
+      .map((e) => e.item)
+      .filter((i) => i.type === "force_message");
+
+  it("says a greeting the drop cut again, whole and first, holds the lock through it, and records the first as cut (#511 review, P1)", async () => {
+    const GREETING = "Thank you for calling Azul Vision. All calls are being recorded for quality assurance purposes. How can I help you today?";
+    const h = await harness({ env: RECONNECT_ENV, laneSource: laneSource({ greeting: GREETING }) });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA-reconnect8", From: "+1", To: "+2" });
+    const { ws } = await openStream(h, "CA-reconnect8", tokenFrom(answered.text));
+    await waitFor(() => h.transports.length === 1, "the transport to register");
+    const grok = h.transports[0];
+    grok.emit({ type: "session.updated" } as GrokServerEvent);
+    await waitFor(() => forceMessages(grok).length === 1, "the greeting");
+    // The greeting starts playing, and the line drops a few words in.
+    grok.emit({ type: "response.created" } as GrokServerEvent);
+    grok.emit({ type: "response.output_audio.delta", delta: Buffer.alloc(800, 0x7f).toString("base64") } as GrokServerEvent);
+    grok.emit({ type: "response.output_audio_transcript.delta", delta: "Thank you for calling Azul Vision." } as GrokServerEvent);
+    await settle(4);
+    grok.emitClose();
+    await waitFor(() => h.transports.length === 2, "the reconnect");
+    const next = h.transports[1];
+    next.emit({ type: "session.updated" } as GrokServerEvent);
+    await waitFor(() => forceMessages(next).length === 1, "the greeting said again");
+    // Said again whole, not interruptible, and nothing free-form before it.
+    expect(forceMessages(next)[0]).toMatchObject({ interruptible: false, content: [{ text: GREETING }] });
+    expect(next.ofType("response.create")).toHaveLength(0);
+    // The new session is told the first one was cut, not that it was heard.
+    expect(restoredMessages(next)).toContainEqual({ role: "assistant", text: `${GREETING} [interrupted]` });
+    expect(restoredMessages(next)).not.toContainEqual({ role: "assistant", text: GREETING });
+    // It plays on the new session; the caller talks over it and the lock holds.
+    next.emit({ type: "response.created" } as GrokServerEvent);
+    next.emit({ type: "response.output_audio.delta", delta: Buffer.alloc(800, 0x7f).toString("base64") } as GrokServerEvent);
+    next.emit({ type: "input_audio_buffer.speech_started" } as GrokServerEvent);
+    await settle(4);
+    expect(next.ofType("response.cancel")).toHaveLength(0);
+    next.emit({ type: "response.output_audio_transcript.done", transcript: GREETING } as GrokServerEvent);
+    next.emit({ type: "response.done" } as GrokServerEvent);
+    await settle(4);
+    ws.close();
+    await waitFor(() => h.persisted.some((r) => r.callSid === "CA-reconnect8"), "the call to persist");
+    const transcript = h.persisted.find((r) => r.callSid === "CA-reconnect8")!.transcript as string;
+    const agentLines = transcript.split("\n").filter((l) => l.startsWith("AGENT:"));
+    expect(agentLines).toEqual([`AGENT: ${GREETING} [interrupted]`, `AGENT: ${GREETING}`]);
+    await h.close();
+  });
+
+  it("does not write the greeting over another line when its response finished without audio before the drop", async () => {
+    const GREETING = "Thank you for calling Azul Vision. All calls are being recorded for quality assurance purposes.";
+    const h = await harness({ env: RECONNECT_ENV, laneSource: laneSource({ greeting: GREETING }) });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA-reconnect10", From: "+1", To: "+2" });
+    const { ws, frames } = await openStream(h, "CA-reconnect10", tokenFrom(answered.text));
+    await waitFor(() => h.transports.length === 1, "the transport to register");
+    const grok = h.transports[0];
+    grok.emit({ type: "session.updated" } as GrokServerEvent);
+    await waitFor(() => forceMessages(grok).length === 1, "the greeting");
+    // The greeting's response finishes with no audio at all; the agent is
+    // asked for its own turn, and the line drops before that turn starts.
+    grok.emit({ type: "response.created" } as GrokServerEvent);
+    grok.emit({ type: "response.done" } as GrokServerEvent);
+    await waitFor(() => grok.ofType("response.create").length === 1, "the agent's turn");
+    grok.emitClose();
+    await waitFor(() => h.transports.length === 2, "the reconnect");
+    const next = h.transports[1];
+    next.emit({ type: "session.updated" } as GrokServerEvent);
+    await waitFor(() => next.ofType("response.create").length === 1, "the carried turn");
+    expect(forceMessages(next)).toHaveLength(0);
+    next.emit({ type: "response.created" } as GrokServerEvent);
+    next.emit({ type: "response.output_audio_transcript.delta", delta: "How can I help?" } as GrokServerEvent);
+    next.emit({ type: "response.output_audio.delta", delta: Buffer.alloc(800, 0x7f).toString("base64") } as GrokServerEvent);
+    next.emit({ type: "response.output_audio_transcript.done", transcript: "How can I help?" } as GrokServerEvent);
+    next.emit({ type: "response.done" } as GrokServerEvent);
+    await settle(4);
+    const mark = frames.filter((f) => f.event === "mark").pop() as { mark: { name: string } };
+    ws.send(JSON.stringify({ event: "mark", streamSid: "MZ1", mark: { name: mark.mark.name } }));
+    await settle(4);
+    ws.close();
+    await waitFor(() => h.persisted.some((r) => r.callSid === "CA-reconnect10"), "the call to persist");
+    const transcript = h.persisted.find((r) => r.callSid === "CA-reconnect10")!.transcript as string;
+    expect(transcript.split("\n").filter((l) => l.startsWith("AGENT:"))).toEqual(["AGENT: How can I help?"]);
+    await h.close();
+  });
+
+  it("records a line the drop cut as interrupted, and the new session is told so (#511 review, P2)", async () => {
+    const h = await harness({ env: RECONNECT_ENV });
+    const { ws, grok } = await startedCall(h, "CA-reconnect9");
+    grok.emit({ type: "response.created" } as GrokServerEvent);
+    grok.emit({ type: "response.output_audio_transcript.delta", delta: "Can you tell me the order" } as GrokServerEvent);
+    grok.emit({ type: "response.output_audio.delta", delta: Buffer.alloc(800, 0x7f).toString("base64") } as GrokServerEvent);
+    await settle(4);
+    grok.emitClose();
+    await waitFor(() => h.transports.length === 2, "the reconnect");
+    const next = h.transports[1];
+    next.emit({ type: "session.updated" } as GrokServerEvent);
+    await settle(4);
+    expect(restoredMessages(next)).toContainEqual({ role: "assistant", text: "Can you tell me the order [interrupted]" });
+    // A line the model wrote is not said again; the agent goes on from it.
+    expect(forceMessages(next)).toHaveLength(0);
+    expect(next.ofType("response.create")).toHaveLength(1);
+    ws.close();
+    await waitFor(() => h.persisted.some((r) => r.callSid === "CA-reconnect9"), "the call to persist");
+    const transcript = h.persisted.find((r) => r.callSid === "CA-reconnect9")!.transcript as string;
+    expect(transcript.split("\n").filter((l) => l.includes("Can you tell me the order"))).toEqual([
+      "AGENT: Can you tell me the order [interrupted]",
+    ]);
+    await h.close();
+  });
+
+  it("records nothing of a line the drop cut before a byte of its audio was sent", async () => {
+    const h = await harness({ env: RECONNECT_ENV });
+    const { ws, grok } = await startedCall(h, "CA-reconnect11");
+    grok.emit({ type: "response.created" } as GrokServerEvent);
+    grok.emit({ type: "response.output_audio_transcript.delta", delta: "Can you tell me the order" } as GrokServerEvent);
+    await settle(4);
+    grok.emitClose();
+    await waitFor(() => h.transports.length === 2, "the reconnect");
+    const next = h.transports[1];
+    next.emit({ type: "session.updated" } as GrokServerEvent);
+    await settle(4);
+    expect(restoredMessages(next).some((m) => m.text?.includes("Can you tell me the order"))).toBe(false);
+    expect(next.ofType("response.create")).toHaveLength(1);
+    ws.close();
+    await waitFor(() => h.persisted.some((r) => r.callSid === "CA-reconnect11"), "the call to persist");
+    expect(h.persisted.find((r) => r.callSid === "CA-reconnect11")!.transcript as string).not.toContain("Can you tell me the order");
+    await h.close();
+  });
 });
