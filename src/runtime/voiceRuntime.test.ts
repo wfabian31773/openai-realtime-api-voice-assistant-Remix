@@ -3261,6 +3261,14 @@ describe("the mid-call reconnect (v263)", () => {
     next.emit({ type: "input_audio_buffer.speech_started" } as GrokServerEvent);
     await settle(4);
     expect(next.ofType("response.cancel")).toHaveLength(0);
+    // What they said lands while it plays, so the record puts it after the
+    // greeting, whose line went in when its audio began.
+    next.emit({
+      type: "conversation.item.input_audio_transcription.completed",
+      item_id: "caller-1",
+      transcript: "Hello?",
+    } as GrokServerEvent);
+    await settle(4);
     next.emit({ type: "response.output_audio_transcript.done", transcript: GREETING } as GrokServerEvent);
     next.emit({ type: "response.done" } as GrokServerEvent);
     await settle(4);
@@ -3272,8 +3280,7 @@ describe("the mid-call reconnect (v263)", () => {
     ws.close();
     await waitFor(() => h.persisted.some((r) => r.callSid === "CA-reconnect8"), "the call to persist");
     const transcript = h.persisted.find((r) => r.callSid === "CA-reconnect8")!.transcript as string;
-    const agentLines = transcript.split("\n").filter((l) => l.startsWith("AGENT:"));
-    expect(agentLines).toEqual([`AGENT: ${GREETING} [interrupted]`, `AGENT: ${GREETING}`]);
+    expect(transcript.split("\n")).toEqual([`AGENT: ${GREETING} [interrupted]`, `AGENT: ${GREETING}`, "CALLER: Hello?"]);
     await h.close();
   });
 
