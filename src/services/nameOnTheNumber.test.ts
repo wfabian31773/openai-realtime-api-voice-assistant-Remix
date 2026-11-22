@@ -10,7 +10,7 @@ vi.mock('pg', () => ({
   default: { Pool: class { query = (...a: unknown[]) => query(...a); on() {} end() { return Promise.resolve(); } } },
 }));
 
-import { nameOnTheNumber, __resetPoolForTests, __resetMirrorBreakerForTests } from './patientVerification';
+import { nameOnTheNumber, ROWS_ON_THE_NUMBER_LIMIT, __resetPoolForTests, __resetMirrorBreakerForTests } from './patientVerification';
 
 const row = (id: string, first: string, last: string) => ({
   person_id: id, person_nbr: null, first_name: first, last_name: last, date_of_birth: '1960-01-01',
@@ -57,6 +57,18 @@ describe('nameOnTheNumber', () => {
     query.mockResolvedValue({ rows: HOUSEHOLD });
     expect(await nameOnTheNumber('5555550100', 'Zelda', 'Quixote', HELD)).toBe('no');
     expect(await nameOnTheNumber('5555550100', 'Zelda', 'Quixote')).toBe('yes');
+  });
+
+  it('a read that fills the limit without the name is unknown, one short of it is no (#512 review, round 3)', async () => {
+    const strangers = (n: number) => Array.from({ length: n }, (_, i) =>
+      row(`00000000-0000-4000-8000-${String(100 + i).padStart(12, '0')}`, `Ann${i}`, 'Smith'));
+    query.mockResolvedValue({ rows: strangers(ROWS_ON_THE_NUMBER_LIMIT) });
+    expect(await nameOnTheNumber('5555550100', 'Bruno', 'Quixote', HELD)).toBe('unknown');
+    query.mockResolvedValue({ rows: strangers(ROWS_ON_THE_NUMBER_LIMIT - 1) });
+    expect(await nameOnTheNumber('5555550100', 'Bruno', 'Quixote', HELD)).toBe('no');
+    query.mockResolvedValue({ rows: [...strangers(ROWS_ON_THE_NUMBER_LIMIT - 1), row(SIBLING, 'Bruno', 'Quixote')] });
+    expect(await nameOnTheNumber('5555550100', 'Bruno', 'Quixote', HELD)).toBe('yes');
+    expect(String(query.mock.calls[0][0])).toContain(`LIMIT ${ROWS_ON_THE_NUMBER_LIMIT}`);
   });
 
   it('nobody on the number is no', async () => {

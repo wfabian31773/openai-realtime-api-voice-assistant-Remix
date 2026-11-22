@@ -448,7 +448,10 @@ export function __resetPoolForTests(): void {
  * Two or more people means `ambiguous` and a candidate count — never a guess,
  * which is instruction 6 and the rule the rest of this file already keeps.
  */
-/** Every patients_master row carrying this ten-digit number in one of its five phone columns, at most 50. Throws on a failed or slow read. */
+/** The most rows `rowsOnTheNumber` reads; a read that fills it may have left rows out. */
+export const ROWS_ON_THE_NUMBER_LIMIT = 50;
+
+/** Every patients_master row carrying this ten-digit number in one of its five phone columns, at most `ROWS_ON_THE_NUMBER_LIMIT`. Throws on a failed or slow read. */
 async function rowsOnTheNumber(last10: string): Promise<Row[]> {
   const q = getPool().query<Row>(
       `SELECT person_id::text            AS person_id,
@@ -466,7 +469,7 @@ async function rowsOnTheNumber(last10: string): Promise<Row[]> {
            OR right(regexp_replace(coalesce(sec_home_phone,''), '\\D', '', 'g'), 10) = $1
            OR right(regexp_replace(coalesce(day_phone,''),      '\\D', '', 'g'), 10) = $1
            OR right(regexp_replace(coalesce(alt_phone,''),      '\\D', '', 'g'), 10) = $1
-        LIMIT 50`,
+        LIMIT ${ROWS_ON_THE_NUMBER_LIMIT}`,
       [last10],
     );
   return (
@@ -504,8 +507,10 @@ export async function nameOnTheNumber(
     return 'unknown';
   }
   const stem = first.slice(0, 3);
-  return rows.some((r) => r.person_id !== exceptPersonId && foldName(r.last_name) === last &&
-    (foldName(r.first_name) === first || foldName(r.first_name).startsWith(stem))) ? 'yes' : 'no';
+  if (rows.some((r) => r.person_id !== exceptPersonId && foldName(r.last_name) === last &&
+    (foldName(r.first_name) === first || foldName(r.first_name).startsWith(stem)))) return 'yes';
+  // A full read may have left the name out (#512 review, round 3): not knowing is not no.
+  return rows.length >= ROWS_ON_THE_NUMBER_LIMIT ? 'unknown' : 'no';
 }
 
 /**
