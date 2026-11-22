@@ -916,6 +916,14 @@ export interface BridgeSessionHandlers {
   onAudioDelta: (base64Audio: string) => void;
   onAgentTranscriptDelta: (delta: string) => void;
   onAudioDone: (transcript?: string) => void;
+  /**
+   * The provider connection dropped and a reconnect is under way (v263). The
+   * line it was speaking, if any, was cut: what reached the caller is
+   * recorded as interrupted, and a greeting the drop caught before it was
+   * heard in full is armed to be written again when it is said again.
+   * Optional: a session that never reconnects never calls it.
+   */
+  onProviderDrop?: () => void;
   onSpeechStarted: () => void;
   onSpeechStopped: () => void;
   /** The carrying response finished delivering everything — the boundary
@@ -1248,6 +1256,7 @@ export class VoiceCallBridge {
       onAudioDelta: (b64) => this.handleAudioDelta(b64),
       onAgentTranscriptDelta: (delta) => this.handleAgentTranscriptDelta(delta),
       onAudioDone: (transcript) => this.handleAudioDone(transcript),
+      onProviderDrop: () => this.handleProviderDrop(),
       onSpeechStarted: () => this.handleCallerSpeechStarted(),
       onSpeechStopped: () => this.handleCallerSpeechStopped(),
       onResponseDone: (raw) => this.handleResponseDone(raw),
@@ -2026,7 +2035,39 @@ export class VoiceCallBridge {
     }, LATE_TOOL_BATCH_GRACE_MS);
   }
 
-  private handleAudioDone(transcript?: string): void {
+  /**
+   * The provider connection dropped mid-call and a reconnect is under way
+   * (v263, #511 review). Whatever the dropped session was saying ends here,
+   * and it ends CUT: the caller heard it up to the audio already sent, which
+   * Twilio keeps playing.
+   *
+   * Two things follow from that, and each was a review finding. A cut line is
+   * recorded with `[interrupted]` at once, so the history the new session is
+   * given says it was cut rather than delivered (P2). And a greeting the drop
+   * caught before the caller heard all of it — still waiting for its first
+   * audio, or playing — is armed to be written again: the reconnect says it
+   * again FIRST on the new session (its own copy is queued ahead of anything
+   * asked since), so the next response is the greeting's, and the lock stays
+   * held until that one's mark echoes. A required disclosure the drop cut off
+   * is therefore said in full before the conversation goes on (P1).
+   */
+  private handleProviderDrop(): void {
+    if (this.ended) return;
+    const greeting = this.greetingLine;
+    const greetingText =
+      this.greetingPending ??
+      (greeting !== null && this.current !== null && this.current.seq === greeting.seq
+        ? greeting.text
+        : null);
+    if (this.current !== null) this.handleAudioDone(undefined, greetingText !== null ? "greeting" : "line");
+    if (greetingText === null) return;
+    this.greetingPending = greetingText;
+    this.greetingEpoch = this.session.getResponseEpoch() + 1;
+  }
+
+  /** `cut` is a line a provider drop ended (see `handleProviderDrop`); `null`
+   * is the provider's own completion, every other caller. */
+  private handleAudioDone(transcript?: string, cut: "line" | "greeting" | null = null): void {
     if (this.ended) return;
     const epoch = this.session.getResponseEpoch();
     if (this.cancelledEpoch !== null && epoch === this.cancelledEpoch) {
@@ -2119,8 +2160,9 @@ export class VoiceCallBridge {
         this.goodbyeResponse.mark = markName;
       } else this.cancelGoodbye();
     }
-    // The greeting's own mark: its echo is what releases the lock.
-    if (this.greetingLocked && this.greetingMarkName === null) {
+    // The greeting's own mark: its echo is what releases the lock. Not a
+    // greeting a drop cut off: the lock waits for the one said again.
+    if (this.greetingLocked && this.greetingMarkName === null && cut !== "greeting") {
       this.greetingMarkName = markName;
       // Nothing else covers the wait for this echo, so it covers itself.
       this.greetingLockTimer = this.setTimer(() => {
@@ -2139,11 +2181,27 @@ export class VoiceCallBridge {
     // and an amendment has to agree with what it is amending.
     const greetingDone = this.greetingLine?.seq === done.seq ? this.greetingLine : null;
     if (greetingDone) {
+      // Cut by a drop: the record says the caller heard part of it.
+      if (cut !== null) {
+        this.transcriptLog.amendAgentLine(greetingDone.index, `${greetingDone.text} [interrupted]`);
+      }
       this.awaitingMark.push({
         name: markName,
         text: greetingDone.text,
         committedIndex: greetingDone.index,
       });
+    } else if (cut !== null) {
+      // A line a drop cut, committed NOW and marked, because the history the
+      // new session is given is read before this mark can echo. Its entry
+      // carries the index so the echo does not write it again. Audio, not
+      // text: a line whose words never played reached nobody.
+      if (done.bytes > 0 && text) {
+        this.awaitingMark.push({
+          name: markName,
+          text,
+          committedIndex: this.transcriptLog.agentLine(`${text} [interrupted]`),
+        });
+      }
     } else if (text) {
       this.awaitingMark.push({ name: markName, text });
     }
@@ -2588,6 +2646,13 @@ export class VoiceCallBridge {
     // should not silently drop its tokens.
     if (raw !== undefined) this.usage.add(raw);
     if (this.ended) return;
+    // The greeting's response finished without a word of audio: it never
+    // played, and nothing will write its line. Retired here rather than at
+    // the next response's audio, so a provider drop after this cannot arm it
+    // to be written again (v263; `handleProviderDrop`).
+    if (this.greetingPending !== null && this.session.getResponseEpoch() === this.greetingEpoch) {
+      this.greetingPending = null;
+    }
     this.noteFollowUpReplyDone();
     this.awaitingToolResponseDone = false;
     // The boundary an end-call may be waiting on (round 13).

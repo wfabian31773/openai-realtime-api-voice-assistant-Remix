@@ -397,6 +397,9 @@ export function buildSessionConfig(
  * less than fresh on a live call. */
 export const PRE_CONFIG_AUDIO_CAP = 500;
 
+/** A line asked for and not yet started (exported for v263's reconnect). */
+export type UnstartedSay = PendingSay;
+
 type PendingSay =
   | { mode: "scripted"; text: string; interruptible?: boolean }
   | { mode: "natural"; instructions: string }
@@ -459,6 +462,22 @@ export class GrokVoiceSession {
    * out before the wire reports the first as active (mirrors the
    * sibling's awaitingResponseStart). */
   private awaitingSayStart = false;
+  /** The line sent while awaitingSayStart, kept until its response starts
+   * so a dropped connection can hand it to the next session (v263). */
+  private sayInFlight: PendingSay | null = null;
+  /** The line whose response the wire has started (`response.created`) and
+   * that has played nothing yet: no audio and no tool call. A drop in that
+   * window cost the caller none of it, so the next session says it; without
+   * this an opening greeting that dropped there was lost and the resumed
+   * session told it had greeted (#511 review, P1). A transcript delta does
+   * not end it: the caller hears audio, not the transcript. */
+  private sayAwaitingOutput: PendingSay | null = null;
+  /** That line once its audio has started, until it completes. A drop here
+   * cut it; only a line that may not be interrupted (the greeting, which
+   * carries the recording disclosure) is said again, whole, by the next
+   * session (#511 review, round 2). An interruptible one the caller heard
+   * part of is recorded as cut and the agent goes on from it. */
+  private sayPlaying: PendingSay | null = null;
   /** True from sending `response.cancel` until the current response cycle
    * ends (the next `response.created`) or the provider rejects the cancel
    * outright. Only while this is owed may that specific rejection be
@@ -694,7 +713,11 @@ export class GrokVoiceSession {
       case "response.created":
         this.wireResponseActive = true;
         this.responseEpoch += 1;
+        // sayInFlight is set only while awaitingSayStart is, so it names the
+        // line this response is for, or nothing.
+        this.sayAwaitingOutput = this.sayInFlight;
         this.awaitingSayStart = false;
+        this.sayInFlight = null;
         // A NEW response cycle settles whatever became of any earlier
         // cancel, so the debt ends here rather than persisting for the
         // rest of the call.
@@ -705,6 +728,10 @@ export class GrokVoiceSession {
         break;
       case "response.done":
         this.wireResponseActive = false;
+        this.sayAwaitingOutput = null;
+        // Not `sayPlaying`: a line whose audio began ends at its own
+        // transcript.done (just before this), and one whose done never came
+        // is still open in the bridge too, which treats it as cut.
         // Deliberately does NOT clear cancelDoneOwed (Codex review, PR
         // #213): a response.done is not proof the cancel was honored — it
         // is just as likely the NATURAL completion that raced it, in which
@@ -746,6 +773,8 @@ export class GrokVoiceSession {
           );
           break;
         }
+        this.sayAwaitingOutput = null;
+        this.sayPlaying = null;
         this.handlers.onToolCall(event.call_id, event.name, args as Record<string, unknown>);
         break;
       }
@@ -755,11 +784,16 @@ export class GrokVoiceSession {
         this.handlers.onSpeechStarted?.();
         break;
       case "response.output_audio.delta":
+        if (this.sayAwaitingOutput !== null) {
+          this.sayPlaying = this.sayAwaitingOutput;
+          this.sayAwaitingOutput = null;
+        }
         this.handlers.onAudioDelta?.(event.delta);
         break;
       case "response.output_audio_transcript.done":
         // The per-utterance completion signal (see module doc) — the
         // bridge places its Twilio mark on this, and records the words.
+        this.sayPlaying = null;
         this.handlers.onAudioDone?.(event.transcript);
         break;
       case "input_audio_buffer.speech_stopped":
@@ -839,6 +873,7 @@ export class GrokVoiceSession {
 
   private sendSay(say: PendingSay): void {
     this.awaitingSayStart = true;
+    this.sayInFlight = say;
     if (say.mode === "open") {
       // NO `instructions` key. `response.instructions` OVERRIDES the
       // session's instructions for that response, so sending any here
@@ -915,6 +950,51 @@ export class GrokVoiceSession {
     });
   }
 
+  /**
+   * A NOTE FROM THE RUNTIME ITSELF (v263), as a user-role text item. Used
+   * only by the reconnect (reconnectingSession.ts) to hand the new session a
+   * tool answer whose call was made on the session that dropped: that
+   * call_id does not exist on the new conversation, and a
+   * function_call_output for it would be refused. The text says it is not
+   * the caller speaking.
+   */
+  addRuntimeNote(text: string): void {
+    if (this.state !== "configured") throw new Error("session_not_running");
+    this.send({
+      type: "conversation.item.create",
+      item: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text }],
+      },
+    });
+  }
+
+  /**
+   * THE CALL SO FAR, AS CONVERSATION ITEMS (v263, #511 review P1): used only
+   * by the reconnect to restore a dropped call on its new session. The
+   * caller's lines go in as user messages and the agent's as assistant
+   * messages, so they keep the authority they had: the caller's words never
+   * reach the instructions. Adding items starts no response (xAI answers
+   * only response.create or its own turn detection; probed 2026-11-22).
+   */
+  restoreConversation(messages: ReadonlyArray<{ role: "user" | "assistant"; text: string }>): void {
+    if (this.state !== "configured") throw new Error("session_not_running");
+    for (const m of messages) {
+      if (m.role === "user") {
+        this.send({
+          type: "conversation.item.create",
+          item: { type: "message", role: "user", content: [{ type: "input_text", text: m.text }] },
+        });
+      } else {
+        this.send({
+          type: "conversation.item.create",
+          item: { type: "message", role: "assistant", content: [{ type: "output_text", text: m.text }] },
+        });
+      }
+    }
+  }
+
   /** Forward one chunk of caller audio (base64 μ-law 8kHz, the input
    * format buildSessionConfig declares) into the model's input buffer.
    * Pass-through, no transcoding here. */
@@ -956,6 +1036,10 @@ export class GrokVoiceSession {
     // can forget exactly those follow-up requests and keep any already sent.
     const discardedOpen = this.pendingSays.filter((p) => p.mode === "open").length;
     this.pendingSays.length = 0;
+    // The caller spoke over it: the line the open response is for is
+    // abandoned too, and a drop now must not say it again.
+    this.sayAwaitingOutput = null;
+    this.sayPlaying = null;
     if (!this.wireResponseActive) return discardedOpen;
     // At most ONE cancel per response cycle (Codex review, PR #213 r2). A
     // stale audio delta re-arms the bridge's assistantAudioPlaying after a
@@ -969,6 +1053,28 @@ export class GrokVoiceSession {
     // cancelDoneOwed and the `error` case.
     this.cancelDoneOwed = true;
     return discardedOpen;
+  }
+
+  /**
+   * THE LINES THIS SESSION NEVER STARTED (v263): a line that may not be
+   * interrupted whose audio the drop cut (said again whole), the one whose
+   * response started and played nothing yet, or the one sent and not yet
+   * acknowledged by a `response.created`, then every line still queued
+   * behind an open response, in order. Taken (and cleared) by the reconnect
+   * when this session's connection drops, so the next session says them.
+   */
+  takeUnstartedSays(): UnstartedSay[] {
+    const out: UnstartedSay[] = [];
+    const cut = this.sayPlaying;
+    if (cut !== null && cut.mode === "scripted" && cut.interruptible === false) out.push(cut);
+    this.sayPlaying = null;
+    if (this.sayAwaitingOutput !== null) out.push(this.sayAwaitingOutput);
+    if (this.sayInFlight !== null) out.push(this.sayInFlight);
+    out.push(...this.pendingSays.splice(0));
+    this.sayAwaitingOutput = null;
+    this.sayInFlight = null;
+    this.awaitingSayStart = false;
+    return out;
   }
 
   close(): void {

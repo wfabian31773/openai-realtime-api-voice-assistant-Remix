@@ -218,10 +218,12 @@ export class CallTranscriptLog {
   }
 
   /** One agent utterance (the renderer's exact text). An agent line means
-   * the provider moved on: the open caller turn closes. */
-  agentLine(text: string): void {
+   * the provider moved on: the open caller turn closes. Returns the index of
+   * the line written, which only a line committed before its mark echo (a
+   * cut at a provider drop, v263) needs. */
+  agentLine(text: string): number {
     this.openCallerLine = null;
-    this.push("agent", `AGENT: ${text}`);
+    return this.push("agent", `AGENT: ${text}`);
   }
 
   /**

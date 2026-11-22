@@ -2097,12 +2097,25 @@ import { callEnvironment } from "./callRecord";
  * client_close and closedByUs (the #508 review, unanswered at its merge). A
  * WebSocket error is now a first signal of its own, ws_error, recorded before
  * the retry is woken, and neither a detach nor close() marks a socket ws is
- * already closing after an error as ours. Above main's v261 (#509,
- * `9102e0e3`), which it contains along with v260 (#508, `168a27c7`); v245 is
- * #488 on its open branch. No migration.
+ * already closing after an error as ours. On main since #510 (`afe93f14`).
+ *
+ * v263 — A DROPPED CALL RECONNECTS (2026-11-22). Dark until RUNTIME_RECONNECT
+ * names a lane ("1", "all", or a comma list of slugs). When the xAI socket of
+ * a configured call closes on the far side, the session wrapper
+ * (reconnectingSession.ts) opens a new one through the first-event retry,
+ * configures it with the agent's prompt, restores the call so far as
+ * conversation items (never in the instructions), and carries on:
+ * caller audio is held and the turn the caller was in the middle of is
+ * replayed, lines the bridge asked for are said on the new session, a tool
+ * answer from the dropped one reaches the model as a note, and the greeting
+ * is not played again. A reconnect that fails inside RUNTIME_RECONNECT_BUDGET_MS
+ * (8 s) ends the call as provider_failure, as before. Every drop writes a
+ * provider_reconnect call_events row. Above main's v262 (#510, `afe93f14`),
+ * which it contains along with v261 (#509, `9102e0e3`); v245 is #488 on its
+ * open branch. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v262-a-protocol-error-is-not-our-close-20261122";
+  "voice-runtime-v263-a-dropped-call-reconnects-20261122";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
