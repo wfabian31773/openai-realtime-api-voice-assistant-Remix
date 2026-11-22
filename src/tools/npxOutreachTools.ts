@@ -1876,10 +1876,11 @@ export function textedDay(ymd: string): string {
 }
 
 /** "6 de enero": the Azul appointment a Spanish text names (v261); '' when
- * the date does not read or is not a day on the calendar (February 30), and
- * the text then says "su cita actual". */
+ * the date does not read, carries anything after the day but a time
+ * (2041-03-201), or is not a day on the calendar (February 30), and the text
+ * then says "su cita actual". */
 export function textedDayEs(ymd: string): string {
-  const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(ymd);
+  const m = /^(\d{4})-(\d{2})-(\d{2})(?:T|$)/.exec(ymd);
   if (!m) return '';
   const year = Number(m[1]);
   const monthNumber = Number(m[2]);

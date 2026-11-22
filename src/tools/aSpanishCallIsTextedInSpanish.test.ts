@@ -342,6 +342,16 @@ describe('the Spanish text', () => {
     expect(textedDayEs('2041-12-31')).toBe('31 de diciembre');
   });
 
+  // github-actions review of #509 (head 2d256517): the match was a prefix,
+  // so a malformed value read as the date it started with.
+  it('reads nothing after the day but a time', () => {
+    expect(textedDayEs('2041-03-201')).toBe('');
+    expect(textedDayEs('2041-03-20x')).toBe('');
+    expect(textedDayEs('2041-03-20 junk')).toBe('');
+    expect(textedDayEs('2041-03-20')).toBe('20 de marzo');
+    expect(textedDayEs('2041-03-20T09:00:00Z')).toBe('20 de marzo');
+  });
+
   it('is GSM-7 and fits two segments at the longest place, phone and date the campaign has sent', () => {
     // Hub, every confirmation queued to 2026-11-22: place at most 81
     // characters, phone at most 12. The longest Spanish date and day.
