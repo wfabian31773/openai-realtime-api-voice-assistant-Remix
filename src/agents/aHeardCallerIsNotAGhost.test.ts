@@ -123,10 +123,23 @@ describe('v265: a heard caller is never a ghost, and is never told to call back'
     expect(body.indexOf(GHOST_CALL_RESTRICTION)).toBeGreaterThan(heard);
   });
 
+  it('asks "Can you hear me?" only when the caller may not hear the agent', async () => {
+    // #513 review: a caller who has stated a request is answered, not asked
+    // whether they can hear us. The check is gated on a repeated "Hello?"
+    // or no request at all, and comes after that condition.
+    const body = await grokBody('CA0000000000000000000000000000beef');
+    const gate = body.indexOf('If they repeat "Hello?" or make no request, they may not hear you');
+    const check = body.indexOf('"I\'m here. Can you hear me?"');
+    expect(gate).toBeGreaterThan(-1);
+    expect(check).toBeGreaterThan(gate);
+  });
+
   it('still ends a true ghost and a robot, and still never escalates for either', async () => {
     const body = await grokBody('CA0000000000000000000000000000beef');
     expect(body).toContain('"What can I help you with today?", then "Take care, goodbye." and call terminate_call with reason "ghost_call"');
     expect(body).toContain('terminate_call with reason "robot_call"');
+    // #513 review: "press 1" does not cover "For English, press 2".
+    expect(body).toContain('"press 1", "leave a message after the tone", "your call is important to us", "for English press"');
     expect(body).toContain('NEVER escalate to a human, including at 1 AM');
     expect(body).toContain('never for a ghost, a robot or a failed tool');
     expect(body).toContain('A need_identity result is not a transfer.');
