@@ -142,7 +142,9 @@ describe('the corpus: a recognised after-hours caller who says yes is confirmed,
     expect(prompt).not.toContain('DO NOT OPEN WITH A NAME CONFIRMATION');
     // Still withheld until then.
     expect(prompt).not.toContain('Zebrastripe');
-    expect(prompt).not.toContain('3:10 PM');
+    // The prompt carries the clock, which reads "3:10 PM" at 3:10 PM Pacific;
+    // the appointment's time is checked against the prompt without that sentence.
+    expect(prompt.replace(/Current date and time: [^\n]*?\. It is currently [a-z]+\./g, '')).not.toContain('3:10 PM');
   });
 
   it('the SIP core, whose greeting is never personalised, does not claim the greeting asked (Codex P2 on #425)', async () => {

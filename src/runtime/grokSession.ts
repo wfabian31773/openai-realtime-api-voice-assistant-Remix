@@ -85,7 +85,7 @@ export interface GrokTransport {
    * The session saw a provider `error` event it treats as fatal. Its type and
    * code only: the message can echo what the caller said (v259).
    */
-  noteProviderError?(type: string | undefined, code: string | undefined): void;
+  noteProviderError?(type: unknown, code: unknown): void;
   /** How the socket ended, for the provider-close row (v259). PHI-free. */
   closeDiagnostics?(): ProviderCloseDiagnostics;
 }
@@ -112,7 +112,12 @@ export interface ProviderCloseDiagnostics {
     | "client_close"
     | null;
   closeCode: number | null;
-  closeReason: string | null;
+  /**
+   * How long the peer's close reason was, never its text: a close reason is
+   * whatever the peer chose to send, and this row is durable (#507 review).
+   * The console line still prints it, as it did before v259.
+   */
+  closeReasonLength: number | null;
   /** The raw TCP socket's error code (ECONNRESET, ETIMEDOUT, EPIPE). */
   socketErrorCode: string | null;
   socketErrorMessage: string | null;
@@ -140,8 +145,20 @@ export interface ProviderCloseDiagnostics {
   cfRay: string | null;
 }
 
-/** Text from the network stack, capped; it never carries call content. */
-function capText(text: string | undefined | null, max: number): string | null {
+/**
+ * Text from the network stack, capped; it never carries call content. Takes
+ * `unknown` because provider events are parsed JSON with no runtime check: an
+ * error code that arrives as a number must be kept, and an object must not
+ * throw, or the error branch never reaches the call's failure handling
+ * (#507 review, P1).
+ */
+function capText(value: unknown, max: number): string | null {
+  const text =
+    typeof value === "string"
+      ? value
+      : typeof value === "number" || typeof value === "boolean"
+        ? String(value)
+        : null;
   if (!text) return null;
   const flat = text.replace(/\s+/g, " ").trim();
   if (!flat) return null;
@@ -653,7 +670,13 @@ export class GrokVoiceSession {
           break;
         }
         this.state = "error";
-        this.transport.noteProviderError?.(event.error?.type, event.error?.code);
+        // Telemetry only. It must never stand between a fatal error and the
+        // call's failure handling, so a throw here is swallowed (#507 review).
+        try {
+          this.transport.noteProviderError?.(event.error?.type, event.error?.code);
+        } catch {
+          // nothing: the close row says the provider error was not recorded
+        }
         this.handlers.onError?.(
           new Error(
             `Grok provider error: ${event.error?.message ?? event.error?.type ?? "unknown"}`,
@@ -970,7 +993,8 @@ export class WebSocketGrokTransport implements GrokTransport {
   private closedAtMs: number | null = null;
   private firstSignal: ProviderCloseDiagnostics["firstSignal"] = null;
   private closeCode: number | null = null;
-  private closeReason: string | null = null;
+  private closeReasonLength: number | null = null;
+  private detachRawSocket: (() => void) | null = null;
   private socketErrorCode: string | null = null;
   private socketErrorMessage: string | null = null;
   private socketEndReceived = false;
@@ -1030,18 +1054,28 @@ export class WebSocketGrokTransport implements GrokTransport {
         const socket = res.socket;
         if (socket) {
           this.remoteAddress = socket.remoteAddress ?? null;
-          socket.on("error", (err: NodeJS.ErrnoException) => {
+          const onError = (err: NodeJS.ErrnoException) => {
             this.socketErrorCode = err.code ?? null;
             this.socketErrorMessage = capText(err.message, 160);
             this.signal("socket_error");
             console.warn(
               `[SESSION] socket error code=${err.code ?? "none"} message=${this.socketErrorMessage ?? "none"}`,
             );
-          });
-          socket.on("end", () => {
+          };
+          const onEnd = () => {
             this.socketEndReceived = true;
             this.signal("socket_fin");
-          });
+          };
+          socket.on("error", onError);
+          socket.on("end", onEnd);
+          // Removed at a detach, so what our own close of a stalled socket
+          // causes (the peer's FIN echoing it) never reaches the diagnostics
+          // the setup row already read (#508 review). ws keeps its own
+          // listeners on the socket, so an error there is still handled.
+          this.detachRawSocket = () => {
+            socket.removeListener("error", onError);
+            socket.removeListener("end", onEnd);
+          };
         }
       },
     );
@@ -1074,7 +1108,7 @@ export class WebSocketGrokTransport implements GrokTransport {
   private recordClose(code: number, reason: string): void {
     this.closedAtMs = Date.now();
     this.closeCode = code;
-    this.closeReason = capText(reason, 120);
+    this.closeReasonLength = reason ? reason.length : 0;
     this.signal("socket_close");
     this.bufferedAtClose = this.ws?.bufferedAmount ?? null;
     this.openSocketsAtClose = this.counted ? openGrokSockets : null;
@@ -1104,7 +1138,7 @@ export class WebSocketGrokTransport implements GrokTransport {
     ].join(" ");
   }
 
-  noteProviderError(type: string | undefined, code: string | undefined): void {
+  noteProviderError(type: unknown, code: unknown): void {
     this.providerErrorType = capText(type, 60);
     this.providerErrorCode = capText(code, 60);
     this.signal("provider_error_event");
@@ -1117,7 +1151,7 @@ export class WebSocketGrokTransport implements GrokTransport {
     return {
       firstSignal: this.firstSignal,
       closeCode: this.closeCode,
-      closeReason: this.closeReason,
+      closeReasonLength: this.closeReasonLength,
       socketErrorCode: this.socketErrorCode,
       socketErrorMessage: this.socketErrorMessage,
       socketEndReceived: this.socketEndReceived,
@@ -1183,10 +1217,23 @@ export class WebSocketGrokTransport implements GrokTransport {
     this.errorHandler = null;
     this.closeHandler = null;
     this.wakeFirstEventWaiters(false);
-    this.closedByUs = true;
-    this.signal("client_close");
+    // A socket the peer already closed keeps that close: it ended on the
+    // peer's side, and this only cleans it up (#508 review). A socket still
+    // open ends here, so this is the moment its diagnostics describe: the
+    // queue, the open sockets and the loop are read now, before it is
+    // uncounted, and a later read changes nothing (#508 review).
+    if (this.closedAtMs === null) {
+      this.closedAtMs = Date.now();
+      this.closedByUs = true;
+      this.signal("client_close");
+      this.bufferedAtClose = this.ws?.bufferedAmount ?? null;
+      this.openSocketsAtClose = this.counted ? openGrokSockets : null;
+      this.loopAtClose = eventLoopSnapshot(this.closedAtMs);
+    }
     // Its close listener is about to be removed, so it is uncounted here.
     this.uncount();
+    this.detachRawSocket?.();
+    this.detachRawSocket = null;
     if (this.ws) {
       this.ws.removeAllListeners();
       try {

@@ -601,6 +601,23 @@ export interface VoiceRuntimeOptions {
 }
 
 /** A transport the runtime can open. WebSocketGrokTransport satisfies it. */
+/**
+ * A transport's close diagnostics, or undefined when reading them throws. The
+ * read is an argument to a fire-and-forget writer, so it runs synchronously in
+ * the teardown and setup-failure paths; telemetry must never stand between a
+ * failed call and its teardown (#508 review). Undefined writes the row as
+ * "absent", never a clean close.
+ */
+export function closeDiagnosticsOf(
+  transport: Pick<GrokTransport, "closeDiagnostics"> | undefined,
+): ProviderCloseDiagnostics | undefined {
+  try {
+    return transport?.closeDiagnostics?.();
+  } catch {
+    return undefined;
+  }
+}
+
 export interface RuntimeTransport extends GrokTransport {
   connect(): Promise<void>;
 }
@@ -1076,6 +1093,14 @@ export function mountVoiceRuntime(
       }
     };
     let bridge: VoiceCallBridge | null = null;
+    /**
+     * The last provider transport this call opened, kept outside the setup
+     * try so a setup that fails (a handshake refused, every first-event
+     * retry stalled) can still write why the provider closed. Without it
+     * those `provider_failure` calls never reached the close row (#507
+     * review).
+     */
+    let setupTransport: RuntimeTransport | undefined;
     let starting = false;
     /**
      * A valid `start` frame CLAIMED this socket: the callSid and token checked
@@ -1711,6 +1736,7 @@ export function mountVoiceRuntime(
               ? options.createTransport({ apiKey: lane.voice.apiKey, model: lane.voice.model })
               : new WebSocketGrokTransport(lane.voice.apiKey, lane.voice.model);
             opened.transport = t;
+            setupTransport = t;
             await t.connect();
             return {
               headers: t.upgradeHeaders?.() ?? {},
@@ -2045,7 +2071,7 @@ export function mountVoiceRuntime(
              */
             void logClose(
               { callSid: record.callSid, outcome: record.outcome },
-              transport.closeDiagnostics?.(),
+              closeDiagnosticsOf(transport),
               { callLogId },
               { after: audioWritten },
             ).catch(() => undefined);
@@ -2175,11 +2201,26 @@ export function mountVoiceRuntime(
           // bridge (Codex P2, #327). Part of the no-audio population, so the
           // row goes here too or the instrument's claim of one per call is
           // false on exactly the calls it was built to size.
-          void logAudio(
+          const audioWritten = logAudio(
             { callSid: entry.callSid, outcome: "provider_failure" },
             callerAudio.counts(),
             { callLogId },
           ).catch(() => undefined);
+          // And why the provider closed, when a socket was opened at all: a
+          // refused handshake or every first-event retry stalled. A setup
+          // that failed before any socket (the lane or the agent binding)
+          // writes no row, because nothing closed (#507 review). Nor does a
+          // connect the caller abandoned by hanging up: the provider did not
+          // end it, and the row would count a caller leaving as a provider
+          // drop (#508 review).
+          if (setupTransport && !(err instanceof ProviderConnectAbortedError)) {
+            void logClose(
+              { callSid: entry.callSid, outcome: "provider_failure", stage: "setup" },
+              closeDiagnosticsOf(setupTransport),
+              { callLogId },
+              { after: audioWritten },
+            ).catch(() => undefined);
+          }
           twilioSocket.close();
         }
       } finally {

@@ -223,7 +223,7 @@ interface Harness {
   persistedIdentity: Array<unknown>;
   /** Every caller-audio row the runtime wrote, in order (v64). */
   audioRows: Array<{ callSid: string; outcome: string; counts: unknown }>;
-  closeRows: Array<{ callSid: string; outcome: string; diagnostics: unknown }>;
+  closeRows: Array<{ callSid: string; outcome: string; stage?: string; diagnostics: unknown }>;
   /**
    * Calls the teardown request sweep saw, in order.
    *
@@ -258,6 +258,8 @@ async function harness(
     stallHandshake?: boolean;
     /** Every transport stalls after 101 — no first event. */
     stallFirstEvent?: boolean;
+    /** #508 review: every transport's closeDiagnostics throws. */
+    throwingDiagnostics?: boolean;
     /** Stall the first N transports; later ones emit session.created. */
     firstEventStalls?: number;
     firstEventTimeoutMs?: number;
@@ -297,7 +299,7 @@ async function harness(
   const persisted: Array<Record<string, unknown>> = [];
   const persistedIdentity: Array<unknown> = [];
   const audioRows: Array<{ callSid: string; outcome: string; counts: unknown }> = [];
-  const closeRows: Array<{ callSid: string; outcome: string; diagnostics: unknown }> = [];
+  const closeRows: Array<{ callSid: string; outcome: string; stage?: string; diagnostics: unknown }> = [];
   const swept: Array<Record<string, unknown>> = [];
   const pcpSwept: Array<Record<string, unknown>> = [];
   const setupFailures: Array<Record<string, unknown>> = [];
@@ -313,6 +315,11 @@ async function harness(
       // Flags BEFORE push: firstEventStalls: 1 stalls while length is still 0.
       if (over.stallFirstEvent) t.stallFirstEvent = true;
       else if ((over.firstEventStalls ?? 0) > transports.length) t.stallFirstEvent = true;
+      if (over.throwingDiagnostics) {
+        t.closeDiagnostics = () => {
+          throw new Error("diagnostics read failed");
+        };
+      }
       transports.push(t);
       return t;
     },
@@ -367,6 +374,7 @@ async function harness(
         closeRows.push({
           callSid: (call as { callSid: string }).callSid,
           outcome: (call as { outcome: string }).outcome,
+          stage: (call as { stage?: string }).stage,
           diagnostics,
         });
         return true;
@@ -2942,12 +2950,64 @@ describe("the provider-close row (v259)", () => {
     await h.close();
   });
 
+  it("writes a setup row with the last transport's diagnostics when every first-event retry stalls", async () => {
+    // The connect failed before a bridge existed. Before the #507 review
+    // fix this provider_failure wrote no close row at all.
+    const h = await harness({ stallFirstEvent: true, firstEventTimeoutMs: 80, connectRetries: 2 });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA-close3", From: "+15551234567", To: "+2" });
+    await openStream(h, "CA-close3", tokenFrom(answered.text));
+    await waitFor(() => h.closeRows.some((r) => r.callSid === "CA-close3"), "the setup close row", 3000);
+    const row = h.closeRows.find((r) => r.callSid === "CA-close3");
+    expect(row).toMatchObject({ outcome: "provider_failure", stage: "setup" });
+    expect(h.transports).toHaveLength(3);
+    expect(row?.diagnostics).toBe(h.transports[2].diagnostics);
+    expect(h.closeRows.filter((r) => r.callSid === "CA-close3")).toHaveLength(1);
+    await h.close();
+  });
+
+  it("writes no setup row for a connect the caller abandoned by hanging up", async () => {
+    // The CA92A shape: the caller hangs up inside the first-event wait and
+    // the retry stops with ProviderConnectAbortedError. The provider did not
+    // end it, so it is not counted as a provider close (#508 review).
+    const h = await harness({ stallFirstEvent: true, firstEventTimeoutMs: 400, connectRetries: 2 });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA-close4", From: "+15551234567", To: "+2" });
+    const { ws } = await openStream(h, "CA-close4", tokenFrom(answered.text));
+    await new Promise((r) => setTimeout(r, 40));
+    ws.close();
+    await waitFor(() => h.persisted.some((r) => r.callSid === "CA-close4"), "the abandoned setup to persist", 3000);
+    await new Promise((r) => setTimeout(r, 120));
+    expect(h.transports.length).toBeGreaterThanOrEqual(1);
+    expect(h.closeRows.filter((r) => r.callSid === "CA-close4")).toHaveLength(0);
+    await h.close();
+  });
+
+  it("still closes the caller's line when reading the diagnostics throws", async () => {
+    const h = await harness({ stallFirstEvent: true, firstEventTimeoutMs: 80, connectRetries: 2, throwingDiagnostics: true });
+    const answered = await post(h, "/voice/optical", { CallSid: "CA-close5", From: "+15551234567", To: "+2" });
+    const { ws } = await openStream(h, "CA-close5", tokenFrom(answered.text));
+    const closed = new Promise<void>((r) => (ws.readyState === ws.CLOSED ? r() : ws.once("close", () => r())));
+    await waitFor(() => h.closeRows.some((r) => r.callSid === "CA-close5"), "the setup close row", 3000);
+    expect(h.closeRows.find((r) => r.callSid === "CA-close5")?.diagnostics).toBeUndefined();
+    await closed;
+    await h.close();
+  });
+
+  it("writes no setup row when no socket was ever opened", () => {
+    const runtimeSource = readFileSync(new URL("./voiceRuntime.ts", import.meta.url), "utf8");
+    const at = runtimeSource.indexOf('stage: "setup"');
+    expect(at).toBeGreaterThan(-1);
+    const before = runtimeSource.slice(Math.max(0, at - 400), at);
+    expect(before).toContain("if (setupTransport && !(err instanceof ProviderConnectAbortedError)) {");
+    expect(runtimeSource.slice(at, at + 200)).toContain("closeDiagnosticsOf(setupTransport)");
+    expect(runtimeSource).toMatch(/opened\.transport = t;\s+setupTransport = t;/);
+  });
+
   it("is never awaited by teardown, and runs after the caller-audio row", () => {
     const runtimeSource = readFileSync(new URL("./voiceRuntime.ts", import.meta.url), "utf8");
     const at = runtimeSource.indexOf("void logClose(");
     expect(at).toBeGreaterThan(-1);
     const call = runtimeSource.slice(at, at + 320);
-    expect(call).toContain("transport.closeDiagnostics?.()");
+    expect(call).toContain("closeDiagnosticsOf(transport)");
     expect(call).toContain("{ after: audioWritten }");
     expect(call).toContain(".catch(() => undefined)");
     expect(runtimeSource.indexOf("const audioWritten = logAudio(")).toBeLessThan(at);

@@ -51,6 +51,7 @@ describe("the provider-close row (v259)", () => {
     expect(ev?.level).toBe("warn");
     expect(ev?.data).toMatchObject({
       outcome: "provider_failure",
+      stage: "call",
       diagnostics: "present",
       socketErrorCode: "ECONNRESET",
       openSockets: 4,
@@ -61,6 +62,7 @@ describe("the provider-close row (v259)", () => {
   it("says the diagnostics are absent rather than reading as a clean close", () => {
     expect(providerCloseEvent("provider_failure", undefined, { uptimeSec: 1 })?.data).toEqual({
       outcome: "provider_failure",
+      stage: "call",
       diagnostics: "absent",
       uptimeSec: 1,
     });
@@ -75,6 +77,11 @@ describe("the provider-close row (v259)", () => {
     expect(data).toMatchObject({ socketErrorCode: "ECONNRESET", cfRay: "ray-1" });
     expect(ids).toEqual({ callSid: SID, callLogId: "row-1" });
     expect(log.released).toEqual([SID]);
+  });
+
+  it("says when the provider never answered well enough to start the call", async () => {
+    await logProviderClose({ callSid: SID, outcome: "provider_failure", stage: "setup" }, DIAG);
+    expect(log.emitted[0][4]).toMatchObject({ stage: "setup", socketErrorCode: "ECONNRESET" });
   });
 
   it("writes nothing at all for a call that did not end on the provider", async () => {
