@@ -332,6 +332,16 @@ describe('the Spanish text', () => {
     expect(confirmationBody(record({ replaced_day_es: '', cancel: 'pending' }))).toContain('Cancelaremos su cita actual con nosotros.');
   });
 
+  // github-actions review of #509 (head cfaddb74): a day the month does not
+  // have read as a date, so the text could cancel an appointment on February 30.
+  it('reads no day the calendar does not have', () => {
+    expect(textedDayEs('2041-02-30')).toBe('');
+    expect(textedDayEs('2041-02-29')).toBe('');
+    expect(textedDayEs('2041-04-31')).toBe('');
+    expect(textedDayEs('2040-02-29')).toBe('29 de febrero');
+    expect(textedDayEs('2041-12-31')).toBe('31 de diciembre');
+  });
+
   it('is GSM-7 and fits two segments at the longest place, phone and date the campaign has sent', () => {
     // Hub, every confirmation queued to 2026-11-22: place at most 81
     // characters, phone at most 12. The longest Spanish date and day.

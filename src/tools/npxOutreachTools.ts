@@ -1876,13 +1876,18 @@ export function textedDay(ymd: string): string {
 }
 
 /** "6 de enero": the Azul appointment a Spanish text names (v261); '' when
- * the date does not read, and the text then says "su cita actual". */
+ * the date does not read or is not a day on the calendar (February 30), and
+ * the text then says "su cita actual". */
 export function textedDayEs(ymd: string): string {
   const m = /^(\d{4})-(\d{2})-(\d{2})/.exec(ymd);
   if (!m) return '';
+  const year = Number(m[1]);
+  const monthNumber = Number(m[2]);
   const day = Number(m[3]);
-  const month = spanishMonth(Number(m[2]));
-  return month && day >= 1 && day <= 31 ? `${day} de ${month}` : '';
+  const d = new Date(Date.UTC(year, monthNumber - 1, day, 12));
+  if (d.getUTCFullYear() !== year || d.getUTCMonth() !== monthNumber - 1 || d.getUTCDate() !== day) return '';
+  const month = spanishMonth(monthNumber);
+  return month ? `${day} de ${month}` : '';
 }
 
 /** What a booking's confirmation text will say, rendered when it is booked (v222). */
