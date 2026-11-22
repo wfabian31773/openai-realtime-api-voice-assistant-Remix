@@ -53,6 +53,7 @@ import {
   type GrokTransport,
 } from "./grokSession";
 import {
+  clampEnvMs,
   connectWithFirstEventRetry,
   connectRetries,
   firstEventTimeoutMs,
@@ -277,7 +278,12 @@ import { makeRecordingStarter } from "./callRecording";
 import { gradeRuntimeCall } from "./runtimeGrading";
 import { logRuntimeFollowUps } from "./followUpTelemetry";
 import { logCallerAudio } from "./callerAudioTelemetry";
-import { logProviderClose } from "./providerCloseTelemetry";
+import { logProviderClose, logProviderReconnects, type ProviderReconnectRow } from "./providerCloseTelemetry";
+import {
+  ReconnectingSession,
+  reconnectEnabledFor,
+  DEFAULT_RECONNECT_BUDGET_MS,
+} from "./reconnectingSession";
 import type { ProviderCloseDiagnostics } from "./grokSession";
 import { CallerAudioMeter, type CallerAudioCounts } from "./callerAudioEnergy";
 import { withGreetingAlreadyPlayed } from "./greetingAlreadyPlayed";
@@ -561,6 +567,17 @@ export interface VoiceRuntimeOptions {
     ids: { callLogId?: string },
     opts?: { after?: Promise<unknown> },
   ) => Promise<unknown>;
+  /**
+   * The drops the mid-call reconnect saw (v263, providerCloseTelemetry.ts),
+   * one PHI-free row each, beside the writers above and under the same
+   * rules. Injected for tests.
+   */
+  logProviderReconnects?: (
+    call: { callSid: string },
+    events: readonly ProviderReconnectRow[],
+    ids: { callLogId?: string },
+    opts?: { after?: Promise<unknown> },
+  ) => Promise<unknown>;
   /** Bound on opening the call row. Defaults to CALL_ROW_DEADLINE_MS. */
   callRowDeadlineMs?: number;
   /**
@@ -710,6 +727,7 @@ export function mountVoiceRuntime(
   const logAudio = options.logCallerAudio ?? logCallerAudio;
   const logTicketTools = options.logTicketTools ?? logTicketToolOutcomes;
   const logClose = options.logProviderClose ?? logProviderClose;
+  const logReconnects = options.logProviderReconnects ?? logProviderReconnects;
   let laneSourcePromise: Promise<LaneSource> | null = null;
   const laneSource = () => {
     if (options.laneSource) return Promise.resolve(options.laneSource);
@@ -1730,24 +1748,27 @@ export function mountVoiceRuntime(
         // only in a closure stays `null` forever to tsc, and the null-check
         // then narrows the transport to `never`.
         const opened: { transport?: RuntimeTransport } = {};
+        const newTransport = (): RuntimeTransport =>
+          options.createTransport
+            ? options.createTransport({ apiKey: lane.voice.apiKey, model: lane.voice.model })
+            : new WebSocketGrokTransport(lane.voice.apiKey, lane.voice.model);
+        const asSocket = (t: RuntimeTransport) => ({
+          headers: t.upgradeHeaders?.() ?? {},
+          waitForFirstEvent: (ms: number) =>
+            t.waitForFirstEvent?.(ms) ?? Promise.resolve(true),
+          detachAndClose: () => {
+            if (t.detachAndClose) t.detachAndClose();
+            else t.close();
+          },
+        });
         await connectWithFirstEventRetry({
           open: async () => {
             if (socketGone) throw new ProviderConnectAbortedError();
-            const t = options.createTransport
-              ? options.createTransport({ apiKey: lane.voice.apiKey, model: lane.voice.model })
-              : new WebSocketGrokTransport(lane.voice.apiKey, lane.voice.model);
+            const t = newTransport();
             opened.transport = t;
             setupTransport = t;
             await t.connect();
-            return {
-              headers: t.upgradeHeaders?.() ?? {},
-              waitForFirstEvent: (ms) =>
-                t.waitForFirstEvent?.(ms) ?? Promise.resolve(true),
-              detachAndClose: () => {
-                if (t.detachAndClose) t.detachAndClose();
-                else t.close();
-              },
-            };
+            return asSocket(t);
           },
           shouldAbort: () => socketGone,
           firstEventTimeoutMs: options.firstEventTimeoutMs ?? firstEventTimeoutMs(env),
@@ -1758,6 +1779,8 @@ export function mountVoiceRuntime(
         });
         const transport = opened.transport;
         if (!transport) throw new Error("provider connect returned no transport");
+        // The reconnect wrapper, when RUNTIME_RECONNECT names this lane.
+        let reconnecting: ReconnectingSession | null = null;
         bridge = new VoiceCallBridge({
           context,
           startedAtMs,
@@ -1788,10 +1811,8 @@ export function mountVoiceRuntime(
           // copy the lane is required to say; see `chooseGreeting`.
           greeting: spokenGreeting,
           twilio: twilioSocket,
-          createSession: (handlers) =>
-            new GrokVoiceSession(
-              transport,
-              buildSessionConfig(
+          createSession: (handlers) => {
+            const sessionConfig = buildSessionConfig(
                 lane.voice,
                 /**
                  * RULE ZERO, both halves, composed at the one seam that knows
@@ -1822,19 +1843,62 @@ export function mountVoiceRuntime(
                 ),
                 lane.agent.tools,
                 laneKeyterms(entry.slug),
-              ),
-              {
-                ...handlers,
-                // The handshake landing is what stands the setup deadline
-                // down — the same event that arms the bridge's own dead-air
-                // watchdog, so the two windows meet with no gap between
-                // them and nothing to poll.
-                onConfigured: () => {
-                  clearSetupDeadline();
-                  handlers.onConfigured();
+              );
+            /**
+             * A DROPPED xAI CONNECTION RECONNECTS (v263), dark until
+             * RUNTIME_RECONNECT names this lane (reconnectingSession.ts).
+             * The wrapper takes the bridge's handlers unchanged and opens
+             * the next transport through the same first-event retry; off,
+             * the session is built exactly as before.
+             */
+            if (reconnectEnabledFor(entry.slug, env.RUNTIME_RECONNECT)) {
+              reconnecting = new ReconnectingSession({
+                slug: entry.slug,
+                callSid: entry.callSid,
+                handlers,
+                transport,
+                config: sessionConfig,
+                onFirstConfigured: () => clearSetupDeadline(),
+                mayReconnect: () => !socketGone,
+                history: () => bridge?.getTranscript() ?? "",
+                budgetMs: clampEnvMs(
+                  env.RUNTIME_RECONNECT_BUDGET_MS,
+                  DEFAULT_RECONNECT_BUDGET_MS,
+                  1_000,
+                  20_000,
+                ),
+                connect: async () => {
+                  const again: { transport?: RuntimeTransport } = {};
+                  await connectWithFirstEventRetry({
+                    open: async () => {
+                      if (socketGone) throw new ProviderConnectAbortedError();
+                      const t = newTransport();
+                      again.transport = t;
+                      await t.connect();
+                      return asSocket(t);
+                    },
+                    shouldAbort: () => socketGone,
+                    firstEventTimeoutMs: options.firstEventTimeoutMs ?? firstEventTimeoutMs(env),
+                    maxRetries: 1,
+                  });
+                  if (!again.transport) throw new Error("reconnect returned no transport");
+                  return again.transport;
                 },
+              });
+              return reconnecting;
+            }
+            return new GrokVoiceSession(transport, sessionConfig, {
+              ...handlers,
+              // The handshake landing is what stands the setup deadline
+              // down — the same event that arms the bridge's own dead-air
+              // watchdog, so the two windows meet with no gap between
+              // them and nothing to poll.
+              onConfigured: () => {
+                clearSetupDeadline();
+                handlers.onConfigured();
               },
-            ),
+            });
+          },
           // Enforce by default — the SDK interrupts on the SIP path, and a
           // lane must not lose its safety rules by moving transports. "log"
           // exists to measure a rule's false-positive rate first.
@@ -2074,11 +2138,24 @@ export function mountVoiceRuntime(
              * Same discipline as the writers above; changes nothing a caller
              * hears.
              */
+            /**
+             * AND EVERY DROP THE RECONNECT SAW (v263), before the close row,
+             * so a drop the call survived is counted too. The close row
+             * reads the transport the session was on when the call ended.
+             */
+            const reconnectsWritten = reconnecting
+              ? logReconnects(
+                  { callSid: record.callSid },
+                  reconnecting.reconnectEvents(),
+                  { callLogId },
+                  { after: audioWritten },
+                ).catch(() => undefined)
+              : audioWritten;
             void logClose(
               { callSid: record.callSid, outcome: record.outcome },
-              closeDiagnosticsOf(transport),
+              closeDiagnosticsOf(reconnecting?.currentTransport() ?? transport),
               { callLogId },
-              { after: audioWritten },
+              { after: reconnectsWritten },
             ).catch(() => undefined);
             // SI Assistant callbacks (and the outbound leg) are reported to
             // the ticketing app so they land on the ticket and in My Messages.
@@ -2129,7 +2206,8 @@ export function mountVoiceRuntime(
           const activeBridge = bridge;
           liveCalls.attach(entry.callSid, {
             turns: () => activeBridge.getTranscriptTurns(),
-            instruct: (text) => (activeBridge.getSession() as GrokVoiceSession).addBotGuidance(text),
+            instruct: (text) =>
+              (activeBridge.getSession() as unknown as { addBotGuidance(text: string): void }).addBotGuidance(text),
             end: () => activeBridge.handleSocketClosed(),
           });
         }
@@ -2146,7 +2224,7 @@ export function mountVoiceRuntime(
           bridge?.failSession(new Error("provider setup timed out"));
         }, options.providerSetupDeadlineMs ?? PROVIDER_SETUP_DEADLINE_MS);
         (setupDeadline as unknown as { unref?: () => void }).unref?.();
-        (bridge.getSession() as GrokVoiceSession).markConnecting();
+        (bridge.getSession() as unknown as { markConnecting(): void }).markConnecting();
         bridge.noteProviderConnecting();
         // First event already arrived. Ready BEFORE pending-frame replay
         // so a queued Twilio `stop` stays caller_hangup (the caller left

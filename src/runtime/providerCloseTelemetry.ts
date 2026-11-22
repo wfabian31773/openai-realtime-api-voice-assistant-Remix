@@ -108,3 +108,87 @@ export async function logProviderClose(
   );
   return false;
 }
+
+/**
+ * EVERY DROP THE RECONNECT SAW (v263), recovered or not: one PHI-free
+ * `call_events` row per drop, `category = 'session'`,
+ * `message = 'provider_reconnect'`. A call the reconnect saves never ends as
+ * `provider_failure`, so without this row its drop would vanish from the
+ * close measurement above, which is the evidence for why the far side closes
+ * (task #39). The dropped transport's own diagnostics ride on the row.
+ */
+export const PROVIDER_RECONNECT_EVENT = "provider_reconnect";
+
+export interface ProviderReconnectRow {
+  attempt: number;
+  result: string;
+  msIntoCall: number | null;
+  msToConfigured: number | null;
+  heldAudioFrames: number;
+  replayedCallerFrames: number;
+  queuedTurns: number;
+  carriedToolAnswers: number;
+  resumedTurn: boolean;
+  cutMidTurn: boolean;
+  dropped: ProviderCloseDiagnostics | null;
+}
+
+export function providerReconnectData(
+  event: ProviderReconnectRow,
+  proc: { uptimeSec: number } = { uptimeSec: Math.round(process.uptime()) },
+): Record<string, unknown> {
+  return {
+    attempt: event.attempt,
+    result: event.result,
+    msIntoCall: event.msIntoCall,
+    msToConfigured: event.msToConfigured,
+    heldAudioFrames: event.heldAudioFrames,
+    replayedCallerFrames: event.replayedCallerFrames,
+    queuedTurns: event.queuedTurns,
+    carriedToolAnswers: event.carriedToolAnswers,
+    resumedTurn: event.resumedTurn,
+    cutMidTurn: event.cutMidTurn,
+    diagnostics: event.dropped ? "present" : "absent",
+    dropped: event.dropped ?? null,
+    uptimeSec: proc.uptimeSec,
+  };
+}
+
+export async function logProviderReconnects(
+  call: { callSid: string },
+  events: readonly ProviderReconnectRow[],
+  ids: { callLogId?: string } = {},
+  opts: {
+    backoffMs?: readonly number[];
+    sleep?: (ms: number) => Promise<void>;
+    after?: Promise<unknown>;
+  } = {},
+): Promise<boolean> {
+  if (events.length === 0) return false;
+  const { emitCallEvent, flushCallEvents, releaseCallEvents } = await import("../services/callEventLog");
+  for (const event of events) {
+    emitCallEvent(
+      call.callSid,
+      event.result === "reconnected" ? "info" : "warn",
+      "session",
+      PROVIDER_RECONNECT_EVENT,
+      providerReconnectData(event),
+      { callSid: call.callSid, callLogId: ids.callLogId },
+    );
+  }
+  if (opts.after) await opts.after.catch(() => undefined);
+  const backoff = opts.backoffMs ?? PERSIST_RETRY_BACKOFF_MS;
+  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  for (let attempt = 0; ; attempt += 1) {
+    if (await flushCallEvents(call.callSid)) {
+      releaseCallEvents(call.callSid);
+      return true;
+    }
+    if (attempt >= backoff.length) break;
+    await sleep(backoff[attempt]);
+  }
+  console.warn(
+    `[PROVIDER RECONNECT] the ${PROVIDER_RECONNECT_EVENT} rows did not land for ${call.callSid} — left for the reaper`,
+  );
+  return false;
+}

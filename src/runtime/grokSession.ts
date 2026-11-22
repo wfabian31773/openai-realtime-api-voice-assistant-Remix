@@ -397,6 +397,9 @@ export function buildSessionConfig(
  * less than fresh on a live call. */
 export const PRE_CONFIG_AUDIO_CAP = 500;
 
+/** A line asked for and not yet started (exported for v263's reconnect). */
+export type UnstartedSay = PendingSay;
+
 type PendingSay =
   | { mode: "scripted"; text: string; interruptible?: boolean }
   | { mode: "natural"; instructions: string }
@@ -459,6 +462,9 @@ export class GrokVoiceSession {
    * out before the wire reports the first as active (mirrors the
    * sibling's awaitingResponseStart). */
   private awaitingSayStart = false;
+  /** The line sent while awaitingSayStart, kept until its response starts
+   * so a dropped connection can hand it to the next session (v263). */
+  private sayInFlight: PendingSay | null = null;
   /** True from sending `response.cancel` until the current response cycle
    * ends (the next `response.created`) or the provider rejects the cancel
    * outright. Only while this is owed may that specific rejection be
@@ -695,6 +701,7 @@ export class GrokVoiceSession {
         this.wireResponseActive = true;
         this.responseEpoch += 1;
         this.awaitingSayStart = false;
+        this.sayInFlight = null;
         // A NEW response cycle settles whatever became of any earlier
         // cancel, so the debt ends here rather than persisting for the
         // rest of the call.
@@ -839,6 +846,7 @@ export class GrokVoiceSession {
 
   private sendSay(say: PendingSay): void {
     this.awaitingSayStart = true;
+    this.sayInFlight = say;
     if (say.mode === "open") {
       // NO `instructions` key. `response.instructions` OVERRIDES the
       // session's instructions for that response, so sending any here
@@ -915,6 +923,26 @@ export class GrokVoiceSession {
     });
   }
 
+  /**
+   * A NOTE FROM THE RUNTIME ITSELF (v263), as a user-role text item. Used
+   * only by the reconnect (reconnectingSession.ts) to hand the new session a
+   * tool answer whose call was made on the session that dropped: that
+   * call_id does not exist on the new conversation, and a
+   * function_call_output for it would be refused. The text says it is not
+   * the caller speaking.
+   */
+  addRuntimeNote(text: string): void {
+    if (this.state !== "configured") throw new Error("session_not_running");
+    this.send({
+      type: "conversation.item.create",
+      item: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text }],
+      },
+    });
+  }
+
   /** Forward one chunk of caller audio (base64 μ-law 8kHz, the input
    * format buildSessionConfig declares) into the model's input buffer.
    * Pass-through, no transcoding here. */
@@ -969,6 +997,21 @@ export class GrokVoiceSession {
     // cancelDoneOwed and the `error` case.
     this.cancelDoneOwed = true;
     return discardedOpen;
+  }
+
+  /**
+   * THE LINES THIS SESSION NEVER STARTED (v263): the one sent and not yet
+   * acknowledged by a `response.created`, then every line still queued
+   * behind an open response, in order. Taken (and cleared) by the reconnect
+   * when this session's connection drops, so the next session says them.
+   */
+  takeUnstartedSays(): UnstartedSay[] {
+    const out: UnstartedSay[] = [];
+    if (this.sayInFlight !== null) out.push(this.sayInFlight);
+    out.push(...this.pendingSays.splice(0));
+    this.sayInFlight = null;
+    this.awaitingSayStart = false;
+    return out;
   }
 
   close(): void {
