@@ -2110,12 +2110,22 @@ import { callEnvironment } from "./callRecord";
  * answer from the dropped one reaches the model as a note, and the greeting
  * is not played again. A reconnect that fails inside RUNTIME_RECONNECT_BUDGET_MS
  * (8 s) ends the call as provider_failure, as before. Every drop writes a
- * provider_reconnect call_events row. Above main's v262 (#510, `afe93f14`),
- * which it contains along with v261 (#509, `9102e0e3`); v245 is #488 on its
- * open branch. No migration.
+ * provider_reconnect call_events row. On main since #511 (`1c4abb7b`).
+ *
+ * v265 — A HEARD CALLER IS NOT A GHOST (2026-11-22). The after-hours Grok body
+ * scripted the ghost exchange with "I'm having trouble hearing you. If you
+ * need assistance, please call back.", and the model said it to callers it
+ * had heard (14 no-ivr calls 2026-11-08..22, 4 with no ticket), against
+ * standing instruction 10. The body now scripts the ghost exchange with no
+ * call-back line, and tells the model a caller who said anything, even one
+ * word, is never a ghost. Only when the caller repeats "Hello?" or makes no
+ * request, it says "I'm here. Can you hear me?" once, then resumes the step it
+ * was on. The runtime's ghost_call refusal (v131) is unchanged. Above
+ * main's v263 (#511, `1c4abb7b`), which it contains; v264 is #512 and v245
+ * is #488 on their open branches, both held for the operator. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v263-a-dropped-call-reconnects-20261122";
+  "voice-runtime-v265-a-heard-caller-is-not-a-ghost-20261122";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
