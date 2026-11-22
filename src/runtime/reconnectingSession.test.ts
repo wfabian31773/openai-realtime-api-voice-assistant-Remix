@@ -961,6 +961,25 @@ describe("the #511 review, round 3", () => {
     expect(replayed).not.toContain(BEFORE);
     expect(h.events[1]).toMatchObject({ result: "reconnected", replayedCallerFrames: 15 });
   });
+
+  it("P2: a turn the dropped session never closed does not stay open on the replacement", async () => {
+    const h = harness();
+    h.configureFirst();
+    // The first session hears the caller start and the line drops before it
+    // stops or transcribes them: that turn is replayed onto the replacement.
+    h.first.emit({ type: "input_audio_buffer.speech_started" });
+    for (let i = 0; i < 5; i += 1) h.s.appendAudio(LOUD);
+    const t2 = await h.dropAndReconnect();
+    expect(h.events[0].replayedCallerFrames).toBeGreaterThan(0);
+    // The replacement hears the replayed turn and transcribes it.
+    t2.emit({ type: "input_audio_buffer.speech_started" });
+    t2.emit({ type: "input_audio_buffer.speech_stopped" });
+    t2.emit({ type: "conversation.item.input_audio_transcription.completed", item_id: "c2", transcript: "My glasses." });
+    for (let i = 0; i < 5; i += 1) h.s.appendAudio(LOUD);
+    // Nothing is open on the replacement, so a second drop replays nothing.
+    await h.dropAndReconnect(t2);
+    expect(h.events[1]).toMatchObject({ result: "reconnected", replayedCallerFrames: 0 });
+  });
 });
 
 describe("the tools-run note", () => {
