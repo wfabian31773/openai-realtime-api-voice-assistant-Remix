@@ -134,19 +134,17 @@ describe('v265: a heard caller is never a ghost, and is never told to call back'
     expect(check).toBeGreaterThan(gate);
   });
 
-  it('repeats its last question after the check, so a caller mid-intake is not asked their request again', async () => {
+  it('resumes after the check, so a caller mid-intake is not asked their request again', async () => {
     // #513 review, round 2: a caller mid-intake who repeats "Hello?" while
     // waiting is not asked for their request again. After the check the agent
-    // repeats the question it last asked: the intake step it was on, or, for a
-    // caller who has made no request, the greeting's "how can I help you?".
+    // resumes the step it was on. Measured offline: "then resume, or ask what
+    // they need" re-asked the request on 2 of 5 refill runs, and "then repeat
+    // your last question" said the robot goodbye without hanging up on 4 of 15
+    // fragment runs; "then resume" did neither.
     const body = await grokBody('CA0000000000000000000000000000beef');
-    expect(body).toContain('"I\'m here. Can you hear me?" once, then repeat your last question;');
+    expect(body).toContain('"I\'m here. Can you hear me?" once, then resume; never tell them to call back.');
     expect(body).not.toContain('or ask what they need');
-    const check = body.indexOf('"I\'m here. Can you hear me?"');
-    const repeat = body.indexOf('then repeat your last question', check);
-    const never = body.indexOf('never tell them to call back', check);
-    expect(repeat).toBeGreaterThan(check);
-    expect(never).toBeGreaterThan(repeat);
+    expect(body).not.toContain('repeat your last question');
   });
 
   it('still ends a true ghost and a robot, and still never escalates for either', async () => {
