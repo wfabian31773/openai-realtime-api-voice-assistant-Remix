@@ -260,6 +260,25 @@ describe('the language rule', () => {
     expect(sent[0].body).toBe(SPANISH_BODY);
   });
 
+  it('a hang-up during the booking\'s store writes still leaves the booking\'s language for the fallback', async () => {
+    const sid = 'CA00000000000000000000000000000263';
+    noteCallLanguage(sid, 'es');
+    // The caller hangs up while the held cancel is being written: teardown
+    // releases the call's language before the confirmation is queued
+    // (github-actions review of #509).
+    const held = store.queueHeldCancel.bind(store);
+    store.queueHeldCancel = async (...a: Parameters<typeof held>) => {
+      releaseCallLanguage(sid);
+      return held(...a);
+    };
+    await bookOn(sid);
+    expect(confirmation()?.language).toBe('es');
+    await store.finishAttempt(attemptId, { status: 'completed' } as never);
+    await store.releaseConfirmation('c1', 'booking-1', 'cancelled', new Date());
+    await tick();
+    expect(sent[0].body).toBe(SPANISH_BODY);
+  });
+
   it('a queue that lands after the hang-up takes the language the call ended in', async () => {
     // The booking's queue missed its settle budget and the caller hung up
     // first: the hang-up writes a released placeholder (Codex P2 on #474).
@@ -344,12 +363,17 @@ describe('the Spanish text', () => {
 
   // github-actions review of #509 (head 2d256517): the match was a prefix,
   // so a malformed value read as the date it started with.
-  it('reads nothing after the day but a time', () => {
+  it('reads nothing after the day but a whole time', () => {
     expect(textedDayEs('2041-03-201')).toBe('');
     expect(textedDayEs('2041-03-20x')).toBe('');
     expect(textedDayEs('2041-03-20 junk')).toBe('');
     expect(textedDayEs('2041-03-20')).toBe('20 de marzo');
     expect(textedDayEs('2041-03-20T09:00:00Z')).toBe('20 de marzo');
+    expect(textedDayEs('2041-03-20T09:00')).toBe('20 de marzo');
+    expect(textedDayEs('2041-03-20T09:00:00.000-07:00')).toBe('20 de marzo');
+    expect(textedDayEs('2041-03-20Tjunk')).toBe('');
+    expect(textedDayEs('2041-03-20T')).toBe('');
+    expect(textedDayEs('2041-03-20T09:00Zjunk')).toBe('');
   });
 
   it('is GSM-7 and fits two segments at the longest place, phone and date the campaign has sent', () => {

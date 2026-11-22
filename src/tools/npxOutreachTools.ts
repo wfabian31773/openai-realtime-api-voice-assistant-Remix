@@ -1876,11 +1876,12 @@ export function textedDay(ymd: string): string {
 }
 
 /** "6 de enero": the Azul appointment a Spanish text names (v261); '' when
- * the date does not read, carries anything after the day but a time
- * (2041-03-201), or is not a day on the calendar (February 30), and the text
+ * the date does not read, carries anything after the day but a whole time
+ * (2041-03-201, 2041-03-20Tjunk), or is not a day on the calendar
+ * (February 30), and the text
  * then says "su cita actual". */
 export function textedDayEs(ymd: string): string {
-  const m = /^(\d{4})-(\d{2})-(\d{2})(?:T|$)/.exec(ymd);
+  const m = /^(\d{4})-(\d{2})-(\d{2})(?:T\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?(?:Z|[+-]\d{2}:?\d{2})?)?$/.exec(ymd);
   if (!m) return '';
   const year = Number(m[1]);
   const monthNumber = Number(m[2]);
@@ -2060,6 +2061,11 @@ export async function bookOutreachSlot(args: {
     run_after: new Date(heldAt.getTime() + HELD_CANCEL_FALLBACK_MS).toISOString(),
   };
   const azul: Extract<AzulCancelState, { kind: 'held' }> = { kind: 'held', record, stored: 'unknown' };
+  // v261: the language the bridge is speaking the call in, read now, before
+  // any store write is awaited: a caller who hangs up during those writes
+  // has their language released at teardown, and the fallback release has
+  // nothing else to read it from (github-actions review of #509).
+  const bookingLanguage = confirmationLanguageOf(callLanguageFor(callRef));
   const settle = (async () => {
     const st = await store();
     try {
@@ -2082,8 +2088,7 @@ export async function bookOutreachSlot(args: {
     });
     await st.queueConfirmation(contact.contactId, confirmationRecordFor({
       contact, slot: bookedSlot, bookingId: book.bookingId, callRef, cancelled: false, awaitCancel: true, now: heldAt,
-      // v261: the language the bridge is speaking the call in right now.
-      language: confirmationLanguageOf(callLanguageFor(callRef)),
+      language: bookingLanguage,
     }));
     return settled;
   })().catch((e) => {
