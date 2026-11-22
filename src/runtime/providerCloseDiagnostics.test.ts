@@ -263,7 +263,10 @@ describe("why an xAI socket ended (v259)", () => {
     expect(failure).not.toBeNull();
     expect(d.closeCode).toBe(1006);
     expect(d.wsErrorMessage).toContain("503");
-    expect(d.firstSignal).toBe("socket_close");
+    // `ws` emits the handshake error before the close, so the error is what
+    // ended it first (v262; v259 and v260 read socket_close here).
+    expect(d.firstSignal).toBe("ws_error");
+    expect(d.closedByUs).toBe(false);
   });
 
   it("has final diagnostics at the detach, because no later close can reach them", async () => {
@@ -301,6 +304,68 @@ describe("why an xAI socket ended (v259)", () => {
     expect(d.closeCode).toBe(1006);
     expect(d.firstSignal).not.toBe("client_close");
     expect(JSON.stringify(d)).toBe(JSON.stringify(beforeDetach));
+  });
+
+  /** A server that sends nothing first, then a frame with a reserved opcode. */
+  async function protocolBreaker(delayMs: number, greetFirst = false): Promise<string> {
+    const wss = new WebSocketServer({ port: 0 });
+    servers.push(wss);
+    wss.on("connection", (s, req) => {
+      if (greetFirst) s.send(JSON.stringify({ type: "session.created" }));
+      // FIN + opcode 3: reserved, so the client's `ws` refuses the frame,
+      // starts the close itself (1002) and emits an error.
+      setTimeout(() => req.socket.write(Buffer.from([0x83, 0x00])), delayMs);
+    });
+    await new Promise<void>((r) => wss.once("listening", () => r()));
+    return `ws://127.0.0.1:${(wss.address() as AddressInfo).port}/realtime`;
+  }
+
+  it("keeps a protocol error before the first event as the peer's, when the retry detaches the socket", async () => {
+    // The error wakes the first-event wait while `ws` is still closing; the
+    // retry detaches before the close event, which then never arrives. The row
+    // must still say the provider broke the connection (#508 review, v262).
+    const url = await protocolBreaker(20);
+    const t = new WebSocketGrokTransport("key", "model", url);
+    t.onClose(() => undefined);
+    await t.connect();
+    expect(await t.waitForFirstEvent(1_000)).toBe(false);
+    t.detachAndClose();
+    const d = t.closeDiagnostics();
+    expect(d.firstSignal).toBe("ws_error");
+    expect(d.closedByUs).toBe(false);
+    expect(d.wsErrorMessage).toContain("invalid opcode 3");
+    // Final at the detach, as before.
+    const atDetach = JSON.stringify(d);
+    await new Promise((r) => setTimeout(r, 100));
+    expect(JSON.stringify(t.closeDiagnostics())).toBe(atDetach);
+    expect(t.closeDiagnostics().openSockets).toBeGreaterThanOrEqual(1);
+  });
+
+  it("does not call a close ours when the teardown follows a protocol error mid-call", async () => {
+    const url = await protocolBreaker(50, true);
+    const t = new WebSocketGrokTransport("key", "model", url);
+    const closed = new Promise<void>((r) => t.onClose(() => r()));
+    t.onError(() => t.close());
+    await t.connect();
+    expect(await t.waitForFirstEvent(1_000)).toBe(true);
+    await closed;
+    const d = t.closeDiagnostics();
+    expect(d.firstSignal).toBe("ws_error");
+    expect(d.closedByUs).toBe(false);
+    expect(d.closeCode).not.toBeNull();
+  });
+
+  it("still calls a detach ours when nothing went wrong on the socket first", async () => {
+    // The control for the guard: a healthy socket that only stalled.
+    const wss = new WebSocketServer({ port: 0 });
+    servers.push(wss);
+    await new Promise<void>((r) => wss.once("listening", () => r()));
+    const t = new WebSocketGrokTransport("key", "model", `ws://127.0.0.1:${(wss.address() as AddressInfo).port}/realtime`);
+    t.onClose(() => undefined);
+    await t.connect();
+    expect(await t.waitForFirstEvent(50)).toBe(false);
+    t.detachAndClose();
+    expect(t.closeDiagnostics()).toMatchObject({ firstSignal: "client_close", closedByUs: true, wsErrorMessage: null });
   });
 
   it("leaves a reset after the detach to ws's own handler, so nothing goes unhandled", async () => {
