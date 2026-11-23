@@ -317,10 +317,26 @@ describe("test mode", () => {
       "+15550100001",
       "",
       "",
-      // The test number is still chosen by the level's place in the chain.
+      // The test numbers go to the levels that will ring, in order.
       "+15550100002",
     ]);
     expect(withTestPhones(plan, LIVE)).toBe(plan);
+  });
+
+  it("gives the first level that will ring the first test number, whichever levels are skipped", () => {
+    // Review of #514, round 6: by the level's place in the chain, a skipped
+    // first level would leave the first test phone, the one the text goes to,
+    // unrung.
+    const three: OnCallConfig = { ...TEST, testPhones: ["+15550100001", "+15550100002", "+15550100003"] };
+    const plan = {
+      levels: [
+        { role: "on_call" as const, providerId: 1, name: "A", phone: "" },
+        { role: "region_director" as const, providerId: 2, name: "B", phone: "+15550222222" },
+        { role: "final" as const, providerId: 3, name: "C", phone: "+15550333333" },
+      ],
+      notes: [],
+    };
+    expect(withTestPhones(plan, three).levels.map((l) => l.phone)).toEqual(["", "+15550100001", "+15550100002"]);
   });
 
   it("runs a synthetic chain over the test numbers before the rotation is imported", async () => {

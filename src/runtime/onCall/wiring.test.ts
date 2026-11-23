@@ -210,11 +210,34 @@ describe("running", () => {
     expect(sent[0].body).toMatch(/THE ON-CALL ESCALATION COULD NOT START/);
   });
 
-  it("keeps a test-mode chain's text off the urgent number after the rotation is switched to live", async () => {
+  it("sends a test-mode chain's text to the test number its own plan rang after the rotation is switched to live", async () => {
+    // A live process has no test list; the chain's own plan rang test numbers
+    // by construction, so its closing text goes to the first of them and never
+    // to the urgent number (review of #514, round 6).
+    const { w, tw, store } = running();
+    store.failWrites = true;
+    const base = noAnswer();
+    const plan = {
+      ...base.plan,
+      levels: base.plan.levels.map((l, i) => ({ ...l, phone: i === 0 ? "" : `+1555000444${i}` })),
+    };
+    await w.runner!.afterInCallTransfer({ ...base, mode: "test", plan });
+    expect(tw.texts.filter((t) => t.to === "+15550007777")).toHaveLength(0);
+    const sent = tw.texts.filter((t) => t.to === "+15550004441");
+    expect(sent).toHaveLength(1);
+    expect(sent[0].from).toBe(CALLER_ID);
+    expect(sent[0].body).toMatch(/\[TEST MODE\]/);
+    expect(sent[0].body).toMatch(/THE ON-CALL ESCALATION COULD NOT START/);
+  });
+
+  it("keeps a test-mode chain's text off the urgent number when its plan holds no number either", async () => {
     const { w, tw, store, lines } = running();
     store.failWrites = true;
-    await w.runner!.afterInCallTransfer({ ...noAnswer(), mode: "test" });
+    const base = noAnswer();
+    const plan = { ...base.plan, levels: base.plan.levels.map((l) => ({ ...l, phone: "" })) };
+    await w.runner!.afterInCallTransfer({ ...base, mode: "test", plan });
     expect(tw.texts.filter((t) => t.to === "+15550007777")).toHaveLength(0);
+    expect(tw.texts).toHaveLength(0);
     expect(lines.some((l) => /a test chain needs ON_CALL_TEST_PHONES/.test(l))).toBe(true);
   });
 

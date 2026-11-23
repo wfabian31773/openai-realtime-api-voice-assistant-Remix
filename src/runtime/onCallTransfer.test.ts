@@ -15,6 +15,7 @@ import {
   TRANSFER_ACCEPT_PATH,
   TRANSFER_STATUS_PATH,
   urgentTextRotationNote,
+  ringOutDialTarget,
   type OnCallTransferWiring,
 } from "./runtimeTransfer";
 import type { TransferTwilioOps } from "./warmTransfer";
@@ -314,11 +315,31 @@ describe("an urgent after-hours call with the rotation on", () => {
     await expect(outcome).rejects.toThrow(/^handoff_failed:CHAIN_STARTED$/);
     expect(rec.tickets).toHaveLength(1);
     expect(rec.tickets[0]).toMatchObject({ onCallChain: true });
-    // The ticket names who was rung, never the provider's own phone.
+    // In test mode the phone that rang was a test number, and the ticket says
+    // so: it names the level it stood in for, never a number (review of #514,
+    // round 6).
+    const level = built.handed[0].plan.levels[0];
+    const dialTarget = String((rec.tickets[0] as { dialTarget?: unknown }).dialTarget);
+    expect(dialTarget).toBe(`[TEST MODE] a test number, standing in for ${levelLabel(level)}`);
+    expect(dialTarget).not.toContain(level.phone);
+    expect(dialTarget).not.toMatch(/\d{7}/);
+  });
+
+  it("in live mode, names who was rung on the ring-out ticket, never their phone", async () => {
+    const { ops } = fakeOps();
+    const built = buildWiring({ env: { ON_CALL_ROTATION_MODE: "live", ON_CALL_CALLER_ID: ROTATION_CALLER_ID } });
+    const rec = recordingAlerts();
+    const transfer = transferWith(ops, built.wiring, rec.alerts);
+    urgent();
+    const outcome = transfer.handoffFor("no-ivr", META)();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    transfer.handleStatus(signed(TRANSFER_STATUS_PATH, { CallSid: "CAoffice", CallStatus: "no-answer" }));
+    await expect(outcome).rejects.toThrow(/^handoff_failed:CHAIN_STARTED$/);
     const level = built.handed[0].plan.levels[0];
     const dialTarget = String((rec.tickets[0] as { dialTarget?: unknown }).dialTarget);
     expect(dialTarget).toBe(levelLabel(level));
     expect(dialTarget).toContain(level.name);
+    expect(dialTarget).not.toContain("[TEST MODE]");
     expect(dialTarget).not.toContain(level.phone);
     expect(dialTarget).not.toMatch(/\d{7}/);
   });
@@ -338,7 +359,9 @@ describe("an urgent after-hours call with the rotation on", () => {
     expect(built.handed[0].warm.outcome).toBe("failed");
     expect(rec.tickets).toHaveLength(1);
     expect(rec.tickets[0]).toMatchObject({ onCallChain: true, handoff: { status: "FAILED" } });
-    expect((rec.tickets[0] as { dialTarget?: unknown }).dialTarget).toBe(levelLabel(built.handed[0].plan.levels[0]));
+    expect((rec.tickets[0] as { dialTarget?: unknown }).dialTarget).toBe(
+      `[TEST MODE] a test number, standing in for ${levelLabel(built.handed[0].plan.levels[0])}`,
+    );
   });
 
   it("still files nothing for an UNAVAILABLE dial the rotation did not take", async () => {
@@ -1101,5 +1124,26 @@ describe("the rotation line on the urgent heads-up text", () => {
 
   it("says nothing for a plan with no level", () => {
     expect(urgentTextRotationNote({ levels: [], notes: [] }, "live")).toBeUndefined();
+  });
+});
+
+describe("who the urgent ring-out ticket says was rung", () => {
+  const plan = {
+    levels: [{ role: "on_call" as const, providerId: 3, name: "Dr. Example On Call", phone: "+15550333333" }],
+    notes: [],
+  };
+
+  it("in live mode names the level, by role, and no number", () => {
+    expect(ringOutDialTarget(plan, "live")).toBe(levelLabel(plan.levels[0]));
+  });
+
+  it("in test mode says a test number rang in the level's place", () => {
+    const target = ringOutDialTarget(plan, "test")!;
+    expect(target).toBe(`[TEST MODE] a test number, standing in for ${levelLabel(plan.levels[0])}`);
+    expect(target).not.toContain("+1555");
+  });
+
+  it("says nothing for a plan with no level, so the ticket keeps the dial's own target", () => {
+    expect(ringOutDialTarget({ levels: [], notes: [] }, "live")).toBeUndefined();
   });
 });

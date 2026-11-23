@@ -128,8 +128,11 @@ export interface OnCallRunnerDeps {
    * The text that says nobody took the call: to URGENT_NOTIFICATION_NUMBER in
    * live mode, and to the test list when the chain or the rotation is in test
    * mode, so a test chain never tells a real person to call a test caller.
+   * `plan` is the chain's own plan: a test chain still open after the
+   * rotation is switched to live has no test list to read, and its plan's
+   * numbers are test numbers by construction (review of #514, round 6).
    */
-  notifyUrgent(body: string, mode: OnCallMode): Promise<void>;
+  notifyUrgent(body: string, mode: OnCallMode, plan?: ChainPlan): Promise<void>;
   /** Hang up one of our provider calls (Twilio status=completed). */
   endCall(providerCallSid: string): Promise<void>;
   now?: () => Date;
@@ -235,9 +238,9 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
     isPhone(level.phone) &&
     !config.testPhones.includes(level.phone);
 
-  async function notifyQuietly(body: string, callSid: string, mode: OnCallMode) {
+  async function notifyQuietly(body: string, callSid: string, mode: OnCallMode, plan: ChainPlan) {
     try {
-      await deps.notifyUrgent(body, mode);
+      await deps.notifyUrgent(body, mode, plan);
     } catch (err) {
       log(`[ON-CALL] ${callSid}: the urgent notification failed: ${(err as Error)?.message ?? err}`);
     }
@@ -354,7 +357,7 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
         const closed = await store.closeEscalation(e.id, e.version, { status: "exhausted", nextAt: null });
         if (closed) {
           log(`[ON-CALL] ${e.callSid}: every level tried, nobody took it`);
-          await notifyQuietly(textFor(e, exhaustedNote(e)), e.callSid, e.mode);
+          await notifyQuietly(textFor(e, exhaustedNote(e)), e.callSid, e.mode, e.plan);
           return;
         }
       }
@@ -386,7 +389,7 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
       const closed = await store.closeEscalation(row.id, row.version, { status: "failed", nextAt: null });
       if (closed) {
         log(`[ON-CALL] ${row.callSid}: came due more than two hours after it opened; closed as failed, nobody rung`);
-        await notifyQuietly(textFor(row, staleNote(row)), row.callSid, row.mode);
+        await notifyQuietly(textFor(row, staleNote(row)), row.callSid, row.mode, row.plan);
       }
       return;
     }
@@ -399,6 +402,7 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
           textFor(row, stoppedNote(row, "its next level could not be read")),
           row.callSid,
           row.mode,
+          row.plan,
         );
       }
       return;
@@ -413,6 +417,7 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
           textFor(row, stoppedNote(row, "the rotation is in test mode and the next level is not a test number")),
           row.callSid,
           row.mode,
+          row.plan,
         );
       }
       return;
@@ -677,6 +682,7 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
             ),
             r.callSid,
             r.mode,
+            r.plan,
           );
         }
         return null;

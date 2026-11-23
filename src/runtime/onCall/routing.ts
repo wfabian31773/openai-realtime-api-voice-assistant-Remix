@@ -125,14 +125,16 @@ export function syntheticTestPlan(config: OnCallConfig): ChainPlan {
 /**
  * In test mode every level that has a phone rings a test number, level by
  * level. A level with no dialable phone keeps none, so a test chain skips the
- * same levels a live one would (review of #514); the test number for each
- * level is still chosen by the level's place in the chain.
+ * same levels a live one would (review of #514). The test numbers go to the
+ * levels that will be rung, in order, so the first level rung rings the first
+ * test number whichever levels are skipped (review of #514, round 6).
  */
 export function withTestPhones(plan: ChainPlan, config: OnCallConfig): ChainPlan {
   if (config.mode !== "test") return plan;
+  let rung = 0;
   return {
     ...plan,
-    levels: plan.levels.map((l, i) => ({ ...l, phone: DIALABLE.test(l.phone) ? testPhoneFor(config, i) : "" })),
+    levels: plan.levels.map((l) => ({ ...l, phone: DIALABLE.test(l.phone) ? testPhoneFor(config, rung++) : "" })),
   };
 }
 

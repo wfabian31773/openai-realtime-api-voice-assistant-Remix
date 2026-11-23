@@ -292,12 +292,6 @@ export function rotationMayTakeTheDial(policy: ReturnType<typeof resolveHandoffD
 }
 
 /**
- * The plan the in-call dial uses: leading levels with no usable phone are
- * dropped (and said so in the notes), because the in-call dial needs a number
- * to ring now and the runner cannot ring a level with none either. Null when
- * no level has a phone, so the call takes today's path.
- */
-/**
  * The line at the top of today's urgent text when the rotation took the dial:
  * that text still goes to URGENT_NOTIFICATION_NUMBER on every urgent call, a
  * real caller's in test mode included (docs/ON_CALL_ROTATION.md section 5),
@@ -313,6 +307,26 @@ export function urgentTextRotationNote(plan: ChainPlan, mode: string | undefined
     : `The on-call rotation is ringing ${levelLabel(first)}.`;
 }
 
+/**
+ * Who the urgent ring-out ticket says was rung when the rotation took the
+ * dial. The level's name and role, never the number; in test mode the phone
+ * that rang was a test number, so the ticket says that instead of reading as
+ * if the provider had been paged (review of #514, round 6).
+ */
+export function ringOutDialTarget(plan: ChainPlan, mode: string | undefined): string | undefined {
+  const first = plan.levels[0];
+  if (!first) return undefined;
+  return mode === "test"
+    ? `[TEST MODE] a test number, standing in for ${levelLabel(first)}`
+    : levelLabel(first);
+}
+
+/**
+ * The plan the in-call dial uses: leading levels with no usable phone are
+ * dropped (and said so in the notes), because the in-call dial needs a number
+ * to ring now and the runner cannot ring a level with none either. Null when
+ * no level has a phone, so the call takes today's path.
+ */
 export function dialablePlan(plan: ChainPlan): ChainPlan | null {
   const first = plan.levels.findIndex((l) => E164.test(l.phone));
   if (first < 0) return null;
@@ -1230,7 +1244,8 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
                   : `Transfer dial failed: ${outcome.reason}`,
               // A rotation run rang a provider's own phone: the ticket names
               // who was called, never the number (review of #514).
-              dialTarget: holder.run?.plan.levels[0] ? levelLabel(holder.run.plan.levels[0]) : outcome.destination,
+              dialTarget:
+                (holder.run && ringOutDialTarget(holder.run.plan, onCall?.config.mode)) || outcome.destination,
               agentUsed: slug,
               // v163: the failure itself, structured, so the ticket says the
               // caller was never connected and how long the phone rang (70166).

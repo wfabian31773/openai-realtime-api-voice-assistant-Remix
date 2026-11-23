@@ -65,6 +65,7 @@ function harness(
   const calls: Array<{ to: string; from: string; twiml: string; statusCallback: string; timeout: number; timeLimit: number; at: Date }> = [];
   const urgent: string[] = [];
   const urgentModes: string[] = [];
+  const urgentPlans: Array<ChainPlan | undefined> = [];
   let sid = 0;
   const sendSms =
     opts.sendSms ??
@@ -80,9 +81,10 @@ function harness(
     });
   const notifyUrgent =
     opts.notifyUrgent ??
-    vi.fn(async (body: string, mode: string) => {
+    vi.fn(async (body: string, mode: string, plan?: ChainPlan) => {
       urgent.push(body);
       urgentModes.push(mode);
+      urgentPlans.push(plan);
     });
   const hungUp: string[] = [];
   const endCall =
@@ -110,6 +112,7 @@ function harness(
     calls,
     urgent,
     urgentModes,
+    urgentPlans,
     hungUp,
     log,
     sendSms,
@@ -824,6 +827,7 @@ describe("what keeps the chain moving when something goes wrong", () => {
     expect(h.urgent[0]).toMatch(/THE ON-CALL ESCALATION COULD NOT START/);
     expect(h.urgent[0]).toContain(DETAILS.reason);
     expect(h.urgentModes).toEqual(["live"]);
+    expect(h.urgentPlans[0]?.levels.map((l) => l.phone)).toEqual(wedPlan().levels.map((l) => l.phone));
   });
 
   it("keeps a chain whose row opened when the first attempt's log row cannot be written, and tells nobody it did not start", async () => {
@@ -971,6 +975,9 @@ describe("what keeps the chain moving when something goes wrong", () => {
     expect(h.urgent).toHaveLength(1);
     expect(h.urgent[0]).toContain("[TEST MODE] NOBODY TOOK THIS URGENT CALL");
     expect(h.urgentModes).toEqual(["test"]);
+    // The chain's own plan goes with it, so a process switched to live in the
+    // meantime still has a test number to send it to (review of #514, round 6).
+    expect(h.urgentPlans[0]?.levels.map((l) => l.phone)).toEqual(syntheticTestPlan(TEST).levels.map((l) => l.phone));
   });
 
   it("marks a stale escalation's text as a test in test mode", async () => {
@@ -980,6 +987,7 @@ describe("what keeps the chain moving when something goes wrong", () => {
     await h.runner.tick();
     expect(h.urgent[0]).toContain("[TEST MODE] THE ON-CALL ESCALATION STOPPED");
     expect(h.urgentModes).toEqual(["test"]);
+    expect(h.urgentPlans[0]?.levels.map((l) => l.phone)).toEqual(syntheticTestPlan(TEST).levels.map((l) => l.phone));
   });
 
   it("opens one escalation per call and hands back the existing one", async () => {

@@ -26,6 +26,20 @@ describe("the on-call switch", () => {
     expect(c.callerId).toBe("+15550000002");
   });
 
+  it("is off, and says why, when ON_CALL_CALLER_ID is set and is not a phone number", () => {
+    // Review of #514, round 6: falling back to TWILIO_PHONE_NUMBER would ring
+    // providers from a number nobody chose for them.
+    for (const bad of ["on-call line", "12345", "+1 (555) 000"]) {
+      const c = readOnCallConfig({ ...BASE, ON_CALL_ROTATION_MODE: "live", ON_CALL_CALLER_ID: bad });
+      expect(c.mode).toBe("off");
+      expect(c.disabledBecause).toBe("ON_CALL_CALLER_ID is not a phone number");
+    }
+    // Blank is unset, and the default stands.
+    expect(readOnCallConfig({ ...BASE, ON_CALL_ROTATION_MODE: "live", ON_CALL_CALLER_ID: "  " }).callerId).toBe(
+      "+15550000001",
+    );
+  });
+
   it("is off with no caller ID at all", () => {
     const c = readOnCallConfig({ ON_CALL_ROTATION_MODE: "live" });
     expect(c.mode).toBe("off");

@@ -122,7 +122,7 @@ export function buildOnCallWiring(env: Env, host: string | undefined, deps: OnCa
     // not TWILIO_PHONE_NUMBER still gets this text (review of #514). A test
     // chain's goes to the first test phone instead, so a test call never asks
     // a real person to call a test caller back.
-    notifyUrgent: async (body, mode) => {
+    notifyUrgent: async (body, mode, plan) => {
       const test = mode === "test";
       // Normalised the way every other number the rotation reads is, so a
       // number written with punctuation still reaches Twilio, and one that
@@ -130,7 +130,12 @@ export function buildOnCallWiring(env: Env, host: string | undefined, deps: OnCa
       // Twilio with nothing in the log naming the setting (review of #514,
       // round 4).
       const raw = env.URGENT_NOTIFICATION_NUMBER?.trim();
-      const to = test ? config.testPhones[0] : e164(raw);
+      // A test chain the rotation outlived (switched to live while it ran)
+      // has no test list left; the first number its own plan rang is a test
+      // number, so its closing text goes there (review of #514, round 6).
+      const to = test
+        ? (config.testPhones[0] ?? plan?.levels.map((l) => e164(l.phone)).find((p): p is string => !!p) ?? null)
+        : e164(raw);
       const from = config.callerId;
       if (!to || !from) {
         log(

@@ -66,6 +66,11 @@ export function readOnCallConfig(env: Env = process.env): OnCallConfig {
     return asked === "" || asked === "off" ? off() : off(`ON_CALL_ROTATION_MODE="${asked}" is not off, test or live`);
   }
 
+  // A caller ID the operator chose and mistyped is not replaced by another
+  // number: the rotation turns off and says why (review of #514, round 6).
+  if ((env.ON_CALL_CALLER_ID ?? "").trim() && !e164(env.ON_CALL_CALLER_ID)) {
+    return off("ON_CALL_CALLER_ID is not a phone number");
+  }
   const callerId = e164(env.ON_CALL_CALLER_ID) ?? e164(env.TWILIO_PHONE_NUMBER);
   if (!callerId) return off("no caller ID: set ON_CALL_CALLER_ID or TWILIO_PHONE_NUMBER");
   const operator = e164(env.OPERATOR_LINE_FROM_NUMBER);
