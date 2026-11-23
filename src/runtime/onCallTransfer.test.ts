@@ -338,6 +338,17 @@ describe("one chain per call, read from the chain's own row", () => {
     transfer.handleAccept(signed(TRANSFER_ACCEPT_PATH, { CallSid: "CAoffice", Digits: "1" }));
     await second;
     expect(built.handed).toHaveLength(1);
+
+    // And the call is not left claimed by that read: a third escalation
+    // reads the finished row again and rings the fixed number too.
+    urgent();
+    const third = handoff();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    expect(dialed).toHaveLength(3);
+    expect(dialed[2].to).toBe(ENV.HUMAN_AGENT_NUMBER);
+    transfer.handleAccept(signed(TRANSFER_ACCEPT_PATH, { CallSid: "CAoffice", Digits: "1" }));
+    await third;
+    expect(built.handed).toHaveLength(1);
   });
 
   it("routes a second escalation again when the runner could not open a row for the first", async () => {
