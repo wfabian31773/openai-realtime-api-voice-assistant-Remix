@@ -23,7 +23,7 @@
  * Writes nothing to any database. Changes after the first load are
  * `scripts/on-call-change.ts`.
  */
-import { readFileSync, writeFileSync } from "node:fs";
+import { closeSync, fchmodSync, openSync, readFileSync, writeSync } from "node:fs";
 import { relative, resolve, isAbsolute } from "node:path";
 import { buildSeedSql, SeedError } from "../src/runtime/onCall/seed";
 import { FINAL_REGION } from "../src/runtime/onCall/rotation";
@@ -43,6 +43,23 @@ const USAGE =
 export function insideRepo(path: string, root = REPO_ROOT): boolean {
   const rel = relative(root, resolve(path));
   return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+}
+
+/**
+ * Writes `contents` to `path` readable by its owner only. The mode is set on
+ * the open file before a byte is written: `writeFileSync`'s `mode` applies
+ * only when it creates the file, so writing over an existing, wider-mode file
+ * would put provider phones and emails where others can read them (review of
+ * #514).
+ */
+export function writePrivate(path: string, contents: string): void {
+  const fd = openSync(path, "w", 0o600);
+  try {
+    fchmodSync(fd, 0o600);
+    writeSync(fd, contents);
+  } finally {
+    closeSync(fd);
+  }
 }
 
 function flags(args: string[], names: string[]): { values: Record<string, string>; rest: string[]; problem?: string } {
@@ -111,7 +128,7 @@ export function run(args: string[]): ScriptResult {
   lines.push(out ? `Wrote ${out}. Run it on the Hub after migrations/add_on_call_rotation.sql.` : `SQL on stdout.`);
 
   if (out) {
-    writeFileSync(out, result.sql, { mode: 0o600 });
+    writePrivate(out, result.sql);
     return { code: 0, stdout: "", stderr: `${lines.join("\n")}\n` };
   }
   return { code: 0, stdout: result.sql, stderr: `${lines.join("\n")}\n` };

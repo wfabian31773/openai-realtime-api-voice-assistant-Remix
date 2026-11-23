@@ -53,6 +53,14 @@ export const RING_GUARD_MS = 390_000;
 export const CLAIM_LEASE_MS = 60_000;
 export const TICK_MS = 10_000;
 export const CLAIM_LIMIT = 10;
+/**
+ * A tick stops waiting for its rows after this long, so one send that never
+ * answers (the Hub pool has no statement timeout) cannot hold every later tick
+ * back. The row keeps going on its own: every send is made after the
+ * version-checked "ringing" write, and a row claimed again after its lease has
+ * a new version, so a late step lands nothing over the next one.
+ */
+export const TICK_BUDGET_MS = CLAIM_LEASE_MS;
 /** How long the provider's phone rings before Twilio gives up. */
 export const PROVIDER_RING_SECONDS = 30;
 /** The provider's call can never run longer than this. */
@@ -120,6 +128,8 @@ export interface OnCallRunnerDeps {
   endCall(providerCallSid: string): Promise<void>;
   now?: () => Date;
   log?: (line: string) => void;
+  /** For tests: how long a tick waits for its rows. TICK_BUDGET_MS. */
+  tickBudgetMs?: number;
 }
 
 export interface OnCallRunner {
@@ -650,19 +660,34 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
     async tick() {
       if (running) return;
       running = true;
-      try {
+      // Each claimed row is stepped on its own, side by side: a row whose text
+      // or call never answers does not hold the rows claimed with it.
+      const work = (async () => {
         if (!(await store.available())) return;
         const rows = await store.claimDue(now(), CLAIM_LEASE_MS, CLAIM_LIMIT);
-        for (const row of rows) {
-          try {
-            await step(row);
-          } catch (err) {
-            log(`[ON-CALL] ${row.callSid}: step failed: ${(err as Error)?.message ?? err}`);
-          }
-        }
-      } catch (err) {
+        await Promise.allSettled(
+          rows.map(async (row) => {
+            try {
+              await step(row);
+            } catch (err) {
+              log(`[ON-CALL] ${row.callSid}: step failed: ${(err as Error)?.message ?? err}`);
+            }
+          }),
+        );
+      })().catch((err) => {
         log(`[ON-CALL] tick failed: ${(err as Error)?.message ?? err}`);
+      });
+      let budget: NodeJS.Timeout | undefined;
+      const outOfTime = new Promise<"late">((resolve) => {
+        budget = setTimeout(() => resolve("late"), deps.tickBudgetMs ?? TICK_BUDGET_MS);
+        budget.unref?.();
+      });
+      try {
+        if ((await Promise.race([work.then(() => "done" as const), outOfTime])) === "late") {
+          log("[ON-CALL] a tick is still waiting on a send or the store; the next tick runs without it");
+        }
       } finally {
+        if (budget) clearTimeout(budget);
         running = false;
       }
     },

@@ -194,7 +194,7 @@ describe("running", () => {
     await w.runner!.afterInCallTransfer(noAnswer());
     const urgent = tw.texts.filter((t) => t.to === "+15550007777");
     expect(urgent).toHaveLength(1);
-    expect(urgent[0].from).toBe("+15550000000");
+    expect(urgent[0].from).toBe(CALLER_ID);
     expect(urgent[0].body).toMatch(/THE ON-CALL ESCALATION COULD NOT START/);
   });
 
@@ -205,7 +205,7 @@ describe("running", () => {
     expect(tw.texts.filter((t) => t.to === "+15550007777")).toHaveLength(0);
     const sent = tw.texts.filter((t) => t.to === "+15550002222");
     expect(sent).toHaveLength(1);
-    expect(sent[0].from).toBe("+15550000000");
+    expect(sent[0].from).toBe(CALLER_ID);
     expect(sent[0].body).toMatch(/\[TEST MODE\]/);
     expect(sent[0].body).toMatch(/THE ON-CALL ESCALATION COULD NOT START/);
   });
@@ -237,12 +237,30 @@ describe("running", () => {
     expect(lines.some((l) => /'nobody took it' text was not sent/.test(l))).toBe(true);
   });
 
-  it("logs and sends nothing when today's number is not set, so no text goes out with no sender", async () => {
+  it("sends the 'nobody took it' text from the chain's caller ID even when TWILIO_PHONE_NUMBER is not set", async () => {
     const { w, tw, store, lines } = running({ TWILIO_PHONE_NUMBER: "" });
     store.failWrites = true;
     await w.runner!.afterInCallTransfer(noAnswer());
-    expect(tw.texts.filter((t) => t.to === "+15550007777")).toHaveLength(0);
-    expect(lines.some((l) => /'nobody took it' text was not sent/.test(l))).toBe(true);
+    const urgent = tw.texts.filter((t) => t.to === "+15550007777");
+    expect(urgent).toHaveLength(1);
+    expect(urgent[0].from).toBe(CALLER_ID);
+    expect(lines.some((l) => /'nobody took it' text was not sent/.test(l))).toBe(false);
+  });
+
+  it("never sends the 'nobody took it' text from the operator line", async () => {
+    // The config refuses a caller ID that is the operator line, and with no
+    // other number the rotation does not run at all, so nothing is sent.
+    const w = buildOnCallWiring(
+      {
+        ON_CALL_ROTATION_MODE: "live",
+        TWILIO_PHONE_NUMBER: "+15550009999",
+        OPERATOR_LINE_FROM_NUMBER: "+15550009999",
+        URGENT_NOTIFICATION_NUMBER: "+15550007777",
+      },
+      HOST,
+      { twilio: fakeTwilio().factory, store: createFakeOnCallStore(syntheticRotation(), () => new Date(WED_NIGHT)) },
+    );
+    expect(w.runner).toBeNull();
   });
 
   it("reads no surgery facts without the Console", () => {

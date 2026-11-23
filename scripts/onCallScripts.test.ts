@@ -2,7 +2,7 @@
  * The two on-call scripts Wayne runs: the first load and the changes after it.
  * Synthetic providers and 555 numbers only.
  */
-import { mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdtempSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -90,6 +90,30 @@ describe("scripts/on-call-seed.ts", () => {
     expect(insideRepo(join(root, "scripts", "x.sql"))).toBe(true);
     expect(insideRepo(join(tmpdir(), "x.sql"))).toBe(false);
     expect(insideRepo(`${root}-sibling/x.sql`)).toBe(false);
+  });
+});
+
+describe("an --out file that already exists (review of #514)", () => {
+  it("the seed narrows an existing world-readable file to its owner before writing", () => {
+    const f = files();
+    const out = join(f.dir, "seed.sql");
+    writeFileSync(out, "old");
+    chmodSync(out, 0o644);
+    const r = seed([f.pool, f.schedule, "--final", "Dan Lowe", "--directors", f.directors, "--out", out]);
+    expect(r.code).toBe(0);
+    expect(statSync(out).mode & 0o777).toBe(0o600);
+    expect(readFileSync(out, "utf8")).toContain("INSERT INTO on_call_schedule");
+  });
+
+  it("a change narrows an existing world-readable file to its owner before writing", () => {
+    const dir = mkdtempSync(join(tmpdir(), "on-call-change-"));
+    const out = join(dir, "change.sql");
+    writeFileSync(out, "old");
+    chmodSync(out, 0o644);
+    const r = change(["add-provider", "--name", "Kim Ruiz", "--phone", "555-010-0012", "--region", "San Diego", "--out", out]);
+    expect(r.code).toBe(0);
+    expect(statSync(out).mode & 0o777).toBe(0o600);
+    expect(readFileSync(out, "utf8")).toContain("'+15550100012'");
   });
 });
 

@@ -116,18 +116,21 @@ export function buildOnCallWiring(env: Env, host: string | undefined, deps: OnCa
       await (await twilio()).calls(sid).update({ status: "completed" });
     },
     // The text that says nobody took the call goes where today's urgent text
-    // goes, from today's number. It is not a provider call. A test chain's
-    // goes to the first test phone instead, so a test call never asks a real
-    // person to call a test caller back.
+    // goes. It is sent from the chain's own caller ID, the number its other
+    // texts already come from: the config always holds one, has checked it is
+    // not the operator line, and a deployment that sets ON_CALL_CALLER_ID and
+    // not TWILIO_PHONE_NUMBER still gets this text (review of #514). A test
+    // chain's goes to the first test phone instead, so a test call never asks
+    // a real person to call a test caller back.
     notifyUrgent: async (body, mode) => {
       const test = mode === "test";
       const to = test ? config.testPhones[0] : env.URGENT_NOTIFICATION_NUMBER?.trim();
-      const from = env.TWILIO_PHONE_NUMBER?.trim();
+      const from = config.callerId;
       if (!to || !from) {
         log(
           test
-            ? "[ON-CALL] the 'nobody took it' text was not sent: a test chain needs ON_CALL_TEST_PHONES and TWILIO_PHONE_NUMBER"
-            : "[ON-CALL] the 'nobody took it' text was not sent: URGENT_NOTIFICATION_NUMBER or TWILIO_PHONE_NUMBER is not set",
+            ? "[ON-CALL] the 'nobody took it' text was not sent: a test chain needs ON_CALL_TEST_PHONES"
+            : "[ON-CALL] the 'nobody took it' text was not sent: URGENT_NOTIFICATION_NUMBER is not set",
         );
         return;
       }

@@ -33,7 +33,6 @@
  * every command runs in one transaction that raises before it writes anything
  * if it does not.
  */
-import { writeFileSync } from "node:fs";
 import {
   activateSql,
   addProviderSql,
@@ -44,7 +43,7 @@ import {
   setDirectorSql,
   swapWeekSql,
 } from "../src/runtime/onCall/seed";
-import { insideRepo, type ScriptResult } from "./on-call-seed";
+import { insideRepo, writePrivate, type ScriptResult } from "./on-call-seed";
 
 const USAGE = `usage: npx tsx scripts/on-call-change.ts <command> [options] [--out file.sql]
   swap --week <Tuesday> --to "<name>" [--note "<text>"]
@@ -146,7 +145,7 @@ export function run(args: string[]): ScriptResult {
   }
 
   if (values.out) {
-    writeFileSync(values.out, sql, { mode: 0o600 });
+    writePrivate(values.out, sql);
     return { code: 0, stdout: "", stderr: `Wrote ${values.out}. Read it, then run it on the Hub.\n` };
   }
   return { code: 0, stdout: sql, stderr: "" };

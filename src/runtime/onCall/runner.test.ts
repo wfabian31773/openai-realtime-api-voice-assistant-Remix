@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   ATTEMPTS_PER_LEVEL,
+  CLAIM_LEASE_MS,
   LEVEL_RETRY_DEADLINE_MS,
   RETRY_GAP_MS,
   RING_GUARD_MS,
@@ -45,7 +46,17 @@ const DETAILS = { reason: "Sudden curtain over the right eye", patientFirstName:
 
 const phoneOf = (id: number) => provider(id, "x").phone;
 
-function harness(opts: { config?: OnCallConfig; start?: Date; placeCall?: any; sendSms?: any; notifyUrgent?: any; endCall?: any } = {}) {
+function harness(
+  opts: {
+    config?: OnCallConfig;
+    start?: Date;
+    placeCall?: any;
+    sendSms?: any;
+    notifyUrgent?: any;
+    endCall?: any;
+    tickBudgetMs?: number;
+  } = {},
+) {
   let clock = new Date(opts.start ?? WED_NIGHT);
   const now = () => new Date(clock);
   const store = createFakeOnCallStore(syntheticRotation(), now);
@@ -89,6 +100,7 @@ function harness(opts: { config?: OnCallConfig; start?: Date; placeCall?: any; s
     endCall,
     now,
     log,
+    ...(opts.tickBudgetMs !== undefined ? { tickBudgetMs: opts.tickBudgetMs } : {}),
   });
   return {
     store,
@@ -1169,5 +1181,55 @@ describe("the timer", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+});
+
+describe("one row that never answers holds no other row (review, 2026-11-23)", () => {
+  const OTHER_SID = "CA00000000000000000000000000000002";
+  const never = () => new Promise<never>(() => {});
+
+  it("calls the other due row in the same tick while one row's text never answers", async () => {
+    let texts = 0;
+    const sendSms = vi.fn(async () => {
+      texts += 1;
+      if (texts === 1) return never();
+      return { sid: `SM${texts}` };
+    });
+    const h = harness({ sendSms, tickBudgetMs: 50 });
+    const plan = wedPlan();
+    const a = await h.runner.afterInCallTransfer(inCall(plan, "no_answer"));
+    const b = await h.runner.afterInCallTransfer(inCall(plan, "no_answer", { callSid: OTHER_SID }));
+    h.at(new Date(Math.max(a!.nextAt!.getTime(), b!.nextAt!.getTime())));
+    await h.runner.tick();
+    expect(sendSms).toHaveBeenCalledTimes(2);
+    expect(h.calls).toHaveLength(1);
+    expect(h.log.mock.calls.some(([l]) => String(l).includes("still waiting on a send or the store"))).toBe(true);
+  });
+
+  it("lets the next tick run when one tick never settles", async () => {
+    const h = harness({ sendSms: vi.fn(never), tickBudgetMs: 30 });
+    const claim = vi.spyOn(h.store, "claimDue");
+    const plan = wedPlan();
+    const esc = await h.runner.afterInCallTransfer(inCall(plan, "no_answer"));
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    expect(claim).toHaveBeenCalledTimes(1);
+    h.advance(10_000);
+    await h.runner.tick();
+    expect(claim).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not ring a row twice when its lease runs out under a step still in flight", async () => {
+    const h = harness({ sendSms: vi.fn(never), tickBudgetMs: 30 });
+    const plan = wedPlan();
+    const esc = await h.runner.afterInCallTransfer(inCall(plan, "no_answer"));
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    // The hung step wrote "ringing" before it sent, so the row is not due again
+    // until the ringing guard, whatever the lease says.
+    h.advance(CLAIM_LEASE_MS + 1_000);
+    await h.runner.tick();
+    expect(h.calls).toHaveLength(0);
+    expect(h.escalation()).toMatchObject({ phase: "ringing" });
   });
 });

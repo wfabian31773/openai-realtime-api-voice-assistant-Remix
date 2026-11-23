@@ -173,7 +173,8 @@ ring comes from the rotation. With the rotation off, an unset
 
 When nobody takes the patient, the urgent notification number
 (`URGENT_NOTIFICATION_NUMBER`) gets one text with the patient's details and
-what happened, from today's number (`TWILIO_PHONE_NUMBER`):
+what happened, from the chain's own caller ID (`ON_CALL_CALLER_ID`, which
+defaults to `TWILIO_PHONE_NUMBER` and is never the operator line):
 
 - "NOBODY TOOK THIS URGENT CALL" when every level was tried;
 - "THE ON-CALL ESCALATION STOPPED" when the chain ended before it rang a
@@ -196,6 +197,13 @@ with test mode; such a chain only ever holds a test caller.
 Each of our callback calls rings for 30 seconds (the in-call warm transfer
 rings as it does today). A call whose status never comes back is hung up and
 logged `no_status` after 6.5 minutes, and the chain carries on.
+
+The chain's steps run every ten seconds, up to ten calls' chains at a time,
+side by side: a text or a call that never answers holds up only its own chain.
+A step waits at most 60 seconds before the next one runs without it (the log
+says `a tick is still waiting on a send or the store`). Every text and call is
+sent after the step has written that it is ringing, so a step that answers late
+changes nothing the next step did.
 
 ---
 
@@ -266,7 +274,8 @@ Phone numbers are never shown there, only how many test numbers are set.
    - A director who is not in the pool goes in `--directors <file.csv>` with
      the same columns (name, phone, email, region, NPI).
    - `--out` refuses a path inside the repository and writes the file
-     readable only by you. Without `--out` the SQL goes to the screen.
+     readable only by you, including a file that was already there and
+     readable by others. Without `--out` the SQL goes to the screen.
    - Every problem is reported at once and nothing is written: a week that is
      not a Tuesday, a week listed twice, a provider on the schedule who is not
      in the pool, a region with two directors, a number that is not a phone.
@@ -284,7 +293,8 @@ Phone numbers are never shown there, only how many test numbers are set.
 Every change is one command that prints SQL. Read it, then run it on the Hub.
 Nothing is written until you run it. Each command runs in one transaction that
 checks every name first and writes nothing if a name does not match exactly
-one provider (case and spacing aside).
+one provider (case and spacing aside). `--out` works as it does for the first
+load: never inside the repository, and the file readable only by you.
 
 ```sh
 npx tsx scripts/on-call-change.ts <command> [options] [--out ~/change.sql]
