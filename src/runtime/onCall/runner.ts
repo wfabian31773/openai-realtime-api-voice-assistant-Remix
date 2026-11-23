@@ -204,7 +204,7 @@ export function attemptNote(e: Pick<EscalationRow, "levelIndex" | "attemptNo" | 
   if (e.attemptNo > 1) {
     parts.push(
       e.levelIndex === 0
-        ? "REMINDER — the urgent transfer to you was not taken. We are calling you again now."
+        ? "REMINDER — this patient is still waiting for a provider. We are calling you again now."
         : "REMINDER — we are calling you again now.",
     );
   } else if (e.levelIndex > 0) {
@@ -341,7 +341,10 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
       if (lateKeyNotified.size > 500) lateKeyNotified.delete(lateKeyNotified.values().next().value as number);
       const level = row.plan.levels[a.levelIndex];
       const who = level ? levelLabel(level) : `The level ${a.levelIndex} provider`;
-      await notifyQuietly(lateKeyNote(row, who, urgentAlertTime(now())), a.callSid, row.mode, row.plan);
+      // Not awaited: the reply is TwiML the provider is waiting on, and a slow
+      // send must not hold it past Twilio's webhook timeout (review of #514,
+      // round 14). notifyQuietly catches and logs its own failure.
+      void notifyQuietly(lateKeyNote(row, who, urgentAlertTime(now())), a.callSid, row.mode, row.plan);
     }
     let reached = false;
     try {
@@ -437,7 +440,10 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
       for (const a of others) {
         // Ended first, so the status the hang-up brings back moves nothing.
         await store.endAttempt(a.id, "taken_elsewhere", now());
-        await hangUp(a.providerCallSid, a.callSid);
+        // Not awaited, for the same reason as the late-key update: a key
+        // press's reply must not wait on Twilio hanging up another call.
+        // hangUp catches and logs its own failure.
+        void hangUp(a.providerCallSid, a.callSid);
       }
     }
     return { row, byThis };

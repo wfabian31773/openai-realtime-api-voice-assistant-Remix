@@ -98,6 +98,10 @@ export function readOnCallConfig(env: Env = process.env): OnCallConfig {
   const testPhones = raw.map(e164);
   if (testPhones.length === 0) return off("test mode needs ON_CALL_TEST_PHONES");
   if (testPhones.some((p) => p === null)) return off("ON_CALL_TEST_PHONES holds a number that is not a phone number");
+  // Twilio refuses a call from a number to itself, so a test phone equal to
+  // the caller ID would fail every provider call and read as nobody answering
+  // (review of #514, round 14).
+  if (testPhones.includes(callerId)) return off("ON_CALL_TEST_PHONES holds the rotation's own caller ID");
   return { mode: "test", testPhones: testPhones as string[], callerId, requireKept };
 }
 

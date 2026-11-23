@@ -191,6 +191,18 @@ describe("a call whose text did not send (review of #514, round 12)", () => {
     expect(out.body).toContain(PROVIDER_ACK_FAILED_LINE);
   });
 
+  it("tells a provider whose key press was not recorded that we keep trying another provider (review of #514, round 14)", () => {
+    // Nothing marks the patient taken, so the chain carries on; the line says
+    // so before it asks them to call, on both forms.
+    for (const line of [PROVIDER_ACK_FAILED_LINE, PROVIDER_ACK_FAILED_NO_TEXT_LINE]) {
+      expect(line).toMatch(/keep trying to reach a provider for this patient/);
+      expect(line).not.toMatch(/patient is yours|has been taken/);
+    }
+    expect(PROVIDER_ACK_FAILED_LINE.indexOf("keep trying")).toBeLessThan(
+      PROVIDER_ACK_FAILED_LINE.indexOf("please call the patient"),
+    );
+  });
+
   it("refuses a request whose no-text flag was removed after signing", async () => {
     const { d, onProviderAck } = deps();
     const out = await handleOnCallAck(
@@ -275,7 +287,8 @@ describe("the key-press webhook", () => {
     const { d, log } = deps(new Error("hub down"));
     const out = await handleOnCallAck(req(ON_CALL_ACK_PATH, "?attempt=42", { Digits: "1" }), d);
     expect(out.status).toBe(200);
-    expect(out.body).toContain("Please call the patient from the number in the text message");
+    expect(out.body).toContain("please call the patient from the number in the text message");
+    expect(out.body).toContain("we will keep trying to reach a provider for this patient");
     expect(out.body).not.toContain(PROVIDER_ACCEPTED_LINE);
     expect(out.body).not.toContain(PROVIDER_CLOSED_LINE);
     expect(log).toHaveBeenCalled();

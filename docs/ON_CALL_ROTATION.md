@@ -63,10 +63,11 @@ second transfer request and would read it as a failed transfer.
      text, in the text itself, never behind a link), then the transfer call.
    - b. No answer is logged as `no_answer`, not as a failure.
    - c. Within 5 minutes of the original call: a second call and a reminder
-     text. The reminder says "REMINDER — the urgent transfer to you was not
-     taken. We are calling you again now." when the first call was the
-     in-call transfer, and "REMINDER — we are calling you again now."
-     otherwise, followed by the patient's details again.
+     text. The reminder says "REMINDER — this patient is still waiting for a
+     provider. We are calling you again now." when the first call was the
+     in-call transfer (true whether or not that call rang), and "REMINDER —
+     we are calling you again now." otherwise, followed by the patient's
+     details again.
    - d. A key press on any of our calls takes the patient and stops the chain.
      Any other call of ours still ringing for that patient is hung up and
      logged `taken_elsewhere`.
@@ -333,7 +334,8 @@ sets them.
 
 If any setting cannot be honoured (an unknown mode, no caller ID, a caller ID
 that is not a phone number, the operator line as caller ID, test mode with no
-test numbers, a test number that is not a phone number), the whole rotation turns **off** and says why. It never rings a
+test numbers, a test number that is not a phone number, a test number that is
+the caller ID itself), the whole rotation turns **off** and says why. It never rings a
 number nobody chose.
 
 ### How to tell it is running

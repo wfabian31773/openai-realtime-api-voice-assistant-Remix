@@ -376,6 +376,35 @@ describe("a pickup at any step stops the chain (success criterion)", () => {
     expect(h.calls[1].to).toBe(phoneOf(IE_DIRECTOR));
   });
 
+  it("answers the key press without waiting on another call's hang-up (review of #514, round 14)", async () => {
+    const never = vi.fn(() => new Promise<void>(() => {}));
+    const h = harness({ endCall: never });
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    const taking = h.lastCallAttempt();
+    const stray = await h.store.logAttempt({
+      escalationId: esc!.id,
+      callSid: SID,
+      levelIndex: 0,
+      role: "on_call",
+      providerId: 1,
+      kind: "call",
+      attemptNo: 1,
+      mode: "live",
+      dialedTo: phoneOf(1),
+    });
+    await h.store.setAttemptCallSid(stray.id, "CA8".padEnd(34, "0"));
+    const reply = await Promise.race([
+      h.runner.onProviderAck(taking.id, "1"),
+      new Promise((r) => setTimeout(() => r("held"), 200)),
+    ]);
+    expect(reply).toBe("accepted");
+    expect(h.store.attempts.get(stray.id)?.outcome).toBe("taken_elsewhere");
+    // the hang-up was still asked for, only not awaited
+    expect(never).toHaveBeenCalledWith("CA8".padEnd(34, "0"));
+  });
+
   it("hangs up any other call of ours still ringing for the patient, and logs it taken_elsewhere", async () => {
     const h = harness();
     const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
@@ -1528,10 +1557,17 @@ describe("the notes on the texts", () => {
     }
   });
 
-  it("says on level 0's reminder that the transfer was not taken and we are calling again", () => {
+  it("says on level 0's reminder that the patient is still waiting and we are calling again", () => {
     const note = attemptNote({ ...base, levelIndex: 0, attemptNo: 2 });
-    expect(note).toMatch(/the urgent transfer to you was not taken/);
+    expect(note).toMatch(/this patient is still waiting for a provider/);
     expect(note).toMatch(/We are calling you again now/);
+  });
+
+  it("makes no claim on level 0's reminder about how the in-call transfer went (review of #514, round 14)", () => {
+    // It may have rung out, been declined, or never rung at all (a dial that
+    // threw after the text went out).
+    const note = attemptNote({ ...base, levelIndex: 0, attemptNo: 2 });
+    expect(note).not.toMatch(/not taken|missed|did not answer|declined/i);
   });
 
   it("makes no claim on any text about whether the patient is still on the line", () => {
@@ -2220,6 +2256,28 @@ describe("a key press after the chain ended with nobody taking the patient (revi
       throw new Error("db down");
     };
     expect(await h.runner.onProviderAck(call.id, "1")).toEqual({ result: "too_late", noText: true });
+  });
+
+  it("answers a late key press without waiting on the update text (review of #514, round 14)", async () => {
+    // A send that never settles must not hold the reply past Twilio's
+    // webhook timeout: the provider is on the line waiting for it.
+    const never = vi.fn(() => new Promise<void>(() => {}));
+    const h = harness({ notifyUrgent: never });
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    const call = h.lastCallAttempt();
+    await h.store.endAttempt(call.id, "no_answer", h.now());
+    const cur = h.escalation();
+    await h.store.closeEscalation(cur.id, cur.version, { status: "exhausted", nextAt: null });
+    const before = never.mock.calls.length;
+    const reply = await Promise.race([
+      h.runner.onProviderAck(call.id, "1"),
+      new Promise((r) => setTimeout(() => r("held"), 200)),
+    ]);
+    expect(reply).toBe("too_late");
+    // the update was still sent, only not awaited
+    expect(never.mock.calls.length).toBe(before + 1);
   });
 
   it("still says closed, and tells nobody, when no key was pressed", async () => {

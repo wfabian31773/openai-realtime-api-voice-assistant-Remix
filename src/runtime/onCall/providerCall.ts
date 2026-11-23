@@ -51,9 +51,15 @@ export const PROVIDER_ACCEPTED_LINE =
 /** Accepted, no details text reached this number, and there is no callback number to read. */
 export const PROVIDER_ACCEPTED_NO_NUMBER_LINE =
   "Thank you. This patient is yours. We could not text you the details, and we cannot read you a callback number. Goodbye.";
-/** The ack could not be recorded, on a call whose details text was sent. */
+/**
+ * The ack could not be recorded, on a call whose details text was sent.
+ * Nothing marks the patient taken, so the chain carries on to the next level;
+ * the line says so before it asks the provider to call (review of #514, round
+ * 14). A best-effort write to stop the chain would fail in the same outage.
+ */
 export const PROVIDER_ACK_FAILED_LINE =
-  "We could not record that. Please call the patient from the number in the text message. Goodbye.";
+  "We could not record that, so we will keep trying to reach a provider for this patient. " +
+  "If you can, please call the patient from the number in the text message. Goodbye.";
 /** The ack could not be recorded, on a call whose details text did not reach the provider. */
 export const PROVIDER_ACK_FAILED_NO_TEXT_LINE =
   "We could not record that, and the text with the patient's details did not reach you. We will keep trying to reach a provider for this patient. Goodbye.";

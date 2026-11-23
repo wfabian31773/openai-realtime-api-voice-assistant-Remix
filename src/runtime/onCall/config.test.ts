@@ -87,6 +87,28 @@ describe("the on-call switch", () => {
     expect(c).toMatchObject({ mode: "test", testPhones: ["+15550100001", "+15550100002"] });
   });
 
+  it("is off, and says why, when a test number is the caller ID itself (review of #514, round 14)", () => {
+    // Twilio refuses a call from a number to itself.
+    for (const [phones, callerId] of [
+      ["+15550000001", undefined],
+      ["+15550100001, 555 000 0001", undefined],
+      ["+15550100001, +15550000002", "555-000-0002"],
+    ] as const) {
+      const c = readOnCallConfig({
+        ...BASE,
+        ON_CALL_ROTATION_MODE: "test",
+        ON_CALL_TEST_PHONES: phones,
+        ...(callerId ? { ON_CALL_CALLER_ID: callerId } : {}),
+      });
+      expect(c.mode).toBe("off");
+      expect(c.disabledBecause).toBe("ON_CALL_TEST_PHONES holds the rotation's own caller ID");
+    }
+    // Live mode has no test numbers to compare.
+    expect(
+      readOnCallConfig({ ...BASE, ON_CALL_ROTATION_MODE: "live", ON_CALL_TEST_PHONES: "+15550000001" }).mode,
+    ).toBe("live");
+  });
+
   it("is off, and says why, when every transfer is forced blind (review of #514, round 8)", () => {
     for (const blind of ["blind", " BLIND "]) {
       for (const mode of ["test", "live"]) {
