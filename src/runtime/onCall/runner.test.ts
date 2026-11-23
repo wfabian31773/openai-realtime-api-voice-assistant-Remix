@@ -992,13 +992,17 @@ describe("what keeps the chain moving when something goes wrong", () => {
     expect(h.urgentPlans[0]?.levels.map((l) => l.phone)).toEqual(syntheticTestPlan(TEST).levels.map((l) => l.phone));
   });
 
-  it("opens one escalation per call and hands back the existing one", async () => {
+  it("opens one escalation per call and hands back the existing one, with each hand-off's call logged on it", async () => {
     const h = harness();
     const a = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
     const b = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
     expect(b?.id).toBe(a?.id);
     expect(h.store.escalations.size).toBe(1);
-    expect([...h.store.attempts.values()].filter((x) => x.kind === "warm_transfer")).toHaveLength(1);
+    // Each hand-off rang the provider, so each call is a row on the one chain
+    // (review of #514, round 8: the second used to go unlogged).
+    const warm = [...h.store.attempts.values()].filter((x) => x.kind === "warm_transfer");
+    expect(warm).toHaveLength(2);
+    expect(new Set(warm.map((x) => x.escalationId))).toEqual(new Set([a!.id]));
   });
 
   it("skips a level with no phone number straight to the next level, with no retry wait", async () => {
