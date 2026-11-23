@@ -758,6 +758,185 @@ describe("a pickup at any step stops the chain (success criterion)", () => {
   });
 });
 
+describe("a call placed while another provider takes the patient (review of #514, round 19)", () => {
+  /** A placeCall that waits until the test lets it answer. */
+  function deferredDial() {
+    let answer!: (sid: string) => void;
+    let started!: () => void;
+    const dialStarted = new Promise<void>((r) => (started = r));
+    const placeCall = vi.fn(
+      () =>
+        new Promise<{ sid: string }>((resolve) => {
+          answer = (sid) => resolve({ sid });
+          started();
+        }),
+    );
+    return { placeCall, dialStarted, answer: (sid: string) => answer(sid) };
+  }
+
+  /** Another call of ours on the escalation, the one that takes the patient. */
+  async function otherCall(h: ReturnType<typeof harness>, escalationId: number) {
+    return h.store.logAttempt({
+      escalationId,
+      callSid: SID,
+      levelIndex: 0,
+      role: "on_call",
+      providerId: 1,
+      kind: "call",
+      attemptNo: 1,
+      mode: "live",
+      dialedTo: phoneOf(1),
+    });
+  }
+
+  const PLACED = "CA7".padEnd(34, "0");
+
+  it("hangs up the call it just placed when a key press on another call took the patient during the dial", async () => {
+    const dial = deferredDial();
+    const h = harness({ placeCall: dial.placeCall });
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    h.at(esc!.nextAt!);
+    const ticking = h.runner.tick();
+    await dial.dialStarted;
+    const dialling = h.lastCallAttempt();
+    const taking = await otherCall(h, esc!.id);
+    expect(await h.runner.onProviderAck(taking.id, "1")).toBe("accepted");
+    // the taken close ended the dialling attempt, but it had no sid to hang up
+    expect(h.store.attempts.get(dialling.id)?.outcome).toBe("taken_elsewhere");
+    expect(h.hungUp).toEqual([]);
+    dial.answer(PLACED);
+    await ticking;
+    await new Promise((r) => setTimeout(r, 0));
+    expect(h.hungUp).toEqual([PLACED]);
+    expect(h.escalation()).toMatchObject({ status: "accepted", acceptedAttemptId: taking.id });
+    const lines = h.log.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(lines).toMatch(/placed while another provider took the patient; hung it up/);
+    expect(lines).not.toMatch(/calling level 0/);
+  });
+
+  it("hangs it up and ends the attempt when the escalation was closed as taken but the attempt was left open", async () => {
+    const dial = deferredDial();
+    const h = harness({ placeCall: dial.placeCall });
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    h.at(esc!.nextAt!);
+    const ticking = h.runner.tick();
+    await dial.dialStarted;
+    const dialling = h.lastCallAttempt();
+    const taking = await otherCall(h, esc!.id);
+    // the close landed and the end of this attempt did not
+    const cur = (await h.store.getEscalation(esc!.id))!;
+    await h.store.closeEscalation(cur.id, cur.version, {
+      status: "accepted",
+      acceptedBy: 1,
+      acceptedAt: h.now(),
+      acceptedAttemptId: taking.id,
+      nextAt: null,
+    });
+    expect(h.store.attempts.get(dialling.id)?.outcome).toBe("in_progress");
+    dial.answer(PLACED);
+    await ticking;
+    await new Promise((r) => setTimeout(r, 0));
+    expect(h.hungUp).toEqual([PLACED]);
+    expect(h.store.attempts.get(dialling.id)?.outcome).toBe("taken_elsewhere");
+    // the hung-up call's own status then arrives and moves nothing
+    await h.runner.onProviderStatus(dialling.id, "completed");
+    expect(h.escalation()).toMatchObject({ status: "accepted", acceptedAttemptId: taking.id });
+  });
+
+  it("does not hang up the call it placed when that call's own key press took the patient before the dial returned", async () => {
+    const dial = deferredDial();
+    const h = harness({ placeCall: dial.placeCall });
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    h.at(esc!.nextAt!);
+    const ticking = h.runner.tick();
+    await dial.dialStarted;
+    const dialling = h.lastCallAttempt();
+    expect(await h.runner.onProviderAck(dialling.id, "1")).toBe("accepted");
+    dial.answer(PLACED);
+    await ticking;
+    await new Promise((r) => setTimeout(r, 0));
+    expect(h.hungUp).toEqual([]);
+    expect(h.escalation()).toMatchObject({ status: "accepted", acceptedAttemptId: dialling.id });
+    expect(h.store.attempts.get(dialling.id)?.outcome).toBe("accepted");
+  });
+
+  it("still hangs it up when ending the unneeded attempt fails", async () => {
+    const dial = deferredDial();
+    const h = harness({ placeCall: dial.placeCall });
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    h.at(esc!.nextAt!);
+    const ticking = h.runner.tick();
+    await dial.dialStarted;
+    const taking = await otherCall(h, esc!.id);
+    const cur = (await h.store.getEscalation(esc!.id))!;
+    await h.store.closeEscalation(cur.id, cur.version, {
+      status: "accepted",
+      acceptedBy: 1,
+      acceptedAt: h.now(),
+      acceptedAttemptId: taking.id,
+      nextAt: null,
+    });
+    const realEnd = h.store.endAttempt;
+    h.store.endAttempt = async () => {
+      throw new Error("hub write refused");
+    };
+    dial.answer(PLACED);
+    await ticking;
+    h.store.endAttempt = realEnd;
+    await new Promise((r) => setTimeout(r, 0));
+    expect(h.hungUp).toEqual([PLACED]);
+    const lines = h.log.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(lines).toMatch(/could not end level 0's unneeded call/);
+  });
+
+  it("leaves the call ringing when nobody took the patient during the dial", async () => {
+    const dial = deferredDial();
+    const h = harness({ placeCall: dial.placeCall });
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    h.at(esc!.nextAt!);
+    const ticking = h.runner.tick();
+    await dial.dialStarted;
+    const dialling = h.lastCallAttempt();
+    dial.answer(PLACED);
+    await ticking;
+    await new Promise((r) => setTimeout(r, 0));
+    expect(h.hungUp).toEqual([]);
+    expect(h.store.attempts.get(dialling.id)).toMatchObject({ outcome: "in_progress", providerCallSid: PLACED });
+    expect(h.escalation()).toMatchObject({ status: "active", phase: "ringing" });
+    const lines = h.log.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(lines).toMatch(/calling level 0/);
+    // and the call it placed can still take the patient
+    expect(await h.runner.onProviderAck(dialling.id, "1")).toBe("accepted");
+  });
+
+  it("leaves the call ringing when the check cannot be read, and logs why", async () => {
+    const dial = deferredDial();
+    const h = harness({ placeCall: dial.placeCall });
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    h.at(esc!.nextAt!);
+    const ticking = h.runner.tick();
+    await dial.dialStarted;
+    const dialling = h.lastCallAttempt();
+    const realRead = h.store.getEscalation;
+    let failed = false;
+    h.store.getEscalation = async (id: number) => {
+      if (!failed) {
+        failed = true;
+        throw new Error("hub unreachable");
+      }
+      return realRead(id);
+    };
+    dial.answer(PLACED);
+    await ticking;
+    h.store.getEscalation = realRead;
+    expect(failed).toBe(true);
+    expect(h.hungUp).toEqual([]);
+    expect(h.store.attempts.get(dialling.id)).toMatchObject({ outcome: "in_progress", providerCallSid: PLACED });
+    const lines = h.log.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(lines).toMatch(/could not check whether level 0's call is still needed/);
+  });
+});
+
 describe("a key press on a call we had marked over (review of #514, round 10)", () => {
   it("takes the patient from a call recorded as failed, and hangs up the call ringing in its place", async () => {
     const h = harness();

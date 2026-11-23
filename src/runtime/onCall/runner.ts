@@ -440,6 +440,36 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
     }
   }
 
+  /**
+   * Whether another call took the patient while this attempt's call was being
+   * placed: the escalation was closed as accepted by another attempt.
+   * (closeAsTaken writes taken_elsewhere only after that close, so the
+   * escalation row alone answers it.) The attempt is ended here if the close
+   * left it open, so the status its hang-up brings back moves nothing;
+   * endAttempt ends only an open attempt. A key press on this very call,
+   * before the dial returned, took the patient for it, and it is not hung
+   * up. A read that fails answers false: the call rings as it would have,
+   * and rings out on its own.
+   */
+  async function takenElsewhereWhileDialling(row: EscalationRow, attempt: AttemptRow): Promise<boolean> {
+    let esc: EscalationRow | null;
+    try {
+      esc = await store.getEscalation(row.id);
+    } catch (err) {
+      log(
+        `[ON-CALL] ${row.callSid}: could not check whether level ${row.levelIndex}'s call is still needed: ${(err as Error)?.message ?? err}`,
+      );
+      return false;
+    }
+    if (esc?.status !== "accepted" || esc.acceptedAttemptId === attempt.id) return false;
+    try {
+      await store.endAttempt(attempt.id, "taken_elsewhere", now());
+    } catch (err) {
+      log(`[ON-CALL] ${row.callSid}: could not end level ${row.levelIndex}'s unneeded call: ${(err as Error)?.message ?? err}`);
+    }
+    return true;
+  }
+
   /** The attempt on this escalation that took the patient, if any. */
   async function acceptedAttempt(e: EscalationRow): Promise<AttemptRow | null> {
     const attempts = await store.attemptsFor(e.callSid);
@@ -770,6 +800,18 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
       log(
         `[ON-CALL] ${row.callSid}: the call to level ${row.levelIndex} is ringing but its call sid could not be saved: ${(err as Error)?.message ?? err}`,
       );
+    }
+    // A key press on another call can take the patient while this dial is in
+    // flight. closeAsTaken then ends this attempt as taken_elsewhere, but it
+    // had no sid to hang up, so this call would ring a provider who is no
+    // longer needed until it rang out. Read once more now the sid is known
+    // and hang it up (review of #514, round 19).
+    if (await takenElsewhereWhileDialling(row, logged)) {
+      void hangUp(placed.sid, row.callSid);
+      log(
+        `[ON-CALL] ${row.callSid}: level ${row.levelIndex}'s call was placed while another provider took the patient; hung it up`,
+      );
+      return;
     }
     log(`[ON-CALL] ${row.callSid}: calling level ${row.levelIndex} (${level.role}), attempt ${row.attemptNo}`);
   }
