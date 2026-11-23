@@ -2168,9 +2168,22 @@ import { callEnvironment } from "./callRecord";
  * (callbackRequested.ts). Above main's v268 (#514, `e6861203`), which it
  * contains along with v267 (#515, `32d0e528`) and v266 (#512, `c2841ff6`);
  * v270 is #518 and v245 is #488 on their open branches. No migration.
+ * On main since #517 (`b56e438c`).
+ *
+ * v270 — THE NPX AGENT GIVES THE PRACTICE PHONE (2026-11-23). The NPX outreach
+ * agent refused a caller the partner practice's phone (find_sooner_exam's
+ * choices carried none), said our office's phone from memory, and read the
+ * booked practice's phone as ten bare digits. Each choice now carries its
+ * phone in three groups, a verified confirm_patient_birthdate answer carries
+ * our office's phone from the practice's own office list (our_office_phone),
+ * the booking confirmation says the phone in three groups (the booking page
+ * writes it), and the prompt says a phone only as a tool gave it. Above
+ * main's v269 (#517, `b56e438c`), which it contains along with v268 (#514,
+ * `e6861203`) and v267 (#515, `32d0e528`); v245 is #488 on its open branch.
+ * No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v269-a-declined-callback-is-not-promised-20261123";
+  "voice-runtime-v270-the-npx-agent-gives-the-practice-phone-20261123";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
