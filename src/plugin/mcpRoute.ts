@@ -33,7 +33,18 @@ function envelopeKind(message: unknown): "request" | "ignored" | "invalid" {
   if (owns("result") || owns("error")) return "invalid";
   if (typeof item.method !== "string") return "invalid";
   if (!owns("id")) return item.method.startsWith("notifications/") ? "ignored" : "invalid";
+  if (item.method.startsWith("notifications/")) return "invalid";
   return validId ? "request" : "invalid";
+}
+
+function invalidRequestId(message: unknown): string | number | null {
+  if (!message || typeof message !== "object" || Array.isArray(message)) return null;
+  const item = message as Record<string, unknown>;
+  // Notification methods cannot carry ids, but echo a valid id on rejection.
+  if (item.jsonrpc === "2.0" && typeof item.method === "string" && item.method.startsWith("notifications/")) {
+    if (typeof item.id === "string" || (typeof item.id === "number" && Number.isFinite(item.id))) return item.id;
+  }
+  return null;
 }
 
 export function mountVoiceFleetMcp(app: Express, deps: McpRouteDeps): void {
@@ -118,7 +129,7 @@ export function mountVoiceFleetMcp(app: Express, deps: McpRouteDeps): void {
       for (const item of message) {
         const kind = envelopeKind(item);
         if (kind === "invalid") {
-          replies.push(errorReply(-32600, "Invalid Request"));
+          replies.push(errorReply(-32600, "Invalid Request", invalidRequestId(item)));
           continue;
         }
         if (kind === "ignored") continue;
@@ -139,7 +150,7 @@ export function mountVoiceFleetMcp(app: Express, deps: McpRouteDeps): void {
     }
     const kind = envelopeKind(message);
     if (kind === "invalid") {
-      res.status(400).json(errorReply(-32600, "Invalid Request"));
+      res.status(400).json(errorReply(-32600, "Invalid Request", invalidRequestId(message)));
       return;
     }
     if (kind === "ignored") {

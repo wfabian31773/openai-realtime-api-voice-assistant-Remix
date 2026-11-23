@@ -11,7 +11,7 @@ import originalTools from "../../connectors/voice-fleet-mcp/tools-list-b7f9b822.
 const call = (name: string, args?: unknown) => ({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: `voice_fleet_${name}`, arguments: args } });
 const create = (getToken = () => "synthetic-bearer") => createVoiceFleetMcp({ baseUrl: "http://127.0.0.1:5000/", getToken });
 
-afterEach(() => vi.restoreAllMocks());
+afterEach(() => { vi.restoreAllMocks(); vi.useRealTimers(); });
 
 describe("voice fleet MCP core", () => {
   it("retains the masking and calling-window exports used by manual tests", () => {
@@ -31,6 +31,84 @@ describe("voice fleet MCP core", () => {
       } },
     });
     expect(JSON.stringify(reply)).toBe(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { tools } }));
+  });
+
+  it("masks international E.164 phones to last four while preserving NANP output", () => {
+    for (const phone of ["+44 20 7946 0000", "+44-20-7946-0000", "+442079460000", "+99990000", "+999999999990000"]) {
+      expect(maskString(`Call ${phone} now`)).toBe("Call ***-***-0000 now");
+      expect(mask({ phone, body: `Call ${phone}`, nested: [{ text: phone }] }, "", true))
+        .toEqual({ phone: "***-***-0000", body: "Call ***-***-0000", nested: [{ text: "***-***-0000" }] });
+    }
+    for (const phone of ["9095550113", "909-555-0113", "909.555.0113", "(909) 555-0113", "+19095550113", "+1 (909) 555-0113"]) {
+      expect(maskString(`Call ${phone} now`)).toBe("Call ***-***-0113 now");
+    }
+    expect(maskString("Call +19095550113 123")).toBe("Call ***-***-0113 123");
+  });
+
+  it("rejects notification methods with ids and invalid request ids without dispatch", async () => {
+    const fetch = vi.spyOn(globalThis, "fetch");
+    const core = create();
+    for (const id of ["notification", "", 0, -1, 1.5]) {
+      for (const method of ["notifications/initialized", "notifications/custom"]) {
+        expect(await core.handleMessage({ ...call("health"), method, id }))
+          .toEqual({ jsonrpc: "2.0", id, error: { code: -32600, message: "Invalid Request" } });
+      }
+    }
+    for (const id of [null, undefined, false, {}, [], Infinity, -Infinity, NaN]) {
+      expect(await core.handleMessage({ ...call("health"), id }))
+        .toEqual({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid Request" } });
+    }
+    expect(await core.handleMessage(JSON.parse('{"jsonrpc":"2.0","id":1e400,"method":"tools/call","params":{"name":"voice_fleet_health"}}')))
+      .toEqual({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid Request" } });
+    expect(fetch).not.toHaveBeenCalled();
+    for (const id of ["", "request", 0, -1, 1.5, Number.MAX_SAFE_INTEGER, Number.MIN_SAFE_INTEGER, 1e-200]) {
+      const response = await core.handleMessage({ jsonrpc: "2.0", id, method: "ping" });
+      expect(JSON.parse(JSON.stringify(response))).toEqual({ jsonrpc: "2.0", id, result: {} });
+    }
+  });
+
+  for (const name of ["commit", "commit_call_live", "operator_commit_call"]) {
+    it.each([undefined, 1000])(`${name} shares one total timeout across slow confirm and commit (timeoutMs=%s)`, async (timeoutMs) => {
+      vi.useFakeTimers();
+      const budget = timeoutMs ?? 30000;
+      const signals: AbortSignal[] = [];
+      const fetch = vi.spyOn(globalThis, "fetch").mockImplementation((_url, options) => new Promise((resolve, reject) => {
+        const signal = options!.signal!;
+        signals.push(signal);
+        const timer = setTimeout(() => resolve(Response.json({ confirmToken: "a".repeat(64) })), budget * 0.6);
+        signal.addEventListener("abort", () => { clearTimeout(timer); reject(signal.reason); }, { once: true });
+      }));
+      const core = createVoiceFleetMcp({ baseUrl: "https://fleet.example.test", getToken: () => "synthetic", timeoutMs });
+      const done = vi.fn();
+      const pending = core.handleMessage(call(name, { id: "synthetic-approval" })).then((reply) => { done(reply); return reply; });
+      await vi.advanceTimersByTimeAsync(budget * 0.6);
+      expect(fetch.mock.calls.map(([url]) => String(url))).toEqual([
+        "https://fleet.example.test/api/plugin/v1/contact_requests/synthetic-approval/confirm_token",
+        `https://fleet.example.test/api/plugin/v1/${name === "commit" ? "commit_contact" : "commit_call_live"}`,
+      ]);
+      expect(signals[0]).toBe(signals[1]);
+      await vi.advanceTimersByTimeAsync(budget * 0.4 - 1);
+      expect(done).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(1);
+      expect(done).toHaveBeenCalledOnce();
+      expect(await pending).toMatchObject({ result: { isError: true, content: [{ text: "Error: Fleet request failed" }] } });
+      expect(signals.every((signal) => signal.aborted)).toBe(true);
+      expect(vi.getTimerCount()).toBe(0);
+    });
+  }
+
+  it("returns at the deadline even if a slow confirm mock ignores abort, without a late commit", async () => {
+    vi.useFakeTimers();
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(() => new Promise((resolve) => {
+      setTimeout(() => resolve(Response.json({ confirmToken: "a".repeat(64) })), 150);
+    }));
+    const core = createVoiceFleetMcp({ baseUrl: "https://fleet.example.test", getToken: () => "synthetic", timeoutMs: 100 });
+    const pending = core.handleMessage(call("commit", { id: "synthetic-approval" }));
+    await vi.advanceTimersByTimeAsync(100);
+    expect(await pending).toMatchObject({ result: { isError: true } });
+    await vi.advanceTimersByTimeAsync(50);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(vi.getTimerCount()).toBe(0);
   });
 
   it("negotiates only supported protocol versions, preferring the latest otherwise", async () => {
@@ -89,22 +167,29 @@ describe("voice fleet MCP core", () => {
     expect(JSON.stringify(nonJson)).not.toContain("Synthetic private");
   });
 
-  it("reloads the stdio token file for each call, with the original env settings", async () => {
+  it.each(["health", "operator_inbound_get"])("reloads the stdio token file for each %s call and masks operator output", async (name) => {
     const directory = mkdtempSync(join(tmpdir(), "voice-fleet-mcp-"));
     const tokenFile = join(directory, "bot.token");
     const input = new PassThrough();
     const output = new PassThrough();
-    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => new Response('{"ok":true}'));
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => Response.json({
+      from: "+44 20 7946 0000", body: "Call +44-20-7946-0001 or +1 (909) 555-0113",
+    }));
     const shell = startStdio(input, output, { VOICE_FLEET_TOKEN_FILE: tokenFile, VOICE_FLEET_BASE_URL: "http://127.0.0.1:54321/", VOICE_FLEET_TIMEOUT_MS: "1000" });
     try {
       for (const digit of ["b", "c"]) {
         const bearer = `si.${"a".repeat(32)}.${digit.repeat(64)}`;
         writeFileSync(tokenFile, bearer);
         const reply = once(output, "data");
-        input.write(JSON.stringify(call("health")) + "\n");
+        input.write(JSON.stringify(call(name, { callSid: "CA" + "a".repeat(32), includeContent: true })) + "\n");
         const [line] = await reply;
-        expect(JSON.parse(line.toString()).result.isError).toBe(false);
-        expect(fetch.mock.lastCall).toMatchObject(["http://127.0.0.1:54321/api/plugin/v1/health", { headers: { Authorization: `Bearer ${bearer}` } }]);
+        const result = JSON.parse(line.toString()).result;
+        expect(result.isError).toBe(false);
+        if (name === "operator_inbound_get") expect(JSON.parse(result.content[0].text).data).toEqual({
+          from: "***-***-0000", body: "Call ***-***-0001 or ***-***-0113",
+        });
+        const path = name === "health" ? "/health" : `/operator-line/inbound/CA${"a".repeat(32)}`;
+        expect(fetch.mock.lastCall).toMatchObject([`http://127.0.0.1:54321/api/plugin/v1${path}`, { headers: { Authorization: `Bearer ${bearer}` } }]);
       }
     } finally {
       input.end();

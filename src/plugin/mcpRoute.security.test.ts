@@ -143,6 +143,55 @@ describe("hosted MCP HTTP security boundary (socket-free)", () => {
     expect(fetch).toHaveBeenCalledTimes(1);
   });
 
+  it("rejects notification methods carrying ids, echoing the id in single and batch replies", async () => {
+    const fetch = vi.spyOn(globalThis, "fetch");
+    const { post } = boot();
+    for (const method of ["notifications/initialized", "notifications/custom"]) {
+      for (const id of ["notification", "", 0, -1, 1.5]) {
+        const payload = { ...tool, method, id };
+        const error = { ...invalidRequest, id };
+        expect(await post(payload)).toMatchObject({ status: 400, body: error });
+        expect(await post([payload, { jsonrpc: "2.0", id: "ping", method: "ping" }]))
+          .toMatchObject({ status: 200, body: [error, { id: "ping", result: {} }] });
+      }
+    }
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("rejects overflowing numeric ids from raw JSON with id null before dispatch", async () => {
+    const fetch = vi.spyOn(globalThis, "fetch");
+    const { post } = boot();
+    for (const id of ["1e400", "-1e400", "null", "false", "{}", "[]"]) {
+      for (const method of ["tools/call", "notifications/custom"]) {
+        const payload = `{"jsonrpc":"2.0","id":${id},"method":"${method}","params":{"name":"voice_fleet_health"}}`;
+        expect(await post(payload)).toMatchObject({ status: 400, body: invalidRequest });
+        expect(await post(`[${payload}]`)).toMatchObject({ status: 200, body: [invalidRequest] });
+      }
+    }
+    expect(fetch).not.toHaveBeenCalled();
+    for (const id of ["", "request", 0, -1, 1.5, Number.MAX_SAFE_INTEGER, Number.MIN_SAFE_INTEGER, 1e-200]) {
+      const response = await post({ jsonrpc: "2.0", id, method: "ping" });
+      expect(JSON.parse(JSON.stringify(response.body))).toEqual({ jsonrpc: "2.0", id, result: {} });
+    }
+  });
+
+  it("masks international phones in hosted operator fields and included content", async () => {
+    vi.spyOn(globalThis, "fetch").mockImplementation(async () => Response.json({
+      from: "+44 20 7946 0000", note: "+44-20-7946-0001", body: "Call +442079460002 or +1 (909) 555-0113",
+    }));
+    const { post } = boot();
+    for (const includeContent of [false, true]) {
+      const response = await post({ ...tool, params: {
+        name: "voice_fleet_operator_inbound_get", arguments: { callSid: "CA" + "a".repeat(32), includeContent },
+      } });
+      const result = (response.body as { result: { content: Array<{ text: string }> } }).result;
+      expect(JSON.parse(result.content[0].text).data).toEqual({
+        from: "***-***-0000", note: "***-***-0001",
+        body: includeContent ? "Call ***-***-0002 or ***-***-0113" : "[redacted 39 chars]",
+      });
+    }
+  });
+
   it("rejects method/result/error mixtures without downstream fetches, including notifications and batch members", async () => {
     const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Unexpected downstream fetch"));
     const { post } = boot();
