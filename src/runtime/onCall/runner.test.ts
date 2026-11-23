@@ -892,6 +892,13 @@ describe("test mode", () => {
     expect(h.calls).toHaveLength(0);
     expect(h.texts).toHaveLength(0);
     expect(h.escalation()).toMatchObject({ status: "cancelled", details: null });
+    // The urgent number is told the chain stopped, in the chain's own mode.
+    expect(h.urgent).toHaveLength(1);
+    expect(h.urgent[0]).toContain(
+      "[TEST MODE] THE ON-CALL ESCALATION STOPPED — the rotation is in test mode and the next level is not a test number",
+    );
+    expect(h.urgent[0]).toContain(DETAILS.reason);
+    expect(h.urgentModes).toEqual(["test"]);
   });
 
   it("cancels a live-mode row once the process is switched to test", async () => {
@@ -901,6 +908,37 @@ describe("test mode", () => {
     await h.runner.tick();
     expect(h.calls).toHaveLength(0);
     expect(h.escalation()?.status).toBe("cancelled");
+    // A live chain's patient is real: the real urgent number hears it stopped.
+    expect(h.urgent).toHaveLength(1);
+    expect(h.urgent[0]).toMatch(/THE ON-CALL ESCALATION STOPPED/);
+    expect(h.urgent[0]).not.toMatch(/\[TEST MODE\]/);
+    expect(h.urgentModes).toEqual(["live"]);
+  });
+
+  it("says nothing more when another process closed the row first", async () => {
+    const h = harness({ config: TEST });
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer", { mode: "test" }));
+    h.store.closeEscalation = async () => null;
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    expect(h.urgent).toHaveLength(0);
+  });
+});
+
+describe("a level that is not in the plan", () => {
+  it("closes the chain as failed and tells the urgent number, in the chain's mode", async () => {
+    const h = harness();
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    h.store.escalations.get(esc!.id)!.levelIndex = 9;
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    expect(h.calls).toHaveLength(0);
+    expect(h.texts).toHaveLength(0);
+    expect(h.escalation()).toMatchObject({ status: "failed", details: null });
+    expect(h.urgent).toHaveLength(1);
+    expect(h.urgent[0]).toMatch(/THE ON-CALL ESCALATION STOPPED — its next level could not be read, so nobody else will be called/);
+    expect(h.urgent[0]).toContain(DETAILS.reason);
+    expect(h.urgentModes).toEqual(["live"]);
   });
 });
 

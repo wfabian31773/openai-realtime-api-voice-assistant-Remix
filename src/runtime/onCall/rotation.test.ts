@@ -281,6 +281,21 @@ describe("the escalation chain", () => {
     expect(plan.notes).toContain("no_director_for_region");
   });
 
+  it("an inactive final director is never rung, and the plan says so", () => {
+    const off = syntheticRotation();
+    off.providers = off.providers.map((x) => (x.id === FINAL_DIRECTOR ? { ...x, active: false } : x));
+    const find = (id: number) => off.providers.find((x) => x.id === id)!;
+    const la = planChain({ role: "on_call", provider: find(2) }, off);
+    expect(la.levels.map((l) => [l.role, l.providerId])).toEqual([
+      ["on_call", 2],
+      ["region_director", LA_DIRECTOR],
+    ]);
+    expect(la.notes).toContain("final_director_inactive");
+    const sd = planChain({ role: "on_call", provider: find(3) }, off);
+    expect(sd.levels.map((l) => l.providerId)).toEqual([3]);
+    expect(sd.notes).toEqual(expect.arrayContaining(["region_director_inactive", "final_director_inactive"]));
+  });
+
   it("region names are compared loosely", () => {
     expect(regionKey("  inland   EMPIRE ")).toBe(regionKey("Inland Empire"));
     expect(planChain({ role: "on_call", provider: provider(8, "inland empire") }, data).levels[1].providerId).toBe(IE_DIRECTOR);

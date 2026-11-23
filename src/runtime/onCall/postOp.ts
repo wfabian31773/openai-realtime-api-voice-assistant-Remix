@@ -145,8 +145,18 @@ export function matchSurgeon(
   return byName.length === 1 ? byName[0] : null;
 }
 
-function surgeonId(f: SurgeryFact): string | null {
-  return npiKey(f.providerNpi) ?? nameKeyForMatch(f.providerName);
+/**
+ * Who a row's surgeon is: the pool provider it matches when it matches one,
+ * so a row with the NPI and a row without it name one surgeon; otherwise
+ * the NPI, otherwise the name.
+ */
+function surgeonId(f: SurgeryFact, providers: readonly OnCallProvider[]): string | null {
+  const pool = matchSurgeon(f, providers);
+  if (pool) return `pool:${pool.id}`;
+  const npi = npiKey(f.providerNpi);
+  if (npi) return `npi:${npi}`;
+  const name = nameKeyForMatch(f.providerName);
+  return name ? `name:${name}` : null;
 }
 
 function counts(f: SurgeryFact): boolean {
@@ -184,7 +194,7 @@ export function decidePostOp(
 
   const latest = inWindow.reduce((d, f) => (f.date > d ? f.date : d), inWindow[0].date);
   const onLatest = inWindow.filter((f) => f.date === latest);
-  const ids = new Set(onLatest.map(surgeonId));
+  const ids = new Set(onLatest.map((f) => surgeonId(f, providers)));
   if (ids.size !== 1 || ids.has(null)) {
     const names = [...new Set(onLatest.map((f) => label(f.providerName)))].join(" and ");
     return {

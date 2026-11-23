@@ -299,6 +299,7 @@ export function planChain(
     notes.push("no_first_level");
   }
   if (!final) notes.push("no_final_director");
+  else if (!final.active) notes.push("final_director_inactive");
   else push("final", final);
   return { levels, notes };
 }

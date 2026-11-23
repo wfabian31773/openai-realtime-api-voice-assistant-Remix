@@ -140,6 +140,27 @@ describe("the surgeon", () => {
     expect(decidePostOp([surgery(), surgery({ eventName: "Lasik Enhancement", kept: false })], TODAY, POOL)).toMatchObject({ route: "surgeon", kept: true });
   });
 
+  it("one surgeon is one surgeon whether a row carries the NPI or only the name", () => {
+    const d = decidePostOp(
+      [surgery(), surgery({ eventName: "Lasik Enhancement", providerNpi: null, providerName: "Ada Quill, M.D." })],
+      TODAY,
+      POOL,
+    );
+    expect(d).toMatchObject({ route: "surgeon", provider: { id: 10 } });
+  });
+
+  it("two surgeons not in the list, told apart by name, are still two", () => {
+    const d = decidePostOp(
+      [
+        surgery({ providerNpi: null, providerName: "Dee Outsider, DO" }),
+        surgery({ providerNpi: null, providerName: "Eli Elsewhere, MD" }),
+      ],
+      TODAY,
+      POOL,
+    );
+    expect(d).toMatchObject({ route: "on_call", reason: "surgeon_unclear" });
+  });
+
   it("a row with no surgeon at all goes to on-call", () => {
     const d = decidePostOp([surgery({ providerNpi: null, providerName: null })], TODAY, POOL);
     expect(d).toMatchObject({ route: "on_call", reason: "surgeon_unclear" });

@@ -222,6 +222,35 @@ describe("an urgent after-hours call with the rotation on", () => {
     expect(h.routing.reason).toBe("on_call");
   });
 
+  it("times level 0's call from when its outcome arrived, not from when the text's record settled", async () => {
+    const { ops } = fakeOps();
+    const built = buildWiring();
+    let clock = AFTER_HOURS;
+    built.wiring.now = () => clock;
+    let release: () => void = () => undefined;
+    built.wiring.sendSms = (input) => {
+      built.texts.push({ ...input, at: Date.now() });
+      return new Promise((resolve) => {
+        release = () => resolve({ sid: "SM1" });
+      });
+    };
+    const transfer = transferWith(ops, built.wiring);
+    urgent();
+    const outcome = transfer.handoffFor("no-ivr", META)();
+    // The route waits for the text up to its own bound, then dials anyway.
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1), { timeout: 5_000 });
+    const answered = new Date(AFTER_HOURS.getTime() + 40_000);
+    clock = answered;
+    transfer.handleAccept(signed(TRANSFER_ACCEPT_PATH, { CallSid: "CAoffice", Digits: "1" }));
+    await outcome;
+    // The text's record settles nine seconds later.
+    clock = new Date(answered.getTime() + 9_000);
+    release();
+    await vi.waitFor(() => expect(built.handed).toHaveLength(1));
+    expect(built.handed[0].warm.endedAt.getTime()).toBe(answered.getTime());
+    expect(built.handed[0].preDialSms?.ok).toBe(true);
+  });
+
   it("hands a declined transfer to the runner as declined, and still tells the agent it failed", async () => {
     const { ops } = fakeOps();
     const built = buildWiring();

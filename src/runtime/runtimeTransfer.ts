@@ -1024,6 +1024,9 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
         const handOff = (handed: OnCallRun, outcome: TransferOutcome): void => {
           if (!onCall) return;
           const now = onCall.now ?? (() => new Date());
+          // The level-0 call ended when its outcome arrived, not after the
+          // text's record below: the retry is timed from this.
+          const endedAt = now();
           void (async () => {
             const preDialSms = await settleWithin(handed.preDialSms, PRE_DIAL_SMS_RECORD_MS);
             await onCall.runner.afterInCallTransfer({
@@ -1038,7 +1041,7 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
               warm: {
                 outcome: warmOutcomeFor(outcome),
                 dialedTo: handed.plan.levels[0].phone,
-                endedAt: now(),
+                endedAt,
                 providerCallSid: outcome.ok ? (outcome.officeCallSid ?? null) : null,
               },
             });

@@ -173,6 +173,14 @@ export function staleNote(e: Pick<EscalationRow, "mode">): string {
   return e.mode === "test" ? `[TEST MODE] ${note}` : note;
 }
 
+/** A chain stopped before it rang a level it had planned. */
+export function stoppedNote(e: Pick<EscalationRow, "mode">, why: string): string {
+  const note =
+    `THE ON-CALL ESCALATION STOPPED — ${why}, so nobody else will be called. ` +
+    "If no provider has reached this patient, please call them back now.";
+  return e.mode === "test" ? `[TEST MODE] ${note}` : note;
+}
+
 export function exhaustedNote(e: Pick<EscalationRow, "plan" | "mode">): string {
   const n = e.plan.levels.length;
   const note =
@@ -346,13 +354,29 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
     }
     const level = row.plan.levels[row.levelIndex];
     if (!level) {
-      await store.closeEscalation(row.id, row.version, { status: "failed", nextAt: null });
-      log(`[ON-CALL] ${row.callSid}: level ${row.levelIndex} is not in the plan; closed as failed`);
+      const closed = await store.closeEscalation(row.id, row.version, { status: "failed", nextAt: null });
+      if (closed) {
+        log(`[ON-CALL] ${row.callSid}: level ${row.levelIndex} is not in the plan; closed as failed`);
+        await notifyQuietly(
+          textFor(row, stoppedNote(row, "its next level could not be read")),
+          row.callSid,
+          row.mode,
+        );
+      }
       return;
     }
     if (outsideTheTestList(row, level)) {
-      await store.closeEscalation(row.id, row.version, { status: "cancelled", nextAt: null });
-      log(`[ON-CALL] ${row.callSid}: test mode would have rung a number outside the test list; cancelled`);
+      const closed = await store.closeEscalation(row.id, row.version, { status: "cancelled", nextAt: null });
+      if (closed) {
+        log(`[ON-CALL] ${row.callSid}: test mode would have rung a number outside the test list; cancelled`);
+        // Test mode never rings a real number, but a live chain's patient is
+        // real: say so to the urgent number rather than stop in silence.
+        await notifyQuietly(
+          textFor(row, stoppedNote(row, "the rotation is in test mode and the next level is not a test number")),
+          row.callSid,
+          row.mode,
+        );
+      }
       return;
     }
     const t = now();
