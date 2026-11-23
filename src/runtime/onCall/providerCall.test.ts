@@ -3,16 +3,26 @@ import twilio from "twilio";
 import {
   ON_CALL_ACK_PATH,
   ON_CALL_STATUS_PATH,
+  NO_TEXT_PARAM,
   PROVIDER_ACCEPTED_LINE,
+  PROVIDER_ACCEPTED_NO_NUMBER_LINE,
+  PROVIDER_ACK_FAILED_LINE,
+  PROVIDER_ACK_FAILED_NO_TEXT_LINE,
   PROVIDER_ALREADY_TAKEN_LINE,
   PROVIDER_CALL_OPENING,
+  PROVIDER_CALL_OPENING_NO_TEXT,
   PROVIDER_CLOSED_LINE,
   PROVIDER_DECLINED_LINE,
+  acceptedWithNumberLine,
   ackReplyTwiml,
+  ackResultOf,
   attemptIdFrom,
   handleOnCallAck,
   handleOnCallStatus,
   providerCallTwiml,
+  spokenDigits,
+  textedFlagFrom,
+  type AckReply,
   type AckResult,
   type ProviderCallWebhookDeps,
 } from "./providerCall";
@@ -38,7 +48,7 @@ function req(
   };
 }
 
-function deps(answer: AckResult | Error = "accepted") {
+function deps(answer: AckReply | Error = "accepted") {
   const onProviderAck = vi.fn(async () => {
     if (answer instanceof Error) throw answer;
     return answer;
@@ -55,7 +65,7 @@ function deps(answer: AckResult | Error = "accepted") {
 
 describe("the call we place to a provider", () => {
   it("asks for a key press twice, and reports an empty result the second time", () => {
-    const xml = providerCallTwiml(`https://${HOST}${ON_CALL_ACK_PATH}?attempt=7`);
+    const xml = providerCallTwiml(`https://${HOST}${ON_CALL_ACK_PATH}?attempt=7`, { textSent: true });
     const gathers = xml.match(/<Gather [^>]*>/g) ?? [];
     expect(gathers).toHaveLength(2);
     expect(gathers[0]).not.toMatch(/actionOnEmptyResult/);
@@ -71,13 +81,13 @@ describe("the call we place to a provider", () => {
     // Twilio's default finishOnKey is "#": pressed with no digit before it,
     // the gather ends empty, and the second one reads that as a decline. The
     // opening says "press any key" (review of #514, round 10).
-    const gathers = providerCallTwiml(`https://${HOST}${ON_CALL_ACK_PATH}?attempt=7`).match(/<Gather [^>]*>/g) ?? [];
+    const gathers = providerCallTwiml(`https://${HOST}${ON_CALL_ACK_PATH}?attempt=7`, { textSent: true }).match(/<Gather [^>]*>/g) ?? [];
     expect(gathers).toHaveLength(2);
     for (const g of gathers) expect(g).toContain('finishOnKey=""');
   });
 
   it("carries nothing about the patient", () => {
-    const xml = providerCallTwiml(`https://${HOST}${ON_CALL_ACK_PATH}?attempt=7`);
+    const xml = providerCallTwiml(`https://${HOST}${ON_CALL_ACK_PATH}?attempt=7`, { textSent: true });
     // Only the fixed lines and the URL: no slot exists for a name, a number or a reason.
     const text = xml.replace(/<[^>]+>/g, " ");
     expect(text).not.toMatch(/\d{3}[-. ]?\d{4}/);
@@ -87,7 +97,7 @@ describe("the call we place to a provider", () => {
   });
 
   it("escapes the ack URL", () => {
-    const xml = providerCallTwiml(`https://${HOST}${ON_CALL_ACK_PATH}?attempt=7&x=<y>`);
+    const xml = providerCallTwiml(`https://${HOST}${ON_CALL_ACK_PATH}?attempt=7&x=<y>`, { textSent: true });
     expect(xml).toContain("&amp;x=&lt;y&gt;");
   });
 
@@ -104,6 +114,88 @@ describe("the call we place to a provider", () => {
       expect(out.body).toContain(line);
       expect(out.body).toMatch(/<Hangup\/>/);
     }
+  });
+});
+
+describe("a call whose text did not send (review of #514, round 12)", () => {
+  const url = `https://${HOST}${ON_CALL_ACK_PATH}?attempt=7&${NO_TEXT_PARAM}=0`;
+
+  it("opens without claiming a text, and still carries nothing about the patient", () => {
+    const xml = providerCallTwiml(url, { textSent: false });
+    expect(xml).toContain(PROVIDER_CALL_OPENING_NO_TEXT);
+    expect(xml).not.toContain("The details are in the text message");
+    const text = xml.replace(/<[^>]+>/g, " ");
+    expect(text).not.toMatch(/\d{3}[-. ]?\d{4}/);
+    expect(xml).toContain(`attempt=7&amp;${NO_TEXT_PARAM}=0`);
+  });
+
+  it("reads a ten-digit number in three groups, twice, after the key press", () => {
+    expect(spokenDigits("+17145550100")).toBe("7 1 4, 5 5 5, 0 1 0 0");
+    expect(spokenDigits("(714) 555-0100")).toBe("7 1 4, 5 5 5, 0 1 0 0");
+    const line = acceptedWithNumberLine("+17145550100")!;
+    expect(line.match(/7 1 4, 5 5 5, 0 1 0 0/g)).toHaveLength(2);
+    expect(line).toContain("We could not text you the details");
+    const out = ackReplyTwiml({ result: "accepted", noText: true, callbackNumber: "+17145550100" });
+    expect(out.body).toContain(line);
+    expect(out.body).not.toContain(PROVIDER_ACCEPTED_LINE);
+    expect(out.body).toMatch(/<Hangup\/>/);
+  });
+
+  it("reads any other length digit by digit, and nothing when there are no digits", () => {
+    expect(spokenDigits("5550100")).toBe("5 5 5 0 1 0 0");
+    expect(spokenDigits("+441632960961")).toBe("4 4 1 6 3 2 9 6 0 9 6 1");
+    expect(spokenDigits("anonymous")).toBeNull();
+    expect(acceptedWithNumberLine("anonymous")).toBeNull();
+  });
+
+  it("says there is no number to read when none is known", () => {
+    for (const callbackNumber of [null, "anonymous"]) {
+      const out = ackReplyTwiml({ result: "accepted", noText: true, callbackNumber });
+      expect(out.body).toContain(PROVIDER_ACCEPTED_NO_NUMBER_LINE);
+      expect(out.body).not.toContain(PROVIDER_ACCEPTED_LINE);
+    }
+  });
+
+  it("reads the reply's result for both shapes", () => {
+    expect(ackResultOf("declined")).toBe("declined");
+    expect(ackResultOf({ result: "accepted", noText: true, callbackNumber: null })).toBe("accepted");
+  });
+
+  it("reads the flag from the URL", () => {
+    expect(textedFlagFrom(`${ON_CALL_ACK_PATH}?attempt=7&${NO_TEXT_PARAM}=0`)).toBe(false);
+    expect(textedFlagFrom(`${ON_CALL_ACK_PATH}?attempt=7`)).toBe(true);
+    expect(textedFlagFrom(`${ON_CALL_ACK_PATH}?attempt=7&${NO_TEXT_PARAM}=1`)).toBe(true);
+    expect(textedFlagFrom(ON_CALL_ACK_PATH)).toBe(true);
+  });
+
+  it("reads the number in the webhook's reply when the runner says no text reached the provider", async () => {
+    const { d } = deps({ result: "accepted", noText: true, callbackNumber: "+17145550100" });
+    const out = await handleOnCallAck(req(ON_CALL_ACK_PATH, `?attempt=42&${NO_TEXT_PARAM}=0`, { Digits: "1" }), d);
+    expect(out.body).toContain("7 1 4, 5 5 5, 0 1 0 0");
+    expect(out.body).not.toContain(PROVIDER_ACCEPTED_LINE);
+  });
+
+  it("does not point at a text when a key press cannot be recorded on a call with no text", async () => {
+    const { d } = deps(new Error("hub down"));
+    const out = await handleOnCallAck(req(ON_CALL_ACK_PATH, `?attempt=42&${NO_TEXT_PARAM}=0`, { Digits: "1" }), d);
+    expect(out.body.replace(/&apos;/g, "'")).toContain(PROVIDER_ACK_FAILED_NO_TEXT_LINE);
+    expect(out.body).not.toContain("the number in the text message");
+  });
+
+  it("keeps the text line when a key press cannot be recorded on a call with a text", async () => {
+    const { d } = deps(new Error("hub down"));
+    const out = await handleOnCallAck(req(ON_CALL_ACK_PATH, "?attempt=42", { Digits: "1" }), d);
+    expect(out.body).toContain(PROVIDER_ACK_FAILED_LINE);
+  });
+
+  it("refuses a request whose no-text flag was removed after signing", async () => {
+    const { d, onProviderAck } = deps();
+    const out = await handleOnCallAck(
+      req(ON_CALL_ACK_PATH, `?attempt=42&${NO_TEXT_PARAM}=0`, { Digits: "1" }, { tamperQuery: "?attempt=42" }),
+      d,
+    );
+    expect(out.status).toBe(403);
+    expect(onProviderAck).not.toHaveBeenCalled();
   });
 });
 

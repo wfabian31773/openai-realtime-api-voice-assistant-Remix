@@ -22,7 +22,15 @@ import { planAt, syntheticTestPlan } from "./routing";
 import type { OnCallConfig } from "./config";
 import { levelLabel, type ChainPlan } from "./rotation";
 import type { RoutingFacts } from "./store";
-import { ON_CALL_ACK_PATH, ON_CALL_STATUS_PATH } from "./providerCall";
+import {
+  NO_TEXT_PARAM,
+  ON_CALL_ACK_PATH,
+  ON_CALL_STATUS_PATH,
+  PROVIDER_CALL_OPENING,
+  PROVIDER_CALL_OPENING_NO_TEXT,
+  ackResultOf,
+  type AckReply,
+} from "./providerCall";
 
 const LIVE: OnCallConfig = { mode: "live", testPhones: [], callerId: "+15550000000", requireKept: false };
 const TEST: OnCallConfig = {
@@ -443,7 +451,7 @@ describe("a pickup at any step stops the chain (success criterion)", () => {
     // carries on, closing the chain and ending the stray as taken_elsewhere.
     const real = h.store.getEscalation.bind(h.store);
     let raced = false;
-    let takingAnswer: string | undefined;
+    let takingAnswer: AckReply | undefined;
     vi.spyOn(h.store, "getEscalation").mockImplementation(async (id: number) => {
       const row = await real(id);
       if (!raced) {
@@ -469,7 +477,7 @@ describe("a pickup at any step stops the chain (success criterion)", () => {
     // chain, the director's key press runs to the end and closes it.
     const real = h.store.endAttempt.bind(h.store);
     let raced = false;
-    let secondAnswer: string | undefined;
+    let secondAnswer: AckReply | undefined;
     vi.spyOn(h.store, "endAttempt").mockImplementation(async (id: number, outcome: any, at: Date) => {
       const row = await real(id, outcome, at);
       if (!raced && id === first.id && outcome === "accepted") {
@@ -479,7 +487,9 @@ describe("a pickup at any step stops the chain (success criterion)", () => {
       return row;
     });
     const firstAnswer = await h.runner.onProviderAck(first.id, "1");
-    expect(secondAnswer).toBe("accepted");
+    // The second call was logged with no text before it, so its reply is the
+    // no-text form; the race is about which call takes the patient.
+    expect(ackResultOf(secondAnswer!)).toBe("accepted");
     expect(h.escalation()).toMatchObject({ status: "accepted", acceptedBy: plan.levels[1].providerId });
     // one provider is told they have the patient, not two
     expect(firstAnswer).toBe("already_taken");
@@ -509,7 +519,7 @@ describe("a pickup at any step stops the chain (success criterion)", () => {
     expect(first.providerId).toBeNull();
     const real = h.store.endAttempt.bind(h.store);
     let raced = false;
-    let secondAnswer: string | undefined;
+    let secondAnswer: AckReply | undefined;
     vi.spyOn(h.store, "endAttempt").mockImplementation(async (id: number, outcome: any, at: Date) => {
       const row = await real(id, outcome, at);
       if (!raced && id === first.id && outcome === "accepted") {
@@ -519,7 +529,9 @@ describe("a pickup at any step stops the chain (success criterion)", () => {
       return row;
     });
     const firstAnswer = await h.runner.onProviderAck(first.id, "1");
-    expect(secondAnswer).toBe("accepted");
+    // The second call was logged with no text before it, so its reply is the
+    // no-text form; the race is about which call takes the patient.
+    expect(ackResultOf(secondAnswer!)).toBe("accepted");
     expect(firstAnswer).toBe("already_taken");
     expect(h.escalation()).toMatchObject({ status: "accepted", acceptedBy: null, acceptedAttemptId: second.id });
   });
@@ -1945,5 +1957,158 @@ describe("a second hand-off on a call whose chain is already open (review of #51
     const r = await h.runner.afterInCallTransfer(inCall(plan, "no_answer"));
     expect(r).toBeNull();
     expect(h.store.attempts.size).toBe(0);
+  });
+});
+
+describe("a provider call whose text did not send (review of #514, round 12)", () => {
+  /** Texts fail to `failTo`; every other text sends and is recorded. */
+  function failingTextsTo(failTo: string[]) {
+    let n = 0;
+    const sent: Array<{ to: string; body: string }> = [];
+    const sendSms = vi.fn(async (m: { to: string; from: string; body: string }) => {
+      if (failTo.includes(m.to)) throw new Error("sms down");
+      sent.push(m);
+      return { sid: `SMX${++n}` };
+    });
+    return { sendSms, sent };
+  }
+
+  /** Walk to the region director's first call. */
+  async function toLevelOne(h: ReturnType<typeof harness>, over: Partial<InCallTransferResult> = {}) {
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer", over));
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    await h.runner.onProviderStatus(h.lastCallAttempt().id, "no-answer");
+    await h.runner.tick();
+    return h.lastCallAttempt();
+  }
+
+  it("does not tell the director the details are in a text that failed, and reads the number on a key press", async () => {
+    const { sendSms } = failingTextsTo([phoneOf(IE_DIRECTOR)]);
+    const h = harness({ sendSms });
+    const call = await toLevelOne(h);
+    expect(call.dialedTo).toBe(phoneOf(IE_DIRECTOR));
+    const twiml = h.calls[h.calls.length - 1].twiml;
+    expect(twiml).toContain(PROVIDER_CALL_OPENING_NO_TEXT);
+    expect(twiml).not.toContain(PROVIDER_CALL_OPENING);
+    expect(twiml).toContain(`${NO_TEXT_PARAM}=0`);
+    // the call itself still carries nothing about the patient
+    expect(twiml).not.toMatch(/5550199999/);
+    const reply = await h.runner.onProviderAck(call.id, "1");
+    expect(reply).toEqual({ result: "accepted", noText: true, callbackNumber: DETAILS.callbackNumber });
+    expect(h.escalation()).toMatchObject({ status: "accepted", acceptedBy: IE_DIRECTOR, details: null });
+  });
+
+  it("keeps the usual opening when an earlier text on the chain reached the same number", async () => {
+    // The pre-dial text reached the on-call provider; the reminder before
+    // their second call failed. They hold the details.
+    const { sendSms } = failingTextsTo([phoneOf(1)]);
+    const h = harness({ sendSms });
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    const nudge = [...h.store.attempts.values()].find((a) => a.kind === "nudge_sms");
+    expect(nudge?.outcome).toBe("send_failed");
+    const twiml = h.calls[0].twiml;
+    expect(twiml).toContain(PROVIDER_CALL_OPENING);
+    expect(twiml).not.toContain(`${NO_TEXT_PARAM}=0`);
+    expect(await h.runner.onProviderAck(h.lastCallAttempt().id, "1")).toBe("accepted");
+  });
+
+  it("uses the no-text opening when the pre-dial text and the reminder both failed", async () => {
+    const { sendSms } = failingTextsTo([phoneOf(1)]);
+    const h = harness({ sendSms });
+    const esc = await h.runner.afterInCallTransfer(
+      inCall(wedPlan(), "no_answer", { preDialSms: { ok: false, error: "sms down", at: WED_NIGHT } as any }),
+    );
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    expect(h.calls[0].twiml).toContain(PROVIDER_CALL_OPENING_NO_TEXT);
+    expect(await h.runner.onProviderAck(h.lastCallAttempt().id, "1")).toEqual({
+      result: "accepted",
+      noText: true,
+      callbackNumber: DETAILS.callbackNumber,
+    });
+  });
+
+  it("reads the callback number the caller gave before the caller ID", async () => {
+    const { sendSms } = failingTextsTo([phoneOf(IE_DIRECTOR)]);
+    const h = harness({ sendSms });
+    const call = await toLevelOne(h, { details: { ...DETAILS, callbackNumber: "+15550177777" } });
+    expect(await h.runner.onProviderAck(call.id, "1")).toMatchObject({ callbackNumber: "+15550177777" });
+  });
+
+  it("falls back to the caller ID when the caller gave no callback number", async () => {
+    const { sendSms } = failingTextsTo([phoneOf(IE_DIRECTOR)]);
+    const h = harness({ sendSms });
+    const { callbackNumber: _drop, ...noNumber } = DETAILS;
+    const call = await toLevelOne(h, { details: noNumber, callerNumber: "+15550166666" });
+    expect(await h.runner.onProviderAck(call.id, "1")).toMatchObject({ callbackNumber: "+15550166666" });
+  });
+
+  it("answers with no number when neither is known", async () => {
+    const { sendSms } = failingTextsTo([phoneOf(IE_DIRECTOR)]);
+    const h = harness({ sendSms });
+    const { callbackNumber: _drop, ...noNumber } = DETAILS;
+    const call = await toLevelOne(h, { details: noNumber, callerNumber: null });
+    expect(await h.runner.onProviderAck(call.id, "1")).toEqual({ result: "accepted", noText: true, callbackNumber: null });
+  });
+
+  it("reads the number when whether a text was sent cannot be read", async () => {
+    const h = harness();
+    const call = await toLevelOne(h);
+    // The read that hangs up the other calls succeeds; the next read, the
+    // one that asks whether a text reached this number, fails.
+    const real = h.store.attemptsFor.bind(h.store);
+    let afterTaken = 0;
+    vi.spyOn(h.store, "attemptsFor").mockImplementation(async (sid: string) => {
+      if (h.escalation()?.status === "accepted" && ++afterTaken === 2) throw new Error("hub down");
+      return real(sid);
+    });
+    expect(await h.runner.onProviderAck(call.id, "1")).toEqual({
+      result: "accepted",
+      noText: true,
+      callbackNumber: DETAILS.callbackNumber,
+    });
+    expect(h.log.mock.calls.some(([l]) => /could not read whether the details text was sent/.test(String(l)))).toBe(true);
+  });
+
+  it("uses the no-text opening when the text failed and the earlier texts cannot be read", async () => {
+    const { sendSms } = failingTextsTo([phoneOf(IE_DIRECTOR)]);
+    const h = harness({ sendSms });
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    await h.runner.onProviderStatus(h.lastCallAttempt().id, "no-answer");
+    // Only the read that follows the failed text to the director fails.
+    const real = h.store.attemptsFor.bind(h.store);
+    let textFailed = false;
+    (sendSms as any).mockImplementationOnce(async () => {
+      textFailed = true;
+      throw new Error("sms down");
+    });
+    vi.spyOn(h.store, "attemptsFor").mockImplementation(async (sid: string) => {
+      if (textFailed) {
+        textFailed = false;
+        throw new Error("hub down");
+      }
+      return real(sid);
+    });
+    await h.runner.tick();
+    expect(h.calls[h.calls.length - 1].to).toBe(phoneOf(IE_DIRECTOR));
+    expect(h.calls[h.calls.length - 1].twiml).toContain(PROVIDER_CALL_OPENING_NO_TEXT);
+    expect(h.log.mock.calls.some(([l]) => /could not read level 1's earlier texts/.test(String(l)))).toBe(true);
+  });
+
+  it("reads the number again to a second key press from the call that took the patient", async () => {
+    const { sendSms } = failingTextsTo([phoneOf(IE_DIRECTOR)]);
+    const h = harness({ sendSms });
+    const call = await toLevelOne(h);
+    await h.runner.onProviderAck(call.id, "1");
+    expect(h.escalation()?.details).toBeNull();
+    // The escalation has closed and cleared its details: the second answer
+    // can name no number, and must not claim a text either.
+    const again = await h.runner.onProviderAck(call.id, "1");
+    expect(again).toMatchObject({ result: "accepted", noText: true });
   });
 });

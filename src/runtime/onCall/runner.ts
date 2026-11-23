@@ -29,8 +29,9 @@
  * cannot ring a level twice or skip one. A call whose status never comes back
  * is ended by the ringing guard (RING_GUARD_MS) and the chain carries on.
  */
+import { preferredCallbackNumber } from "../../services/handoffPolicy";
 import { buildUrgentTransferSms, urgentAlertTime } from "../../services/urgentTransferAlert";
-import { ON_CALL_ACK_PATH, ON_CALL_STATUS_PATH, providerCallTwiml, type AckResult } from "./providerCall";
+import { NO_TEXT_PARAM, ON_CALL_ACK_PATH, ON_CALL_STATUS_PATH, providerCallTwiml, type AckReply } from "./providerCall";
 import type { OnCallConfig } from "./config";
 import { noNumberNote, type ChainLevel, type ChainPlan } from "./rotation";
 import type {
@@ -166,7 +167,7 @@ export interface OnCallRunnerDeps {
 export interface OnCallRunner {
   afterInCallTransfer(r: InCallTransferResult): Promise<EscalationRow | null>;
   tick(): Promise<void>;
-  onProviderAck(attemptId: number, digits: string): Promise<AckResult>;
+  onProviderAck(attemptId: number, digits: string): Promise<AckReply>;
   onProviderStatus(attemptId: number, callStatus: string): Promise<void>;
   start(): void;
   stop(): void;
@@ -267,7 +268,45 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
   const lateTicks = new Set<symbol>();
   let pauseLogged = false;
 
-  const url = (path: string, attemptId: number) => `https://${deps.host}${path}?attempt=${attemptId}`;
+  const url = (path: string, attemptId: number, opts?: { textSent: boolean }) =>
+    `https://${deps.host}${path}?attempt=${attemptId}${opts && !opts.textSent ? `&${NO_TEXT_PARAM}=0` : ""}`;
+
+  /**
+   * Whether a text with the patient's details reached this number on this
+   * escalation: any sent text or reminder text to it (the pre-dial text, the
+   * first text or a reminder all carry the details and the callback number).
+   */
+  async function detailsTextReached(escalationId: number, callSid: string, phone: string | null): Promise<boolean> {
+    if (!phone) return false;
+    return (await store.attemptsFor(callSid)).some(
+      (x) =>
+        x.escalationId === escalationId &&
+        (x.kind === "sms" || x.kind === "nudge_sms") &&
+        x.outcome === "sent" &&
+        x.dialedTo === phone,
+    );
+  }
+
+  /**
+   * The reply to a key press that took the patient. When no details text
+   * reached that number, the callback number is read on the call instead of
+   * pointing at a text that never arrived (review of #514, round 12). `e` is
+   * read before the escalation closes, since closing clears its details. A
+   * read that fails reads the number anyway: saying it twice costs nothing.
+   */
+  async function acceptedReply(e: EscalationRow, a: AttemptRow): Promise<AckReply> {
+    let reached = false;
+    try {
+      reached = await detailsTextReached(e.id, a.callSid, a.dialedTo);
+    } catch (err) {
+      log(`[ON-CALL] ${a.callSid}: could not read whether the details text was sent: ${(err as Error)?.message ?? err}`);
+    }
+    if (reached) return "accepted";
+    const details = e.details as { callbackNumber?: string } | null;
+    const callbackNumber =
+      preferredCallbackNumber({ collected: details?.callbackNumber, callerId: e.callerNumber }) ?? null;
+    return { result: "accepted", noText: true, callbackNumber };
+  }
 
   const textFor = (e: EscalationRow, note: string) =>
     buildUrgentTransferSms(
@@ -588,12 +627,22 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
       );
       return;
     }
+    // The call says the details are in a text only when one reached this
+    // number on this escalation (review of #514, round 12).
+    let textSent = smsOk;
+    if (!textSent) {
+      try {
+        textSent = await detailsTextReached(row.id, row.callSid, level.phone);
+      } catch (err) {
+        log(`[ON-CALL] ${row.callSid}: could not read level ${row.levelIndex}'s earlier texts: ${(err as Error)?.message ?? err}`);
+      }
+    }
     let placed: { sid: string };
     try {
       placed = await deps.placeCall({
         to: level.phone,
         from: config.callerId,
-        twiml: providerCallTwiml(url(ON_CALL_ACK_PATH, logged.id)),
+        twiml: providerCallTwiml(url(ON_CALL_ACK_PATH, logged.id, { textSent }), { textSent }),
         statusCallback: url(ON_CALL_STATUS_PATH, logged.id),
         timeout: PROVIDER_RING_SECONDS,
         timeLimit: PROVIDER_CALL_LIMIT_SECONDS,
@@ -901,8 +950,11 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
       if (!e) return "closed";
       if (e.status !== "active") {
         if (e.status !== "accepted") return "closed";
-        // The same call's key press arriving twice is still the call that took it.
-        return e.acceptedAttemptId === a.id ? "accepted" : "already_taken";
+        // The same call's key press arriving twice is still the call that took
+        // it. Its row's details are cleared by now, so a number cannot be read
+        // again; the first reply read it.
+        if (e.acceptedAttemptId !== a.id) return "already_taken";
+        return await acceptedReply(e, a);
       }
 
       if (!digits) {
@@ -971,7 +1023,7 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
       // Taken, whether or not the close won its race: the attempt says
       // accepted, and the next move closes the escalation on it.
       log(`[ON-CALL] ${a.callSid}: taken at level ${a.levelIndex} (${a.role}), attempt ${a.attemptNo}`);
-      return "accepted";
+      return await acceptedReply(e, a);
     },
 
     async onProviderStatus(attemptId, callStatus) {
