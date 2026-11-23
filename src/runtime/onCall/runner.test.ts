@@ -560,14 +560,62 @@ describe("a pickup at any step stops the chain (success criterion)", () => {
     expect(await h.runner.onProviderAck(id, "1")).toBe("accepted");
     expect(h.store.attempts.get(id)?.outcome).toBe("accepted");
     expect(h.escalation()).toMatchObject({ status: "active" });
+    // brought due now, not left for the ringing guard
+    expect(h.escalation()?.nextAt?.getTime()).toBe(h.now().getTime());
     spy.mockImplementation(real);
-    // the ringing guard comes due; it must find the key press and close, not escalate
-    h.advance(RING_GUARD_MS);
+    // the next tick must find the key press and close, not escalate
     await h.runner.tick();
     expect(h.escalation()).toMatchObject({ status: "accepted", acceptedBy: 1, details: null });
     expect(h.calls).toHaveLength(1);
     expect(h.texts.filter((t) => t.to !== phoneOf(1))).toHaveLength(0);
     expect(h.urgent).toHaveLength(0);
+  });
+
+  it("tells a key press whose close another call won that the patient is already taken", async () => {
+    const h = harness();
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    const id = h.lastCallAttempt().id;
+    const other = await h.store.logAttempt({
+      escalationId: esc!.id,
+      callSid: SID,
+      levelIndex: 0,
+      role: "on_call",
+      providerId: 1,
+      kind: "call",
+      attemptNo: 2,
+      mode: "live",
+      dialedTo: phoneOf(1),
+    });
+    const realClose = h.store.closeEscalation.bind(h.store);
+    // Every close from this key press loses its race...
+    vi.spyOn(h.store, "closeEscalation").mockResolvedValue(null);
+    // ...and while it brings the row due, the other call's close lands.
+    vi.spyOn(h.store, "updateEscalation").mockImplementationOnce(async () => {
+      const cur = (await h.store.getEscalation(esc!.id))!;
+      await realClose(cur.id, cur.version, {
+        status: "accepted",
+        acceptedBy: 1,
+        acceptedAt: h.now(),
+        acceptedAttemptId: other.id,
+        nextAt: null,
+      });
+      return null;
+    });
+    expect(await h.runner.onProviderAck(id, "1")).toBe("already_taken");
+  });
+
+  it("still answers accepted when bringing the taken chain due throws", async () => {
+    const h = harness();
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    const id = h.lastCallAttempt().id;
+    vi.spyOn(h.store, "closeEscalation").mockResolvedValue(null);
+    vi.spyOn(h.store, "updateEscalation").mockRejectedValue(new Error("hub down"));
+    expect(await h.runner.onProviderAck(id, "1")).toBe("accepted");
+    expect(h.log.mock.calls.some(([l]) => String(l).includes("could not bring the taken chain due"))).toBe(true);
   });
 
   it("a due row with a key press on it closes instead of ringing", async () => {

@@ -89,7 +89,11 @@ the details are only in the text. A provider who presses a key after someone
 else has taken the patient hears "This patient has already been taken."
 If two providers press a key at nearly the same moment, the one the
 escalation records as having taken the patient (`accepted_by`) is told it is
-theirs and the other hears that it has already been taken.
+theirs and the other hears that it has already been taken. A key press whose
+close of the chain does not land (another writer was moving the record at the
+same moment) still takes the patient: the press is logged as accepted, the
+chain is brought due at once, and the next pass finds the press and closes
+the chain on it. Nothing else is rung in between.
 
 ### When the first call is not taken
 
@@ -100,6 +104,16 @@ confirms the callback number and files the ticket. The urgent ring-out ticket
 says the rotation is still calling: the provider again, then the region's
 medical director and the final director, so a staffer working it knows the
 patient may already be getting a call back from one of them.
+
+The agent and the ticket say the team is being paged only when the chain's
+record confirmed, within 2 seconds of the ring-out, that the chain is open and
+calling. If the record could not be opened, came back closed, or did not
+answer in time, the agent says the on-call team could not be reached and will
+call back, and the ticket carries no line about the rotation calling. That
+errs toward saying less: a chain that does page after a slow write still
+calls the provider, but the caller was not promised it. A record that has not
+answered after 20 seconds releases the call's claim, so a later request on the
+same call is not held back by it.
 
 ### One chain per call
 

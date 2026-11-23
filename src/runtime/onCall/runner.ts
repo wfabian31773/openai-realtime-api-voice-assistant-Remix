@@ -674,7 +674,23 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
         if (fresh?.outcome !== "accepted") return "closed";
         by = fresh;
       }
-      const { row, byThis } = await closeAsTaken(e.id, by);
+      let { row, byThis } = await closeAsTaken(e.id, by);
+      if (!row) {
+        // The close did not land. Bring the row due, as the in-call transfer's
+        // settle does, so the next tick finds this key press and closes the
+        // chain on it now, instead of the row reading active until the ringing
+        // guard. Nothing is rung meanwhile: every move looks for the accepted
+        // attempt before it moves on.
+        try {
+          const due = await dueNow(e.id);
+          if (due && due.status !== "active") {
+            row = due;
+            byThis = false;
+          }
+        } catch (err) {
+          log(`[ON-CALL] ${a.callSid}: could not bring the taken chain due: ${(err as Error)?.message ?? err}`);
+        }
+      }
       if (row && row.status !== "accepted") return "closed";
       if (row && !byThis && row.acceptedAttemptId !== by.id) {
         // Closed by someone else: by another call's key press, or by a move

@@ -194,6 +194,9 @@ export interface OnCallTransferWiring {
   personIdFor?: (callSid: string) => string | undefined;
   sendSms(input: { to: string; from: string; body: string }): Promise<{ sid: string }>;
   now?: () => Date;
+  /** Tests only: `HANDOFF_RESULT_WAIT_MS` and `HANDOFF_SETTLE_MS` by default. */
+  handoffResultWaitMs?: number;
+  handoffSettleMs?: number;
 }
 
 /**
@@ -224,6 +227,20 @@ export const HANDOFF_CHAIN_STARTED = "handoff_failed:CHAIN_STARTED";
 export const PRE_DIAL_SMS_WAIT_MS = 2_000;
 /** How long the runner hand-off waits for that text's answer before recording it as unknown. */
 export const PRE_DIAL_SMS_RECORD_MS = 10_000;
+/**
+ * How long a not-taken dial waits for the hand-off to say whether the chain's
+ * row is open, before the agent and the ring-out ticket are told. Past it the
+ * chain is NOT claimed as paging: the agent's no-answer words promise only a
+ * call back, which holds either way, while "being paged" would be false if the
+ * hand-off then failed.
+ */
+export const HANDOFF_RESULT_WAIT_MS = 2_000;
+/**
+ * How long a hand-off may hold this call's chain claim. The Hub pools carry no
+ * statement timeout, so a write that never answers would otherwise refuse every
+ * later escalation on the call as "already paging" for the rest of the call.
+ */
+export const HANDOFF_SETTLE_MS = 20_000;
 
 const E164 = /^\+\d{10,15}$/;
 
@@ -1011,9 +1028,14 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
        * would capture successes only, which is the half that needs recording
        * least.
        */
-      /** Set by `settle` when this attempt handed a chain to the runner and the dial was not taken. */
-      let chainCarriesOn = false;
-      const settle = async (): Promise<TransferOutcome> => {
+      /**
+       * `chainCarriesOn` is this invocation's own answer: true when this
+       * attempt handed a chain to the runner, the dial was not taken, and the
+       * runner answered inside `HANDOFF_RESULT_WAIT_MS` with the chain's row
+       * still active. It is returned, never shared, so two escalations on one
+       * call cannot read each other's.
+       */
+      const settle = async (): Promise<{ outcome: TransferOutcome; chainCarriesOn: boolean }> => {
         /**
          * READ THE SIDE CHANNEL BEFORE `attempt()`, because attempt's own
          * `finally` DELETES it — the entry holds a caller's name, DOB and
@@ -1035,16 +1057,37 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
          * Every run is handed over, whatever the dial did: level 0 was texted
          * before it rang, so even a dial that threw or never started is the
          * first attempt of a chain the runner must carry on.
+         *
+         * Answers whether the chain's row is open and active once the runner
+         * is done, false when it opened nothing or failed. The call's claim is
+         * released when the hand-off ends, or after `HANDOFF_SETTLE_MS` if it
+         * never does; the release happens once, so a hand-off that answers
+         * after the bound cannot overwrite a later escalation's claim.
          */
-        const handOff = (handed: OnCallRun, outcome: TransferOutcome): void => {
-          if (!onCall) return;
+        const handOff = (handed: OnCallRun, outcome: TransferOutcome): Promise<boolean> => {
+          if (!onCall) return Promise.resolve(false);
           const now = onCall.now ?? (() => new Date());
           // The level-0 call ended when its outcome arrived, not after the
           // text's record below: the retry is timed from this.
           const endedAt = now();
-          void (async () => {
+          let released = false;
+          const release = (): void => {
+            if (released) return;
+            released = true;
+            chainState = "handed";
+          };
+          const settleMs = onCall.handoffSettleMs ?? HANDOFF_SETTLE_MS;
+          const bound = setTimeout(() => {
+            if (released) return;
+            log(
+              `[ON-CALL] ${metadata.callSid}: the hand-off to the runner is still running after ${settleMs} ms; releasing this call's chain claim`,
+            );
+            release();
+          }, settleMs);
+          (bound as { unref?: () => void }).unref?.();
+          return (async () => {
             const preDialSms = await settleWithin(handed.preDialSms, PRE_DIAL_SMS_RECORD_MS);
-            await onCall.runner.afterInCallTransfer({
+            const row = await onCall.runner.afterInCallTransfer({
               callSid: metadata.callSid,
               mode: onCall.config.mode as OnCallMode,
               plan: handed.plan,
@@ -1060,25 +1103,47 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
                 providerCallSid: outcome.ok ? (outcome.officeCallSid ?? null) : null,
               },
             });
+            return row?.status === "active";
           })()
-            .catch((e) =>
+            .catch((e) => {
               log(
                 `[ON-CALL] ${metadata.callSid}: could not hand the chain to the runner: ${(e as Error)?.message ?? e}`,
-              ),
-            )
+              );
+              return false;
+            })
             .finally(() => {
-              chainState = "handed";
+              clearTimeout(bound);
+              release();
             });
         };
         let outcome: TransferOutcome;
         try {
           outcome = await attempt(holder);
         } catch (e) {
-          if (holder.run) handOff(holder.run, { ok: false, status: "FAILED", reason: "transfer_threw" });
+          if (holder.run) void handOff(holder.run, { ok: false, status: "FAILED", reason: "transfer_threw" });
           throw e;
         }
-        if (holder.run) handOff(holder.run, outcome);
-        chainCarriesOn = Boolean(holder.run) && !outcome.ok;
+        const handed = holder.run ? handOff(holder.run, outcome) : null;
+        /**
+         * WHAT THE CALLER AND THE TICKET ARE TOLD WAITS FOR THE HAND-OFF,
+         * briefly. A not-taken dial is "the on-call team is being paged" only
+         * when the runner has the chain's row open; a hand-off that failed has
+         * already texted the urgent number that nobody else will be called,
+         * and saying the team is being paged beside that would be false. A
+         * hand-off slower than the wait is read as not confirmed: the agent's
+         * no-answer words promise a call back, which is true either way.
+         */
+        let chainCarriesOn = false;
+        if (handed && !outcome.ok) {
+          const waitMs = onCall?.handoffResultWaitMs ?? HANDOFF_RESULT_WAIT_MS;
+          const live = await settleWithin(handed, waitMs);
+          chainCarriesOn = live === true;
+          if (live === null) {
+            log(
+              `[ON-CALL] ${metadata.callSid}: the hand-off had not answered after ${waitMs} ms; the agent is not told the chain is paging`,
+            );
+          }
+        }
         try {
           /**
            * A POLICY REFUSAL IS NOT A DIAL. Codex P2, PR #273.
@@ -1091,7 +1156,7 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
            * "no transfer was attempted". Reporting would count configuration
            * refusals as dials.
            */
-          if (!outcome.ok && outcome.status === "UNAVAILABLE") return outcome;
+          if (!outcome.ok && outcome.status === "UNAVAILABLE") return { outcome, chainCarriesOn };
           const ringSeconds = Math.round((Date.now() - dialStartedAt) / 1000);
           /**
            * THE URGENT SAFETY NET — the old core's `fileUrgentHandoffFallbackTicket`.
@@ -1125,8 +1190,9 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
               // UNAVAILABLE returned above; the ternary only narrows the type.
               handoff: { status: outcome.status === "UNAVAILABLE" ? "FAILED" : outcome.status, ringSeconds },
               // v268: the chain this dial started is still calling, so the
-              // ticket says so beside its call-back line.
-              ...(holder.run ? { onCallChain: true } : {}),
+              // ticket says so beside its call-back line, only when the runner
+              // said its row is open.
+              ...(chainCarriesOn ? { onCallChain: true } : {}),
             });
           }
           /**
@@ -1157,15 +1223,15 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
           // record is taken here and not inside the dial.
           log(`[runtime-xfer] could not record the outcome for ${metadata.callSid}: ${String(err)}`);
         }
-        return outcome;
+        return { outcome, chainCarriesOn };
       };
       if (slug === "pcp") {
         // See handoffFor's interface doc: PCP records the STRUCTURED
         // outcome on its ticket, success or failure — never a throw.
-        return async () => toPcpHandoffOutcome(await settle());
+        return async () => toPcpHandoffOutcome((await settle()).outcome);
       }
       return async () => {
-        const outcome = await settle();
+        const { outcome, chainCarriesOn } = await settle();
         if (!outcome.ok) {
           // A fixed slug, because the text reaches the model — the
           // detailed reason stays in the server log (warmTransfer.ts).

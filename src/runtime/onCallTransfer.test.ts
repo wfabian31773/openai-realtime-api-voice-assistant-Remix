@@ -292,6 +292,128 @@ describe("an urgent after-hours call with the rotation on", () => {
     expect(rec.tickets[0]).toMatchObject({ onCallChain: true });
   });
 
+  it("does not say the team is being paged when the runner opened no chain", async () => {
+    const { ops } = fakeOps();
+    const built = buildWiring();
+    built.wiring.runner = { afterInCallTransfer: async () => null };
+    const rec = recordingAlerts();
+    const transfer = transferWith(ops, built.wiring, rec.alerts);
+    urgent();
+    const outcome = transfer.handoffFor("no-ivr", META)();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    transfer.handleStatus(signed(TRANSFER_STATUS_PATH, { CallSid: "CAoffice", CallStatus: "no-answer" }));
+    await expect(outcome).rejects.toThrow(/^handoff_failed:NO_ANSWER$/);
+    expect(rec.tickets).toHaveLength(1);
+    expect(rec.tickets[0]).not.toHaveProperty("onCallChain");
+  });
+
+  it("does not say the team is being paged when the runner answers with a chain that is no longer active", async () => {
+    const { ops } = fakeOps();
+    const built = buildWiring();
+    const inner = built.wiring.runner.afterInCallTransfer;
+    built.wiring.runner = {
+      afterInCallTransfer: async (r) => {
+        const row = await inner(r);
+        return row ? { ...row, status: "exhausted" } : row;
+      },
+    };
+    const rec = recordingAlerts();
+    const transfer = transferWith(ops, built.wiring, rec.alerts);
+    urgent();
+    const outcome = transfer.handoffFor("no-ivr", META)();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    transfer.handleStatus(signed(TRANSFER_STATUS_PATH, { CallSid: "CAoffice", CallStatus: "no-answer" }));
+    await expect(outcome).rejects.toThrow(/^handoff_failed:NO_ANSWER$/);
+    expect(rec.tickets[0]).not.toHaveProperty("onCallChain");
+  });
+
+  it("does not say the team is being paged when the runner throws", async () => {
+    const { ops } = fakeOps();
+    const built = buildWiring();
+    built.wiring.runner = {
+      afterInCallTransfer: async () => {
+        throw new Error("runner broke");
+      },
+    };
+    const lines: string[] = [];
+    const rec = recordingAlerts();
+    const transfer = transferWith(ops, built.wiring, rec.alerts, { log: (l) => void lines.push(l) });
+    urgent();
+    const outcome = transfer.handoffFor("no-ivr", META)();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    transfer.handleStatus(signed(TRANSFER_STATUS_PATH, { CallSid: "CAoffice", CallStatus: "no-answer" }));
+    await expect(outcome).rejects.toThrow(/^handoff_failed:NO_ANSWER$/);
+    expect(rec.tickets[0]).not.toHaveProperty("onCallChain");
+    expect(lines.some((l) => l.includes("could not hand the chain to the runner"))).toBe(true);
+  });
+
+  it("waits for a hand-off that answers inside the wait, and then says the team is being paged", async () => {
+    const { ops } = fakeOps();
+    const built = buildWiring();
+    built.wiring.handoffResultWaitMs = 1_000;
+    const inner = built.wiring.runner.afterInCallTransfer;
+    built.wiring.runner = {
+      afterInCallTransfer: async (r) => {
+        await new Promise((ok) => setTimeout(ok, 50));
+        return inner(r);
+      },
+    };
+    const rec = recordingAlerts();
+    const transfer = transferWith(ops, built.wiring, rec.alerts);
+    urgent();
+    const outcome = transfer.handoffFor("no-ivr", META)();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    transfer.handleStatus(signed(TRANSFER_STATUS_PATH, { CallSid: "CAoffice", CallStatus: "no-answer" }));
+    await expect(outcome).rejects.toThrow(/^handoff_failed:CHAIN_STARTED$/);
+    expect(rec.tickets[0]).toMatchObject({ onCallChain: true });
+  });
+
+  it("reads a hand-off slower than the wait as not confirmed, and says so in the log", async () => {
+    const { ops } = fakeOps();
+    const built = buildWiring();
+    built.wiring.handoffResultWaitMs = 20;
+    const inner = built.wiring.runner.afterInCallTransfer;
+    let finish: () => void = () => undefined;
+    const gate = new Promise<void>((ok) => (finish = ok));
+    built.wiring.runner = {
+      afterInCallTransfer: async (r) => {
+        await gate;
+        return inner(r);
+      },
+    };
+    const lines: string[] = [];
+    const rec = recordingAlerts();
+    const transfer = transferWith(ops, built.wiring, rec.alerts, { log: (l) => void lines.push(l) });
+    urgent();
+    const outcome = transfer.handoffFor("no-ivr", META)();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    transfer.handleStatus(signed(TRANSFER_STATUS_PATH, { CallSid: "CAoffice", CallStatus: "no-answer" }));
+    await expect(outcome).rejects.toThrow(/^handoff_failed:NO_ANSWER$/);
+    expect(rec.tickets[0]).not.toHaveProperty("onCallChain");
+    expect(lines.some((l) => l.includes("the hand-off had not answered after 20 ms"))).toBe(true);
+    finish();
+  });
+
+  it("does not wait for the hand-off when the transfer was taken", async () => {
+    const { ops } = fakeOps();
+    const built = buildWiring();
+    let finish: () => void = () => undefined;
+    const gate = new Promise<void>((ok) => (finish = ok));
+    built.wiring.runner = {
+      afterInCallTransfer: async () => {
+        await gate;
+        return null;
+      },
+    };
+    const transfer = transferWith(ops, built.wiring);
+    urgent();
+    const outcome = transfer.handoffFor("no-ivr", META)();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    transfer.handleAccept(signed(TRANSFER_ACCEPT_PATH, { CallSid: "CAoffice", Digits: "1" }));
+    await outcome;
+    finish();
+  });
+
   it("keeps today's heads-up text to the urgent notification number, unchanged", async () => {
     const { ops } = fakeOps();
     const built = buildWiring();
@@ -405,7 +527,8 @@ describe("one chain per call, read from the chain's own row", () => {
     const first = handoff();
     await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
     transfer.handleStatus(signed(TRANSFER_STATUS_PATH, { CallSid: "CAoffice", CallStatus: "no-answer" }));
-    await expect(first).rejects.toThrow(/^handoff_failed:CHAIN_STARTED$/);
+    // No row was opened, so nothing is paging: the agent hears that nobody answered.
+    await expect(first).rejects.toThrow(/^handoff_failed:NO_ANSWER$/);
     await vi.waitFor(() => expect(built.handed).toHaveLength(1));
     built.store.failWrites = false;
 
@@ -431,7 +554,8 @@ describe("one chain per call, read from the chain's own row", () => {
     const first = handoff();
     await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
     transfer.handleStatus(signed(TRANSFER_STATUS_PATH, { CallSid: "CAoffice", CallStatus: "no-answer" }));
-    await expect(first).rejects.toThrow(/^handoff_failed:CHAIN_STARTED$/);
+    // No row was opened, so nothing is paging: the agent hears that nobody answered.
+    await expect(first).rejects.toThrow(/^handoff_failed:NO_ANSWER$/);
     await vi.waitFor(() => expect(built.handed).toHaveLength(1));
     built.store.failWrites = false;
 
@@ -508,6 +632,57 @@ describe("one chain per call, read from the chain's own row", () => {
     expect(dialed[2].to).toBe(ENV.HUMAN_AGENT_NUMBER);
     transfer.handleAccept(signed(TRANSFER_ACCEPT_PATH, { CallSid: "CAoffice", Digits: "1" }));
     await third;
+  });
+
+  it("releases the call's claim when the hand-off never answers, and a late answer does not undo a later claim", async () => {
+    const { ops, dialed } = fakeOps();
+    const built = buildWiring();
+    built.wiring.handoffResultWaitMs = 10;
+    built.wiring.handoffSettleMs = 40;
+    const inner = built.wiring.runner.afterInCallTransfer;
+    let calls = 0;
+    let finishFirst: () => void = () => undefined;
+    const firstGate = new Promise<void>((ok) => (finishFirst = ok));
+    let finishSecond: () => void = () => undefined;
+    const secondGate = new Promise<void>((ok) => (finishSecond = ok));
+    built.wiring.runner = {
+      afterInCallTransfer: async (r) => {
+        calls += 1;
+        // Neither hand-off opens a row until its gate is lifted.
+        await (calls === 1 ? firstGate : secondGate);
+        return calls === 1 ? null : inner(r);
+      },
+    };
+    const lines: string[] = [];
+    const transfer = transferWith(ops, built.wiring, recordingAlerts().alerts, { log: (l) => void lines.push(l) });
+    const handoff = transfer.handoffFor("no-ivr", META);
+
+    urgent();
+    const first = handoff();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    transfer.handleStatus(signed(TRANSFER_STATUS_PATH, { CallSid: "CAoffice", CallStatus: "no-answer" }));
+    await expect(first).rejects.toThrow(/^handoff_failed:NO_ANSWER$/);
+
+    // While the first hand-off is stuck, a second escalation is refused.
+    urgent();
+    await expect(handoff()).rejects.toThrow(/^handoff_failed:CHAIN_RUNNING$/);
+
+    // Past the bound the claim is released, so the next escalation routes again.
+    await vi.waitFor(() => expect(lines.some((l) => l.includes("releasing this call's chain claim"))).toBe(true));
+    urgent();
+    const second = handoff();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    expect(dialed).toHaveLength(2);
+    transfer.handleStatus(signed(TRANSFER_STATUS_PATH, { CallSid: "CAoffice", CallStatus: "no-answer" }));
+    await expect(second).rejects.toThrow(/^handoff_failed:NO_ANSWER$/);
+
+    // The first hand-off answers late. It must not release the second's claim.
+    finishFirst();
+    await new Promise((ok) => setTimeout(ok, 5));
+    urgent();
+    await expect(handoff()).rejects.toThrow(/^handoff_failed:CHAIN_RUNNING$/);
+    expect(dialed).toHaveLength(2);
+    finishSecond();
   });
 
   it("hands the chain to the runner as failed when the dial throws after the provider was texted", async () => {
