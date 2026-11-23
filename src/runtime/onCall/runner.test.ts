@@ -2031,6 +2031,35 @@ describe("a provider call whose text did not send (review of #514, round 12)", (
     });
   });
 
+  it("counts a reminder text that reached the director after their first text failed", async () => {
+    // Only the director's first text fails; the reminder before their second
+    // call carries the details and sends.
+    let failed = false;
+    const base = failingTextsTo([]);
+    const sendSms = vi.fn(async (m: { to: string; from: string; body: string }) => {
+      if (!failed && m.to === phoneOf(IE_DIRECTOR)) {
+        failed = true;
+        throw new Error("sms down");
+      }
+      return base.sendSms(m);
+    });
+    const h = harness({ sendSms });
+    const first = await toLevelOne(h);
+    expect(h.calls[h.calls.length - 1].twiml).toContain(PROVIDER_CALL_OPENING_NO_TEXT);
+    await h.runner.onProviderStatus(first.id, "no-answer");
+    h.at(h.escalation()!.nextAt!);
+    await h.runner.tick();
+    const second = h.lastCallAttempt();
+    expect(second.id).not.toBe(first.id);
+    expect(second.dialedTo).toBe(phoneOf(IE_DIRECTOR));
+    const nudge = [...h.store.attempts.values()].find(
+      (a) => a.kind === "nudge_sms" && a.dialedTo === phoneOf(IE_DIRECTOR),
+    );
+    expect(nudge?.outcome).toBe("sent");
+    expect(h.calls[h.calls.length - 1].twiml).toContain(PROVIDER_CALL_OPENING);
+    expect(await h.runner.onProviderAck(second.id, "1")).toBe("accepted");
+  });
+
   it("reads the callback number the caller gave before the caller ID", async () => {
     const { sendSms } = failingTextsTo([phoneOf(IE_DIRECTOR)]);
     const h = harness({ sendSms });
