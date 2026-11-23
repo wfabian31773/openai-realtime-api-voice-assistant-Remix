@@ -649,10 +649,10 @@ describe("one chain per call, read from the chain's own row", () => {
     const secondGate = new Promise<void>((ok) => (finishSecond = ok));
     built.wiring.runner = {
       afterInCallTransfer: async (r) => {
-        calls += 1;
-        // Neither hand-off opens a row until its gate is lifted.
-        await (calls === 1 ? firstGate : secondGate);
-        return calls === 1 ? null : inner(r);
+        const n = ++calls;
+        // Neither hand-off answers until its gate is lifted, and the first opens no row.
+        await (n === 1 ? firstGate : secondGate);
+        return n === 1 ? null : inner(r);
       },
     };
     const lines: string[] = [];
