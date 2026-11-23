@@ -73,8 +73,13 @@ and operator SMS-send replies use the connector's `mask()` to mask phones to
 their last four digits, omit media/recording URL fields, and redact string content
 and name/DOB/email/subject fields by default. On the three operator reads,
 `includeContent: true` returns content fields and all descendants unredacted
-except for phone masking and URL
-removal; names/emails outside content remain masked. Other tools, including
+except for phone masking and URL removal. Embedded Twilio API Media/Recordings
+URLs (any version, case, extension or query), Twilio CDN URLs and conservatively
+all non-API Twilio subdomain URLs become `[redacted URL]`, including in prose,
+serialized JSON and escaped/percent-encoded text. Nearby connector-separated
+digit fragments share one mask: `909555-01 and 13` becomes `***-***-0113`, and
+`909-555-0113 and 12` becomes `***-***-1312`; clear times, rooms and dates after
+complete phones survive. Names/emails outside content remain masked. Other tools, including
 full transcripts and live-call status, preserve fleet JSON. Both transports
 apply the same rules. Live tools call their routes directly without a
 `/capabilities` preflight, preserving access for `calls:direct`-only tokens;

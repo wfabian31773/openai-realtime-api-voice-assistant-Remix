@@ -155,9 +155,22 @@ URL fields at every depth. Runs of seven or more Unicode decimal digits are
 masked across Unicode whitespace, dash punctuation, zero-width separators,
 fullwidth phone punctuation and middle dots. Matching uses NFKC normalization;
 the visible last four digits are ASCII, while surrounding text stays unchanged.
-Short extensions (up to four digits) are retained unless they would expose a
-new seven-digit run; longer suffixes are removed. ISO dates/timestamps, UUIDs,
+Extensions are consumed without exposing extra digits. Nearby digit fragments
+joined by punctuation, whitespace or connector words (`and`, `oh`, `or`, `dash`,
+`then`, `point`, `to`) within 12 characters stay in the same masked run when
+either side is incomplete. Thus `909555-01 and 13` becomes `***-***-0113` and
+even `909-555-0113 and 12` conservatively becomes `***-***-1312`. Complete
+phones followed by clear prose (`at 5 pm`, `room 12`, `on 11/23`) or an explicit
+clock time (`and 5 pm`) retain those unrelated numbers. ISO dates/timestamps, UUIDs,
 SIDs and typed id values remain protected.
+Embedded media/recording URLs become `[redacted URL]`, including API URLs on
+`api.twilio.com` with case-insensitive `/Media/` or `/Recordings/` paths, any API
+version, extensions and query strings. All `*.twiliocdn.com` URLs (including
+`media.twiliocdn.com`) and, conservatively, all non-API `*.twilio.com` URLs
+(including regional `mcs.us1.twilio.com`) are removed. This applies inside prose,
+JSON strings and escaped/percent-encoded strings, with or without included
+content; URL keys are omitted recursively. Ambiguous encoded text may be replaced
+in full to avoid leaking its URL.
 By default, string content and name/DOB/email/subject fields become
 `[redacted N chars]`; emails embedded in other strings become `[email]`.
 

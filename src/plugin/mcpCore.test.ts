@@ -79,6 +79,8 @@ describe("voice fleet MCP core", () => {
 
   it.each([
     ["Call 909-555-0113 at 5 pm", "Call ***-***-0113 at 5 pm"],
+    ["909-555-0113 at 5 pm", "***-***-0113 at 5 pm"],
+    ["Call 909-555-0113 and 5 pm", "Call ***-***-0113 and 5 pm"],
     ["Call 909-555-0113 room 12", "Call ***-***-0113 room 12"],
     ["Call 909-555-0113 on 11/23", "Call ***-***-0113 on 11/23"],
     ["Call 909-555-0113 5 pm", "Call ***-***-0113 5 pm"],
@@ -97,6 +99,17 @@ describe("voice fleet MCP core", () => {
 
   it.each([
     ["909 555 0113 5 pm", "***-***-0113 5 pm"],
+    ["909555-01 and 13", "***-***-0113"],
+    ["909 555 oh 1 13", "***-***-5113"],
+    ["909555 and 0113", "***-***-0113"],
+    ["555-01 and 13 and 5", "***-***-1135"],
+    ["909-555-0113 and 12", "***-***-1312"],
+    ...["and", "oh", "or", "dash", "then", "point", "to"].map((word) => [
+      `909555-01 ${word} 13`, "***-***-0113",
+    ]),
+    ["13 and 90955501", "***-***-5501"],
+    ["９０９５５５-０１ and １３", "***-***-0113"],
+    ["909555-01\\u0020and\\u002013", "***-***-0113"],
     ["+1 909 555 0113 x 5", "***-***-0113"],
     ["909 555 0113 or 909 555 0114", "***-***-0113 or ***-***-0114"],
     ["call 909 555 0113 now 5550113", "call ***-***-0113 now ***-***-0113"],
@@ -158,6 +171,43 @@ describe("voice fleet MCP core", () => {
     expect(maskString(input)).toBe(expected);
     expect(mask({ note: input })).toEqual({ note: expected });
     expect(mask({ messages: [{ text: input }] }, "", true)).toEqual({ messages: [{ text: expected }] });
+  });
+
+  it("removes Twilio API media and regional media-host URLs throughout strings and objects", () => {
+    const urls = [
+      ...["2010-04-01", "v1", "v2099"].flatMap((version) =>
+        ["Media", "mEdIa", "Recordings", "rEcOrDiNgS"].flatMap((resource) =>
+          ["", ".json", ".mp3", ".wav"].flatMap((extension) => ["", "?download=true"].map((query) =>
+            `https://api.twilio.com/${version}/Accounts/synthetic/${resource}/synthetic${extension}${query}`)))),
+      "https://api.twilio.com/v1/Media.json?synthetic=true",
+      "https://api.twilio.com/v1/Recordings.wav",
+      ...["media.twiliocdn.com", "mcs.us1.twilio.com", "mcs.ie1.twilio.com", "media.us1.twilio.com",
+        "regional.media.twilio.com", "synthetic.twiliocdn.com", "edge.synthetic.twilio.com"].map((host) =>
+        `https://${host}/synthetic-audio?download=true`),
+    ];
+    for (const url of urls) {
+      const prose = `Listen ${url} now`;
+      expect(maskString(prose), url).toBe("Listen [redacted URL] now");
+      expect(mask({ note: prose })).toEqual({ note: "Listen [redacted URL] now" });
+      expect(mask({ body: { note: prose } }, "", true)).toEqual({ body: { note: "Listen [redacted URL] now" } });
+      expect(mask({ url, nested: { mediaUrls: [url], link: url } }))
+        .toEqual({ nested: { link: "[redacted URL]" } });
+      const json = JSON.stringify({ note: prose });
+      const expected = JSON.stringify({ note: "Listen [redacted URL] now" });
+      expect(maskString(json)).toBe(expected);
+      expect(maskString(JSON.stringify(json))).toBe(JSON.stringify(expected));
+      expect(mask({ body: json }, "", true)).toEqual({ body: expected });
+      for (const encoded of [encodeURIComponent(url), encodeURIComponent(encodeURIComponent(url)),
+        url.replace(/\//g, "\\/"), Array.from(url, (point) => `\\u${point.charCodeAt(0).toString(16).padStart(4, "0")}`).join("")]) {
+        const input = `Listen ${encoded} now`;
+        expect(maskString(input), input).toBe("[redacted URL]");
+        expect(mask({ note: input })).toEqual({ note: "[redacted URL]" });
+        expect(mask({ body: input }, "", true)).toEqual({ body: "[redacted URL]" });
+        expect(maskString(JSON.stringify({ note: input }))).toBe('{"note":"[redacted URL]"}');
+      }
+    }
+    for (const url of ["https://api.twilio.com/v1/Accounts/synthetic", "https://example.test/Media/synthetic",
+      "https://mcs.us1.twilio.com.example.test/synthetic"]) expect(maskString(url)).toBe(url);
   });
 
   it("removes media URLs in encoded, prefixed, quoted and array-valued embedded fields", () => {

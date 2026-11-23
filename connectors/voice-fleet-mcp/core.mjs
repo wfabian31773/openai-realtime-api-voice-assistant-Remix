@@ -239,8 +239,9 @@ function removeMediaUrls(value) {
     try {
       const { hostname, pathname } = new URL(url);
       if (/\/Recordings(?:\/|$)/i.test(pathname) ||
+        /^api\.twilio\.com$/i.test(hostname) && /\/(?:Media|Recordings)(?:\/|\.|$)/i.test(pathname) ||
         /(?:^|\.)twiliocdn\.com$/i.test(hostname) ||
-        /^(?:recordings?|media|mms)(?:\.[\w-]+)*\.twilio\.com$/i.test(hostname)) {
+        /\.twilio\.com$/i.test(hostname) && !/^api\.twilio\.com$/i.test(hostname)) {
         removed = true;
         return "[redacted URL]";
       }
@@ -371,7 +372,13 @@ function maskPhone(value, key = "") {
     // Ambiguous words may split a single phone (909 a 555 0113). Only clear
     // prose cues can separate an incomplete side; otherwise mask the whole run.
     const proseGap = /\p{White_Space}(?:at|on|room|call|now|or|and|then)[\p{P}\p{S}]*\p{White_Space}/iu.test(gap);
-    const wordBoundary = !extension && (!hasExtension || proseGap) && wordGaps[i] &&
+    // Nearby connector words cannot expose a short fragment beside a mask.
+    // A complete phone followed by an explicit clock time is unambiguous prose.
+    const connectorGap = gap.length <= 12 && /^[\p{White_Space}\p{P}\p{S}]*(?:(?:and|oh|or|dash|then|point|to)\b[\p{White_Space}\p{P}\p{S}]*)*$/iu.test(gap);
+    const clockTime = count >= 10 && /^(?:[1-9]|1[0-2])$/.test(groups[i]) &&
+      /^[\p{White_Space}]*[ap]m\b/iu.test(normalized.slice(positions[i] + groups[i].length));
+    const adjacentFragment = connectorGap && !clockTime && (count < 10 || following[i] < 7);
+    const wordBoundary = !adjacentFragment && !extension && (!hasExtension || proseGap) && wordGaps[i] &&
       (count >= 7 && following[i] >= 7 || proseGap && (count >= 7 || following[i] >= 7));
     // Only the standard 3-3-4 shape (optionally prefixed by country code 1)
     // followed by a time supports treating a trailing short group as prose.
