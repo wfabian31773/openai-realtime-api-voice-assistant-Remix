@@ -151,6 +151,59 @@ describe("the rotation", () => {
     expect(d.kind === "rotation" && d.routing.notes).toEqual(
       expect.arrayContaining(["no_schedule_for_week", "no_first_level"]),
     );
+    // The final director is told why they are the first person rung.
+    expect(d.kind === "rotation" && d.alertNote).toMatch(/^No on-call provider is entered for this week/);
+    expect(d.kind === "rotation" && d.routing.note).toBe(d.kind === "rotation" ? d.alertNote : null);
+  });
+
+  it("says so in the alert when the week's provider is marked inactive", async () => {
+    const base = syntheticRotation();
+    const data = syntheticRotation({
+      providers: base.providers.map((p) => (p.id === 1 ? { ...p, active: false } : p)),
+    });
+    const d = await decideRoute(input({ data }));
+    expect(ids(d)).toEqual([["final", FINAL_DIRECTOR]]);
+    expect(d.kind === "rotation" && d.alertNote).toMatch(/marked inactive, so the chain went straight to the final director/);
+  });
+
+  it("says so in the alert when tonight's cover cannot be rung and the week's provider is called", async () => {
+    const base = syntheticRotation();
+    const data = syntheticRotation({
+      providers: base.providers.map((p) => (p.id === 5 ? { ...p, active: false } : p)),
+      overrides: [
+        { id: 1, startsAt: new Date("2026-12-03T01:00:00Z"), endsAt: new Date("2026-12-03T16:00:00Z"), providerId: 5 },
+      ],
+    });
+    const d = await decideRoute(input({ data }));
+    expect(ids(d)?.[0]).toEqual(["on_call", 1]);
+    expect(d.kind === "rotation" && d.alertNote).toMatch(
+      /^The cover entered for this time is marked inactive, so this week's scheduled provider is being called\./,
+    );
+    expect(d.kind === "rotation" && d.routing.note).toBe(d.kind === "rotation" ? d.alertNote : null);
+  });
+
+  it("puts the rotation's note before the post-op note when both apply", async () => {
+    const data = syntheticRotation({
+      overrides: [
+        { id: 1, startsAt: new Date("2026-12-03T01:00:00Z"), endsAt: new Date("2026-12-03T16:00:00Z"), providerId: 999 },
+      ],
+    });
+    const d = await decideRoute(input({ data, personId: undefined }));
+    expect(d.kind === "rotation" && d.alertNote).toBe(
+      `The cover entered for this time is not on file, so this week's scheduled provider is being called. ${NO_IDENTITY_NOTE}`,
+    );
+  });
+
+  it("carries no rotation note on the surgeon route, where the rotation was not used", async () => {
+    const data = syntheticRotation({
+      overrides: [
+        { id: 1, startsAt: new Date("2026-12-03T01:00:00Z"), endsAt: new Date("2026-12-03T16:00:00Z"), providerId: 999 },
+      ],
+    });
+    const consoleQuery = consoleWithSurgery(provider(2, "x").npi!, "2026-11-29");
+    const d = await decideRoute(input({ data, personId: PERSON, consoleQuery }));
+    expect(ids(d)?.[0]).toEqual(["surgeon", 2]);
+    expect(d.kind === "rotation" && d.alertNote).toBeUndefined();
   });
 });
 

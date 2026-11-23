@@ -17,7 +17,15 @@
  * In TEST mode with empty tables a synthetic chain over the test numbers runs
  * instead, so the flow can be heard before the CSVs are imported.
  */
-import { addDays, onCallAt, pacificMinute, planChain, type ChainPlan, type RotationData } from "./rotation";
+import {
+  addDays,
+  onCallAt,
+  pacificMinute,
+  planChain,
+  type ChainPlan,
+  type OnCallAnswer,
+  type RotationData,
+} from "./rotation";
 import { decidePostOp, postOpRouteFor, type PostOpDecision } from "./postOp";
 import type { OnCallConfig } from "./config";
 import { testPhoneFor } from "./config";
@@ -40,6 +48,30 @@ export const ROUTING_BUDGET_MS = 2_500;
 export const POST_OP_BUDGET_MS = 1_500;
 /** The rotation is re-read at most this often. */
 export const ROTATION_CACHE_MS = 60_000;
+
+/**
+ * The alert text for a notable rotation answer, so the provider or director
+ * rung knows why they are the one being called. PHI-free.
+ */
+export function rotationNoteText(answer: Pick<OnCallAnswer, "note" | "provider">): string | undefined {
+  switch (answer.note) {
+    case undefined:
+      return undefined;
+    case "no_schedule_for_week":
+      return "No on-call provider is entered for this week, so the chain went straight to the final director.";
+    case "provider_missing":
+      return "This week's on-call provider is not on file, so the chain went straight to the final director.";
+    case "provider_inactive":
+      return "This week's on-call provider is marked inactive, so the chain went straight to the final director.";
+    case "override_provider_inactive":
+    case "override_provider_missing": {
+      const why = answer.note === "override_provider_inactive" ? "is marked inactive" : "is not on file";
+      return answer.provider
+        ? `The cover entered for this time ${why}, so this week's scheduled provider is being called.`
+        : `The cover entered for this time ${why} and this week's scheduled provider cannot be rung either, so the chain went straight to the final director.`;
+    }
+  }
+}
 
 /** One cached read of the rotation per process. */
 export function createRotationCache(
@@ -199,7 +231,13 @@ export async function decideRoute(input: RouteInput): Promise<RouteDecision> {
     const chain = planChain(first, data);
     notes.push(...chain.notes);
     const plan = withTestPhones({ levels: chain.levels, notes }, config);
-    const alertNote = postOp.note;
+    // The rotation's own note says why the person rung is who they are (an
+    // empty week, a stale cover); on the surgeon route the rotation was not
+    // used, so only the post-op note applies.
+    const alertNote =
+      [postOp.route === "surgeon" ? undefined : rotationNoteText(answer), postOp.note]
+        .filter((n): n is string => Boolean(n))
+        .join(" ") || undefined;
     const routing: RoutingFacts = {
       ...base,
       reason,
