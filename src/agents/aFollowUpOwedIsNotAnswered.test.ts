@@ -60,7 +60,7 @@ const { createNoIvrAgent } = await import('./noIvrAgent');
 const floor = await import('../services/afterHoursTeardownFloor');
 const { getAzulTimeline } = await import('../services/toolTimeline');
 const { answeredWithoutTicket } = await import('../services/answeredCallDisposition');
-const { FOLLOW_UP_OWED_FIX, FOLLOW_UP_OWED_DESCRIPTION } = await import('./afterHoursAnsweredQuestion');
+const { FOLLOW_UP_OWED_FIX, FOLLOW_UP_OWED_DESCRIPTION, answeredQuestionResult } = await import('./afterHoursAnsweredQuestion');
 
 const GREETING =
   'AGENT: Thank you for calling Azul Vision. Our offices are currently closed. All calls are being recorded for quality assurance purposes. If this is a medical emergency, please hang up and dial 911. Am I speaking with Testa?';
@@ -268,6 +268,9 @@ describe('after a refusal', () => {
   it('the refusal tells the model to file, never to send the caller to call back, and speaks nothing', () => {
     expect(FOLLOW_UP_OWED_FIX).toMatch(/create_ticket/);
     expect(FOLLOW_UP_OWED_FIX).toMatch(/Never tell the caller to call back/);
+    // The refusal is for the model alone (v43): no channel the agent speaks.
+    const refusal = answeredQuestionResult(true);
+    for (const spoken of ['message', 'say', 'speak']) expect(refusal).not.toHaveProperty(spoken);
   });
 
   it('the timeline keeps the model\'s answer, so the refusals are countable', async () => {
