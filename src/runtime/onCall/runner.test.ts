@@ -796,6 +796,19 @@ describe("a key press on a call we had marked over (review of #514, round 10)", 
     expect(h.escalation()).toMatchObject({ status: "accepted", acceptedAttemptId: 999 });
   });
 
+  it("closes the chain on a second press when the first press's close did not land", async () => {
+    const h = harness();
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    const id = h.lastCallAttempt().id;
+    // The first press recorded the accept; its close of the chain failed.
+    await h.store.endAttempt(id, "accepted", h.now());
+    expect(h.escalation()).toMatchObject({ status: "active" });
+    expect(await h.runner.onProviderAck(id, "1")).toBe("accepted");
+    expect(h.escalation()).toMatchObject({ status: "accepted", acceptedAttemptId: id });
+  });
+
   it("keeps a call hung up because another took the patient as already taken", async () => {
     const h = harness();
     const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
