@@ -64,6 +64,14 @@ This project demonstrates how to use OpenAI's SIP Connector to the Realtime API 
 
 6. Follow the logs to ensure the service is running.
 
+## Fleet MCP plugin
+
+The fleet API includes a stateless Streamable HTTP MCP route at
+`POST /api/plugin/v1/mcp` on the public API server (port 5000 by default).
+Hosted support is built, not deployed. See the
+[voice-fleet connector README](connectors/voice-fleet-mcp/README.md) for Grok
+Team Bot Remote HTTPS setup, bearer authentication, the 26 tools and stdio use.
+
 ## Contributing
 
 Contributions are welcome! Please fork the repository and submit a pull request.

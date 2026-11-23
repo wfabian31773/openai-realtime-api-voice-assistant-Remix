@@ -4,6 +4,7 @@
 
 import express from "express";
 import cors from "cors";
+import { pluginAwareBodyParsers } from "../src/plugin/mcpRoute";
 import http from "http";
 // NOTE: heavy modules (routes, storage, DB, keep-alive) are dynamically imported
 // inside startServer() AFTER the HTTP server is listening — importing them at the
@@ -208,8 +209,8 @@ app.use('/api/voice', (req, res, next) => {
 
 // Middleware (AFTER proxy to avoid consuming raw bodies)
 app.use(cors());
-app.use(express.json());
-app.use(express.urlencoded({ extended: true }));
+// MCP authenticates before parsing and owns its 1 MB cap / JSON-RPC errors.
+app.use(pluginAwareBodyParsers());
 
 // Serve static frontend files
 app.use(express.static("client/dist"));

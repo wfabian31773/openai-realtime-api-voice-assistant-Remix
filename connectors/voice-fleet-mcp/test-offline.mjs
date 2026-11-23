@@ -1,48 +1,40 @@
-// Offline: mock fleet; checks capability gating, confirm-token hand-off, path params, masking. No network.
-import assert from 'node:assert';
-import { createServer } from 'node:http';
-import { spawn } from 'node:child_process';
-import { writeFileSync, mkdtempSync } from 'node:fs';
-import { tmpdir } from 'node:os';
-const seen = []; let liveCaps = true;
-const srv = createServer((req, res) => {
-  let data = ''; req.on('data', (d) => (data += d)); req.on('end', () => {
-    seen.push(`${req.method} ${req.url} ${data}`);
-    const u = req.url.replace('/api/plugin/v1', ''); const j = (c, b) => { res.writeHead(c, { 'content-type': 'application/json' }); res.end(JSON.stringify(b)); };
-    if (u === '/capabilities') return j(200, { liveCalls: liveCaps, confirmTokenHandoff: true, smsHoursEnforced: true });
-    if (u.startsWith('/get_contact_request')) return j(200, { status: 'approved', channel: 'call' });
-    if (u === '/contact_requests/ap1/confirm_token') return j(200, { confirmToken: 'a'.repeat(64), expiresAt: 'x' });
-    if (u === '/commit_call_live') return j(200, { status: 'live', sessionId: 's1', callSid: 'CA1' });
-    if (u === '/live_calls/s1?after=2') return j(200, { status: 'in_progress', transcript: [{ index: 3, role: 'caller', text: 'my number is 909 555 1234, mail a@b.com' }] });
-    if (u === '/live_calls/s1/instruct') return j(200, { status: 'instructed' });
-    j(404, { error: 'nf' });
-  });
+// Offline: capability gating, confirm hand-off, validation and masking. No sockets.
+import assert from 'node:assert/strict';
+import { mockFleet } from './test-support.mjs';
+let liveCaps = true;
+const { seen, rpc, call } = mockFleet(({ path }) => {
+  if (path === '/capabilities') return [200, { liveCalls: liveCaps, confirmTokenHandoff: true }];
+  if (path === '/contact_requests/ap1/confirm_token') return [200, { confirmToken: 'a'.repeat(64) }];
+  if (path === '/commit_call_live') return [200, { status: 'live', sessionId: 's1' }];
+  if (path === '/live_calls/s1?after=2') return [200, { status: 'in_progress', phone: '909-555-1234', note: 'synthetic@example.test', transcript: [{ role: 'caller', text: 'Synthetic private words' }] }];
+  if (path === '/live_calls/s1/instruct') return [200, { status: 'instructed' }];
+  return [404, { error: 'not found' }];
 });
-await new Promise((r) => srv.listen(0, '127.0.0.1', r));
-const dir = mkdtempSync(`${tmpdir()}/vf-`); writeFileSync(`${dir}/bot.token`, 'si.abc123.fakesecret');
-const p = spawn('node', ['server.mjs'], { env: { ...process.env, VOICE_FLEET_BASE_URL: `http://127.0.0.1:${srv.address().port}`, VOICE_FLEET_TOKEN_FILE: `${dir}/bot.token` }, stdio: ['pipe', 'pipe', 'ignore'] });
-let buf = ''; const waits = new Map();
-p.stdout.on('data', (d) => { buf += d; let i; while ((i = buf.indexOf('\n')) >= 0) { const m = JSON.parse(buf.slice(0, i)); buf = buf.slice(i + 1); waits.get(m.id)?.(m); } });
-let n = 0; const rpc = (method, params) => new Promise((r) => { const id = ++n; waits.set(id, r); p.stdin.write(JSON.stringify({ jsonrpc: '2.0', id, method, params }) + '\n'); });
-const call = async (name, a = {}) => (await rpc('tools/call', { name: `voice_fleet_${name}`, arguments: a })).result;
-await rpc('initialize', {});
-const names = (await rpc('tools/list')).result.tools.map((t) => t.name);
-for (const t of ['capabilities', 'commit_call_live', 'live_call_status', 'live_call_instruct', 'live_call_end']) assert(names.includes(`voice_fleet_${t}`));
-const live = await call('commit_call_live', { approvalId: 'ap1' });
+const names = (await rpc('tools/list')).result.tools.map((tool) => tool.name);
+assert.equal(names.length, 26);
+for (const name of ['capabilities', 'commit_call_live', 'live_call_status', 'live_call_instruct', 'live_call_end']) assert(names.includes(`voice_fleet_${name}`));
+// README contract: confirmToken is optional only when id is supplied.
+// approvalId was a stale test input, never a supported hand-off argument.
+const before = seen.length;
+assert((await call('commit')).isError);
+assert((await call('commit_call_live', { approvalId: 'ap1' })).isError);
+assert.equal(seen.length, before);
+const live = await call('commit_call_live', { id: 'ap1' });
 assert(!live.isError, live.content[0].text);
-assert(seen.some((s) => s.startsWith('POST /api/plugin/v1/commit_call_live') && s.includes('"confirmToken":"' + 'a'.repeat(64))));
+assert(seen.some((request) => request.method === 'POST' && request.path === '/commit_call_live' && request.body.confirmToken === 'a'.repeat(64)));
 assert(!JSON.stringify(live).includes('a'.repeat(64)));
-const st = await call('live_call_status', { sessionId: 's1', after: 2 });
-assert(!st.isError, st.content[0].text);
-assert(st.content[0].text.includes('***-***-1234') && st.content[0].text.includes('[email]') && !st.content[0].text.includes('555 1234'));
-assert(!(await call('live_call_instruct', { sessionId: 's1', text: 'ask about drops' })).isError);
+const status = await call('live_call_status', { sessionId: 's1', after: 2 });
+assert(!status.isError);
+assert(status.content[0].text.includes('***-***-1234') && status.content[0].text.includes('[email]'));
+assert(!status.content[0].text.includes('Synthetic private words'));
+assert(!(await call('live_call_instruct', { sessionId: 's1', text: 'Synthetic guidance' })).isError);
+const invalidBefore = seen.length;
 assert((await call('live_call_instruct', { sessionId: 's1', text: 'x'.repeat(2001) })).isError);
 assert((await call('live_call_status', { sessionId: '../x' })).isError);
-p.stdin.end();
-liveCaps = false; const before = seen.length;
-const p2 = spawn('node', ['server.mjs'], { env: { ...process.env, VOICE_FLEET_BASE_URL: `http://127.0.0.1:${srv.address().port}`, VOICE_FLEET_TOKEN_FILE: `${dir}/bot.token` }, stdio: ['pipe', 'pipe', 'ignore'] });
-const r2 = await new Promise((r) => { let b2 = ''; p2.stdout.on('data', (d) => { b2 += d; if (b2.includes('\n')) r(JSON.parse(b2.split('\n')[0])); }); p2.stdin.write(JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/call', params: { name: 'voice_fleet_commit_call_live', arguments: { approvalId: 'ap1' } } }) + '\n'); });
-assert(r2.result.isError && /not have liveCalls/.test(r2.result.content[0].text));
-assert(!seen.slice(before).some((s) => s.includes('commit_call_live') || s.includes('confirm_token')));
-p2.stdin.end(); srv.close();
+assert.equal(seen.length, invalidBefore);
+liveCaps = false;
+const capsBefore = seen.length;
+const blocked = await call('commit_call_live', { id: 'ap1' });
+assert(blocked.isError && /not have liveCalls/.test(blocked.content[0].text));
+assert.deepEqual(seen.slice(capsBefore).map((request) => request.path), ['/capabilities']);
 console.log('offline: ok');

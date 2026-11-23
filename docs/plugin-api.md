@@ -12,6 +12,39 @@ this change** — Wayne applies Hub migrations.
 Matching contract: bearer tokens `si.<jti>.<secret>`, hashed secret, scopes,
 constant-time compare, 5-minute single-use confirm token minted **on approve**.
 
+## Hosted MCP (`POST /api/plugin/v1/mcp`)
+
+Built, **not deployed**: the zero-dependency voice-fleet connector also runs
+as a stateless Streamable HTTP endpoint on this same Express app. The public
+server is `server/index.ts` on `API_PORT`, default 5000. Team Bots can select
+**Remote HTTPS** and use
+`https://openai-realtime-api-voice-assistant-remix--fabianwayne1.replit.app/api/plugin/v1/mcp`
+with header `Authorization: Bearer <plugin token>` after publication.
+
+Authentication runs before body parsing, using the existing
+`parseBearerToken` / `verifyStoredToken` flow (jti lookup, hashed secret,
+expiry and revocation). Missing or invalid credentials return 401 with
+`WWW-Authenticate: Bearer realm="voice-fleet-mcp"`. **No new scope is added**:
+each tool forwards the caller's exact bearer to the REST API, whose existing
+scope, ownership, approval and write gates still apply.
+
+POST accepts JSON-RPC messages or batches and returns ordinary JSON in input
+order; notifications only return 202 without a body. There are no MCP
+sessions or SSE streams. Invalid JSON returns 400 with `-32700`; the body cap
+is 1 MB (413). Authenticated GET/DELETE return 405 with `Allow: POST`.
+The raw-body voice proxy remains before the global parsers; MCP bypasses
+those parsers and authenticates before its own bounded parser runs.
+
+The upstream defaults to `http://127.0.0.1:${API_PORT || 5000}`, with a trusted
+`VOICE_FLEET_MCP_INTERNAL_BASE_URL` override. Request host/forwarding headers
+never select it. `VOICE_FLEET_TIMEOUT_MS` defaults to 30000. The connector
+never logs tokens or bodies, masks phones to their last four digits, and
+redacts names, DOB, bodies, transcripts, emails and tokens in tool responses.
+The legacy operator `includeContent` flag cannot bypass this redaction.
+
+Both transports share the same 26 tools and `serverInfo.version = 4.0.0`.
+See [connector setup and tests](../connectors/voice-fleet-mcp/README.md).
+
 ## Scopes
 
 | scope | tools | who gets it |
