@@ -134,6 +134,30 @@ describe("the in-memory store keeps the SQL store's rules", () => {
     expect(await s.acceptLate(late.id, AT)).toBeNull();
     expect((await s.getAttempt(late.id))?.outcome).toBe("no_answer");
   });
+
+  it("moves the chain's version on an accept, so a write read before it loses", async () => {
+    // Round 15 of the review of #514: a close read before the accept must not
+    // land over it.
+    const s = createFakeOnCallStore(syntheticRotation(), () => AT);
+    const e = (await s.openEscalation(newEscalation()))!;
+    const call = () =>
+      s.logAttempt({ escalationId: e.id, callSid: SID, levelIndex: 0, role: "on_call", providerId: 1, kind: "call", attemptNo: 1, mode: "test", dialedTo: "+15550100001" });
+    const ringing = await call();
+    const before = (await s.getEscalation(e.id))!.version;
+    expect(await s.endAttempt(ringing.id, "accepted", AT)).toMatchObject({ outcome: "accepted" });
+    expect(await s.closeEscalation(e.id, before, { status: "exhausted", nextAt: null })).toBeNull();
+    const late = await call();
+    await s.endAttempt(late.id, "no_answer", AT);
+    const read = (await s.getEscalation(e.id))!.version;
+    expect(await s.acceptLate(late.id, AT)).toMatchObject({ outcome: "accepted" });
+    expect(await s.closeEscalation(e.id, read, { status: "exhausted", nextAt: null })).toBeNull();
+    expect((await s.getEscalation(e.id))!.status).toBe("active");
+    // An end that is not an accept moves nothing on the chain.
+    const plain = await call();
+    const v = (await s.getEscalation(e.id))!.version;
+    await s.endAttempt(plain.id, "no_answer", AT);
+    expect((await s.getEscalation(e.id))!.version).toBe(v);
+  });
 });
 
 describe("the table check", () => {
@@ -189,6 +213,12 @@ describe("the SQL store", () => {
     expect(SQL.endAttempt).toMatch(/outcome = 'in_progress'/);
     expect(SQL.acceptLate).toMatch(/kind = 'call'/);
     expect(SQL.acceptLate).toMatch(/e\.status = 'active'/);
+    for (const name of ["endAttemptAccepted", "acceptLate"] as const) {
+      expect(SQL[name], name).toMatch(/update on_call_escalations e set version = e\.version \+ 1/);
+      expect(SQL[name], name).toMatch(/escalation_id in \(select id from chain\)/);
+    }
+    expect(SQL.endAttemptAccepted).toMatch(/e\.status = 'active'/);
+    expect(SQL.endAttemptAccepted).toMatch(/outcome = 'in_progress'/);
     expect(SQL.acceptLate).toContain(`outcome in (${LATE_ACCEPTABLE_OUTCOMES.map((o) => `'${o}'`).join(", ")})`);
     expect(LATE_ACCEPTABLE_OUTCOMES).not.toContain("taken_elsewhere");
   });
