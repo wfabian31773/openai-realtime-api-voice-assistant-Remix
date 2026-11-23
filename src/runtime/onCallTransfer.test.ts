@@ -26,8 +26,9 @@ import type { WebhookRequest } from "./voiceWebhook";
 import { escalationDetailsMap } from "../services/escalationStore";
 import { readOnCallConfig } from "./onCall/config";
 import { createFakeOnCallStore, type FakeOnCallStore } from "./onCall/store.fake";
-import { provider, syntheticRotation, IE_DIRECTOR } from "./onCall/testRotation";
+import { provider, syntheticRotation, IE_DIRECTOR, FINAL_DIRECTOR } from "./onCall/testRotation";
 import { levelLabel, type RotationData } from "./onCall/rotation";
+import { NO_IDENTITY_NOTE } from "./onCall/postOp";
 import type { InCallTransferResult } from "./onCall/runner";
 
 /**
@@ -593,7 +594,9 @@ describe("an urgent after-hours call with the rotation on", () => {
     await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
     expect(rec.beforeDial).toHaveLength(1);
     const input = rec.beforeDial[0] as { note?: string; escalationDetails?: { reason?: string } };
-    expect(input.note).toBe("[TEST MODE] The on-call rotation is ringing test numbers, not the provider.");
+    // The chain's routing note follows, the same one the provider's text has:
+    // this caller was never confirmed, so a recent surgery was not checked.
+    expect(input.note).toBe(`[TEST MODE] The on-call rotation is ringing test numbers, not the provider. ${NO_IDENTITY_NOTE}`);
     // The patient's details are still in the text, never behind a link.
     expect(input.escalationDetails?.reason).toBe("Sudden loss of vision in the left eye");
     transfer.handleAccept(signed(TRANSFER_ACCEPT_PATH, { CallSid: "CAoffice", Digits: "1" }));
@@ -611,8 +614,33 @@ describe("an urgent after-hours call with the rotation on", () => {
     await vi.waitFor(() => expect(built.texts).toHaveLength(1));
     const input = rec.beforeDial[0] as { note?: string };
     const first = syntheticRotation().providers.find((p) => p.id === 1)!;
-    expect(input.note).toBe(`The on-call rotation is ringing ${levelLabel({ role: "on_call", name: first.fullName })}.`);
+    expect(input.note).toBe(`The on-call rotation is ringing ${levelLabel({ role: "on_call", name: first.fullName })}. ${NO_IDENTITY_NOTE}`);
     expect(input.note).not.toContain("[TEST MODE]");
+    transfer.handleAccept(signed(TRANSFER_ACCEPT_PATH, { CallSid: "CAoffice", Digits: "1" }));
+    await outcome;
+  });
+
+  it("puts the chain's own routing note on that heads-up text too, as on the provider's text", async () => {
+    // Review of #514, round 17: the urgent-number text carried only the skip
+    // note, so "no provider entered, so the chain went to the final director"
+    // (or "surgeon uncertain, sent to on-call") reached the provider and not
+    // the operator.
+    const base = syntheticRotation();
+    const rotation: RotationData = { ...base, schedule: new Map() };
+    const { ops } = fakeOps();
+    const built = buildWiring({ env: { ON_CALL_ROTATION_MODE: "live", ON_CALL_CALLER_ID: ROTATION_CALLER_ID }, rotation });
+    const rec = recordingAlerts();
+    const transfer = transferWith(ops, built.wiring, rec.alerts);
+    urgent();
+    const outcome = transfer.handoffFor("no-ivr", META)();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    await vi.waitFor(() => expect(built.texts).toHaveLength(1));
+    const why = "No on-call provider is entered for this week, so the chain went straight to the final director.";
+    // The provider's text says why it is them; the operator's says the same.
+    expect(built.texts[0].body).toContain(why);
+    const input = rec.beforeDial[0] as { note?: string };
+    const final = base.providers.find((p) => p.id === FINAL_DIRECTOR)!;
+    expect(input.note).toBe(`The on-call rotation is ringing ${levelLabel({ role: "final", name: final.fullName })}. ${why} ${NO_IDENTITY_NOTE}`);
     transfer.handleAccept(signed(TRANSFER_ACCEPT_PATH, { CallSid: "CAoffice", Digits: "1" }));
     await outcome;
   });
@@ -1182,6 +1210,7 @@ describe("live mode: a level with no phone", () => {
     const skipped = base.providers.find((p) => p.id === 1)!;
     expect((rec.beforeDial[0] as { note?: string }).note).toBe(
       `The on-call rotation is ringing ${levelLabel({ role: "region_director", name: director.fullName })}. ` +
+        `${NO_IDENTITY_NOTE} ` +
         `${levelLabel({ role: "on_call", name: skipped.fullName })} has no dialable number on file and was not called.`,
     );
     transfer.handleAccept(signed(TRANSFER_ACCEPT_PATH, { CallSid: "CAoffice", Digits: "1" }));

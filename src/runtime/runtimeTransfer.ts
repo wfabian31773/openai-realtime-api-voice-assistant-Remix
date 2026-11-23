@@ -336,12 +336,15 @@ export function rotationMayTakeTheDial(policy: ReturnType<typeof resolveHandoffD
  * real caller's in test mode included (docs/ON_CALL_ROTATION.md section 5),
  * so it says whose phone is ringing. In test mode that is a test number, never
  * the provider, which the reader needs to know when the caller is real
- * (review of #514).
+ * (review of #514). The chain's own routing note follows it (a post-op call
+ * sent to on-call because the surgeon was uncertain, a week with no provider
+ * entered, a level passed over for having no number), the same note the
+ * provider's text carries (review of #514, round 17).
  */
 export function urgentTextRotationNote(
   plan: ChainPlan,
   mode: string | undefined,
-  skipNote?: string,
+  routingNote?: string,
 ): string | undefined {
   const first = plan.levels[0];
   if (!first) return undefined;
@@ -349,7 +352,7 @@ export function urgentTextRotationNote(
     mode === "test"
       ? "[TEST MODE] The on-call rotation is ringing test numbers, not the provider."
       : `The on-call rotation is ringing ${levelLabel(first)}.`;
-  return skipNote ? `${ringing} ${skipNote}` : ringing;
+  return routingNote ? `${ringing} ${routingNote}` : ringing;
 }
 
 /**
@@ -467,15 +470,12 @@ export async function startOnCallRoute(
     details: storedDetails(input.details),
     levelStartedAt: now(),
     preDialSms: sent,
-    ...(skipNote ? { skipNote } : {}),
   };
 }
 
 interface OnCallRun {
   plan: ChainPlan;
   routing: RoutingFacts;
-  /** The levels the dial passed over for having no number, as a sentence. */
-  skipNote?: string;
   details: StoredDetails | null;
   levelStartedAt: Date;
   preDialSms: Promise<{ ok: boolean; sid: string | null; at: Date }>;
@@ -1028,7 +1028,7 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
           // With the rotation ringing, the dial happens even when the policy
           // had no number of its own (clinical_destination_not_configured).
           if ((policy.allowed && policy.policy !== "pcp") || holder.run) {
-            const note = holder.run ? urgentTextRotationNote(holder.run.plan, onCall?.config.mode, holder.run.skipNote) : undefined;
+            const note = holder.run ? urgentTextRotationNote(holder.run.plan, onCall?.config.mode, holder.run.routing.note) : undefined;
             urgentAlerts.smsBeforeDial({
               callerNumber: metadata.callerPhone,
               escalationDetails: details,

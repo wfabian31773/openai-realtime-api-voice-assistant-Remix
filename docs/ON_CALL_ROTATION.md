@@ -182,7 +182,11 @@ The urgent text to `URGENT_NOTIFICATION_NUMBER`, which every urgent call still
 sends, carries one more line when the rotation took the dial: who it is
 ringing ("The on-call rotation is ringing <name> (this week's on-call
 provider).") in live mode, or, in test mode, "[TEST MODE] The on-call rotation
-is ringing test numbers, not the provider."
+is ringing test numbers, not the provider." The chain's routing note follows,
+the same one at the top of the provider's text: why the person rung is the one
+rung (a week with no provider entered, a cover that is inactive), the post-op
+check (the surgeon route, an uncertain surgeon sent to on-call, or a patient
+not confirmed on the call), and any level passed over for having no number.
 
 The agent and the ticket say the team is being paged only when the chain's
 record confirmed, within 2 seconds of the ring-out, that the chain is open and
