@@ -205,9 +205,11 @@ to call a test caller back. A chain that started live keeps sending it to
 runs, because a real patient is waiting. A chain that started in test mode and
 is still open when the rotation is switched to live rings nobody else, and its
 closing text goes to the first test number its own chain rang, still marked
-`[TEST MODE]`: such a chain only ever holds a test caller, and the person
-watching the test is the one who needs to know it stopped. If that chain
-holds no number at all (the log says so), the text is not sent.
+`[TEST MODE]`. That chain may hold a real caller (test mode covers every urgent
+call on the line, section 5), so the person watching the test is the one told
+it stopped; `URGENT_NOTIFICATION_NUMBER` already had that call's urgent text at
+the start, and the urgent ticket was filed. If that chain holds no number at
+all (the log says so), the text is not sent.
 
 Each of our callback calls rings for 30 seconds (the in-call warm transfer
 rings as it does today). A call whose status never comes back is hung up and
@@ -504,9 +506,18 @@ hears that the urgent call has been closed.
    (and the text says it is not yet marked kept) once its day has passed or
    its start time has; one booked for later today goes to on-call.
    `ON_CALL_POST_OP_REQUIRE_KEPT=1` sends every not-yet-kept surgery to
-   on-call instead.
-2. **The surgeon's region director.** On a post-op call the next level is the
-   surgeon's own region director, not the on-call provider's.
+   on-call instead. The Console cannot tell a recorded no-show from a surgery
+   not yet marked: both read not kept after the day (of surgeries two to six
+   days ago, neither cancelled nor moved: 138 kept, 77 not kept, none blank).
+   So a patient who never came in for their surgery is routed to that surgeon
+   too, with the not-yet-kept note on the text. Reading not kept as a no-show
+   would send about a third of the first week's post-op patients to on-call.
+2. **The surgeon's region director.** On a post-op call the chain is the
+   surgeon, then the surgeon's own region director, then the final director.
+   The week's on-call provider is not rung on that call, because the call goes
+   to the surgeon instead. If you want the on-call provider rung after the
+   surgeon, before the directors, it is one level added to the plan (a
+   provider already in the chain is never rung twice).
 3. **A surgeon who is not in the pool** routes to on-call, and the text says
    so.
 4. **A week nobody is scheduled for** rings only the final director.

@@ -343,7 +343,9 @@ describe("changes after the seed", () => {
     expect(sql).toContain("VALUES ('Kim Ruiz', '1000000012', '+15550100012', NULL,");
     // One row, whatever is already on file: no INSERT ... SELECT ... FROM the table.
     expect(sql).not.toMatch(/^\s*FROM on_call_providers$/m);
-    expect(sql).toMatch(/IF NOT EXISTS \(SELECT 1 FROM on_call_escalation_directors WHERE lower\(region\) = lower\('Orange County'\)\)/);
+    expect(sql).toContain(
+      "IF NOT EXISTS (SELECT 1 FROM on_call_escalation_directors WHERE lower(regexp_replace(btrim(region), '\\s+', ' ', 'g')) = lower('Orange County')) THEN",
+    );
     expect(sql).toMatch(/RAISE EXCEPTION 'region % has no escalation director/);
     expect(sql).toContain("RETURNING id, full_name, region, rotation_order;");
   });
@@ -365,7 +367,9 @@ describe("changes after the seed", () => {
     expect(director).toMatch(/has no escalation director/);
     const fresh = addProviderSql({ name: "Lee Tan", phone: "555-010-0013", region: "High Desert", newRegion: true });
     expect(fresh).not.toMatch(/has no escalation director/);
-    expect(fresh).toContain("COALESCE((SELECT region FROM on_call_escalation_directors WHERE lower(region) = lower('High Desert')), 'High Desert')");
+    expect(fresh).toContain(
+      "COALESCE((SELECT region FROM on_call_escalation_directors WHERE lower(regexp_replace(btrim(region), '\\s+', ' ', 'g')) = lower('High Desert')), 'High Desert')",
+    );
     expect(fresh).toContain("COALESCE(MAX(rotation_order), 0) + 1");
   });
 
@@ -432,7 +436,7 @@ describe("changes after the seed", () => {
   it("sets a region's director to one active provider, and refuses a region not on file", () => {
     const sql = setDirectorSql({ region: " Orange  County ", director: "Dr. Kim Ruiz" });
     expect(sql).toContain("lower('Dr. Kim Ruiz') AND active");
-    expect(sql).toContain("WHERE lower(region) = lower('Orange County')");
+    expect(sql).toContain("WHERE lower(regexp_replace(btrim(region), '\\s+', ' ', 'g')) = lower('Orange County');");
     expect(sql).not.toContain("INSERT INTO on_call_escalation_directors");
     expect(sql).toMatch(/RAISE EXCEPTION 'region % is not on file; check the spelling, or pass --new-region/);
     expect(problemsOf(() => setDirectorSql({ region: "  ", director: "Dr. Kim Ruiz" }))).toEqual(["no region"]);

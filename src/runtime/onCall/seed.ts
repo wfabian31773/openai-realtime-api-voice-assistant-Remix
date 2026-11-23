@@ -159,6 +159,16 @@ function cleanRegion(raw: string): string {
   return raw.trim().replace(/\s+/g, " ");
 }
 
+/**
+ * The SQL test that a stored region is `region`, keyed the way the runtime
+ * keys it (`regionKey`: trimmed, spaces collapsed, case ignored), so a region
+ * entered by hand with a stray space is the same region to the change scripts
+ * as it is to a call (review of #514, round 7).
+ */
+function regionIs(region: string): string {
+  return `lower(regexp_replace(btrim(region), '\\s+', ' ', 'g')) = lower(${lit(cleanRegion(region))})`;
+}
+
 /** The last word of a name with its title and degree dropped: "Dr. Pabalan" -> "pabalan". */
 export function surnameKey(name: string): string | null {
   const words = name
@@ -536,7 +546,7 @@ export function addProviderSql(input: {
   }
   if (problems.length) throw new SeedError(problems);
   const name = lit(input.name.trim().replace(/\s+/g, " "));
-  const known = `(SELECT region FROM on_call_escalation_directors WHERE lower(region) = lower(${lit(region)}))`;
+  const known = `(SELECT region FROM on_call_escalation_directors WHERE ${regionIs(region)})`;
   return [
     `BEGIN;`,
     `DO $oncall$ BEGIN`,
@@ -546,7 +556,7 @@ export function addProviderSql(input: {
     ...(input.newRegion
       ? []
       : [
-          `  IF NOT EXISTS (SELECT 1 FROM on_call_escalation_directors WHERE lower(region) = lower(${lit(region)})) THEN`,
+          `  IF NOT EXISTS (SELECT 1 FROM on_call_escalation_directors WHERE ${regionIs(region)}) THEN`,
           `    RAISE EXCEPTION 'region % has no escalation director; check the spelling, or pass --new-region for a new region', ${lit(region)};`,
           `  END IF;`,
         ]),
@@ -706,7 +716,7 @@ export function setDirectorSql(input: { region: string; director: string; newReg
     `BEGIN;`,
     `DO $oncall$ DECLARE n int; who int; BEGIN`,
     lookupProvider(input.director, "who"),
-    `  UPDATE on_call_escalation_directors SET provider_id = who, updated_at = now() WHERE lower(region) = lower(${lit(region)});`,
+    `  UPDATE on_call_escalation_directors SET provider_id = who, updated_at = now() WHERE ${regionIs(region)};`,
     `  IF NOT FOUND THEN`,
     ...(input.newRegion
       ? [`    INSERT INTO on_call_escalation_directors (region, provider_id) VALUES (${lit(region)}, who);`]
