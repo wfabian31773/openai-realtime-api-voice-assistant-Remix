@@ -28,6 +28,17 @@ expiry and revocation). Missing or invalid credentials return 401 with
 each tool forwards the caller's exact bearer to the REST API, whose existing
 scope, ownership, approval and write gates still apply.
 
+HTTP POST checks `Origin` before parsing or dispatch. Set
+`VOICE_FLEET_MCP_ALLOWED_ORIGINS` to a comma-separated list of exact allowed
+origins (whitespace trimmed), e.g. `https://bot.example,http://localhost:3000`.
+The app's own configured public origin is also allowed, using the existing
+`DOMAIN` / `REPLIT_DOMAINS` / `REPLIT_DEV_DOMAIN` resolution (`DOMAIN` first;
+published hosts preferred in production). Bare domains use HTTPS and only the
+origin part of a configured URL is used. No implicit localhost origin or request
+host/forwarding header is trusted. A present, unlisted `Origin` returns 403 with
+a JSON error and no dispatch; an absent `Origin` is allowed for server-to-server
+clients. This setting applies to hosted HTTP only.
+
 Both transports support `2025-06-18`, `2025-03-26` and `2024-11-05`.
 `initialize` echoes a supported requested version, otherwise selects the latest
 (`2025-06-18`). HTTP accepts an absent `MCP-Protocol-Version` header and returns
@@ -38,6 +49,13 @@ order. Protocol `2025-06-18` removed batching; accepting it remains a lenient
 compatibility extension. Client responses (`result`/`error` without `method`)
 and notifications are ignored; a POST containing only those returns 202
 without a body. Mixed batches answer requests and omit responses/notifications.
+Each message must be an object with `jsonrpc: "2.0"`. Requests require a string
+method and a string or finite number id; notifications have a string method and
+no id. Invalid envelopes, including `{}` and requests with `id: null`, receive
+`-32600 Invalid Request` with `id: null` and trigger no downstream fetches for
+that item. A single invalid message or empty batch returns HTTP 400; invalid
+batch members produce error entries in order with valid replies. These boundary
+checks do not change stdio behavior.
 There are no MCP
 sessions or SSE streams. Invalid JSON returns 400 with `-32700`; the body cap
 is 1 MB (413). Authenticated GET/DELETE return 405 with `Allow: POST`.

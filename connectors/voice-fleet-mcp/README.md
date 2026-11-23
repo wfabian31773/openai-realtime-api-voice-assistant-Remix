@@ -33,8 +33,24 @@ Both transports support protocol versions `2025-06-18`, `2025-03-26` and
 an absent or unsupported version selects `2025-06-18`. HTTP accepts an absent
 `MCP-Protocol-Version` header; an unsupported header returns 400 with a JSON error.
 
+HTTP POST validates `Origin` before body parsing or dispatch. If present, it must
+exactly match an origin in `VOICE_FLEET_MCP_ALLOWED_ORIGINS` (comma-separated,
+whitespace trimmed, e.g. `https://bot.example,http://localhost:3000`) or the app's
+own configured public origin. That origin uses the existing app domain resolution:
+`DOMAIN` takes precedence, with `REPLIT_DOMAINS` / `REPLIT_DEV_DOMAIN` fallbacks
+(published hosts preferred in production). Bare domains use HTTPS; configured URL
+paths, queries and fragments are removed. No implicit localhost origin is added.
+Unlisted origins return 403 with a JSON error and no dispatch. An absent `Origin`
+is allowed for server-to-server clients. Host/forwarding headers never grant access.
+
 HTTP uses POST with plain JSON replies. Although `2025-06-18` removed JSON-RPC
 batching, input batches remain accepted leniently and replies retain input order.
+Each message must be an object with `jsonrpc: "2.0"`. Requests require a string
+method and a string or finite number id; notifications have a string method and
+no id. Invalid envelopes (including `{}` and requests with `id: null`) return
+`-32600 Invalid Request` with `id: null`, without downstream fetches for that item.
+A single invalid message or empty batch returns HTTP 400; invalid batch members
+produce error entries alongside valid replies.
 Client responses (`result`/`error` without `method`) and notifications produce
 no replies; a POST containing only those returns 202 with no body. Mixed batches
 answer requests and omit responses/notifications. It keeps no MCP session and
@@ -131,6 +147,7 @@ From the repo root, without credentials or external network:
 
 ```sh
 npx tsc -p . --noEmit
+npx vitest run src/plugin/mcpCore.test.ts src/plugin/mcpRoute.security.test.ts connectors/voice-fleet-mcp/offline.test.ts
 npx vitest run src/plugin connectors
 node connectors/voice-fleet-mcp/test-offline.mjs
 node connectors/voice-fleet-mcp/test-operator-offline.mjs
@@ -140,7 +157,9 @@ node connectors/voice-fleet-mcp/test-operator-prepare-offline.mjs
 The offline `.mjs` scripts mock fetch directly and are also run by Vitest.
 `tools-list-b7f9b822.json` records the original connector's full tool catalog;
 the core tests compare every name, description and input schema exactly.
-HTTP tests use a local server and an in-memory token store; no DB is loaded.
+HTTP security tests run the mounted middleware and raw parser in process without
+sockets; the remaining HTTP integration tests use a local server. Both use an
+in-memory token store; no DB is loaded.
 All phone fixtures are synthetic 555 numbers.
 
 Manual scripts, excluded from automated runs:
