@@ -45,14 +45,24 @@ is allowed for server-to-server clients. Host/forwarding headers never grant acc
 
 HTTP uses POST with plain JSON replies. Although `2025-06-18` removed JSON-RPC
 batching, input batches remain accepted leniently and replies retain input order.
+Each HTTP POST may contain at most **one `tools/call`**: the first valid
+`tools/call` request runs; each later one returns `-32600` with the exact message
+`Send one tools/call per request` and its own id, without execution. This limit
+also applies if the first call fails. Send subsequent tool calls in separate
+POSTs. Other methods (`initialize`, `ping`, `tools/list`) may share a batch.
+This avoids accumulating 30-second tool calls past the gateway's roughly
+60-second timeout, losing all replies and risking duplicate writes on retry.
 Each message must be an object with `jsonrpc: "2.0"`. Requests require a string
-method and a string or finite number id; notifications have a string method and
-no id. Invalid envelopes (including `{}` and requests with `id: null`) return
+method and a string or finite number id; only `notifications/*` methods may omit
+the id. Id-less methods such as `tools/call` return `-32600` without dispatch.
+Invalid envelopes (including `{}` and requests with `id: null`) return
 `-32600 Invalid Request` with `id: null`, without downstream fetches for that item.
 A single invalid message or empty batch returns HTTP 400; invalid batch members
 produce error entries alongside valid replies.
-Client responses (`result`/`error` without `method`) and notifications produce
-no replies; a POST containing only those returns 202 with no body. Mixed batches
+Client responses must omit `method`, have a string or finite number id and
+contain exactly one of `result` or `error`; otherwise they return `-32600` with
+`id: null`. Valid client responses and notifications produce no replies; a POST
+containing only those returns 202 with no body. Mixed batches
 answer requests and omit responses/notifications. It keeps no MCP session and
 opens no SSE stream. Invalid JSON returns 400 / `-32700`, bodies
 over 1 MB return 413, and authenticated GET/DELETE return 405 with `Allow: POST`.

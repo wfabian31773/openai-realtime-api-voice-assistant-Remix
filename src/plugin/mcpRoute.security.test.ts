@@ -125,16 +125,91 @@ describe("hosted MCP HTTP security boundary (socket-free)", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it("ignores responses and notifications without downstream fetches", async () => {
+  it.each(["tools/call", "initialize", "ping", "tools/list", "unknown"])("rejects id-less %s without downstream fetches", async (method) => {
+    const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Unexpected downstream fetch"));
+    const { post } = boot();
+    const payload = { jsonrpc: "2.0", method, params: tool.params };
+    expect(await post(payload)).toMatchObject({ status: 400, body: invalidRequest });
+    expect(await post([payload])).toMatchObject({ status: 200, body: [invalidRequest] });
+    expect(await post([payload, { jsonrpc: "2.0", id: "ping", method: "ping" }]))
+      .toMatchObject({ status: 200, body: [invalidRequest, { id: "ping", result: {} }] });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed client responses without downstream fetches", async () => {
+    const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Unexpected downstream fetch"));
+    const { post } = boot();
+    const invalid = [
+      { jsonrpc: "2.0", id: 0 },
+      { jsonrpc: "2.0", id: "both", result: null, error: null },
+      { jsonrpc: "2.0", id: 0, result: {}, error: { code: -32603, message: "Synthetic error" } },
+      ...[undefined, null, true, false, {}, [], Infinity].flatMap((id) => [
+        { jsonrpc: "2.0", id, result: null },
+        { jsonrpc: "2.0", id, error: { code: -32603, message: "Synthetic error" } },
+      ]),
+    ];
+    for (const payload of invalid) {
+      expect(await post(payload)).toMatchObject({ status: 400, body: invalidRequest });
+      expect(await post([payload])).toMatchObject({ status: 200, body: [invalidRequest] });
+    }
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("ignores valid responses and notifications without downstream fetches", async () => {
     const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Unexpected downstream fetch"));
     const { post } = boot();
     const ignored = [
-      { ...tool, id: undefined },
       { jsonrpc: "2.0", method: "notifications/initialized" },
-      { jsonrpc: "2.0", id: 1, result: {} },
-      { jsonrpc: "2.0", id: null, error: { code: -32603, message: "Synthetic error" } },
+      { jsonrpc: "2.0", method: "notifications/custom", params: tool.params },
+      ...["", "response", 0, -1, 1.5].flatMap((id) => [
+        { jsonrpc: "2.0", id, result: null },
+        { jsonrpc: "2.0", id, error: { code: -32603, message: "Synthetic error" } },
+      ]),
     ];
     for (const payload of [...ignored, ignored]) expect(await post(payload)).toMatchObject({ status: 202, body: undefined });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it.each([undefined, "2025-06-18", "2025-03-26", "2024-11-05"])("executes only the first tools/call per POST with protocol %s, retaining other methods and reply order", async (version) => {
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => Response.json({ ok: true }));
+    const { post } = boot();
+    const headers: Record<string, string> = version === undefined ? {} : { "MCP-Protocol-Version": version };
+    const write = { ...tool, id: "first", params: { name: "voice_fleet_live_call_end", arguments: { sessionId: "synthetic" } } };
+    const response = await post([
+      { jsonrpc: "2.0", id: "init", method: "initialize" },
+      { jsonrpc: "2.0", method: "notifications/initialized" },
+      write,
+      { jsonrpc: "2.0", id: "client-response", result: null },
+      { jsonrpc: "2.0", id: "ping", method: "ping" },
+      { ...tool, id: 0 },
+      { jsonrpc: "2.0", id: "list", method: "tools/list" },
+      { ...write, id: "" },
+    ], headers);
+    expect(response.status).toBe(200);
+    expect((response.body as Array<{ id: unknown }>).map((reply) => reply.id)).toEqual(["init", "first", "ping", 0, "list", ""]);
+    expect(response.body).toMatchObject([
+      { result: { serverInfo: { name: "voice-fleet-mcp" } } },
+      { result: { isError: false } },
+      { result: {} },
+      { id: 0, error: { code: -32600, message: "Send one tools/call per request" } },
+      { result: { tools: expect.any(Array) } },
+      { id: "", error: { code: -32600, message: "Send one tools/call per request" } },
+    ]);
+    expect(fetch).toHaveBeenCalledExactlyOnceWith("http://127.0.0.1:5000/api/plugin/v1/live_calls/synthetic/end", expect.objectContaining({ method: "POST" }));
+
+    // The limit belongs to this POST, not the caller or a persistent session.
+    expect(await post(tool, headers)).toMatchObject({ status: 200, body: { result: { isError: false } } });
+    expect(fetch).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not execute later tools/call items even when the first fails local validation", async () => {
+    const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Unexpected downstream fetch"));
+    const { post } = boot();
+    expect(await post([{ ...tool, params: { name: "unknown" } }, { ...tool, id: "second" }]))
+      .toMatchObject({ status: 200, body: [
+        { id: 1, error: { code: -32602 } },
+        { id: "second", error: { code: -32600, message: "Send one tools/call per request" } },
+      ] });
     expect(fetch).not.toHaveBeenCalled();
   });
 
@@ -146,8 +221,11 @@ describe("hosted MCP HTTP security boundary (socket-free)", () => {
       { jsonrpc: "2.0", id: 5, result: {} }, { ...tool, id: 0 }, {},
     ]);
     expect(response.status).toBe(200);
-    expect((response.body as Array<{ id: unknown }>).map((reply) => reply.id)).toEqual([null, "", 0, null]);
-    expect(response.body).toMatchObject([invalidRequest, { result: { isError: false } }, { result: { isError: false } }, invalidRequest]);
-    expect(fetch).toHaveBeenCalledTimes(2);
+    expect((response.body as Array<{ id: unknown }>).map((reply) => reply.id)).toEqual([null, "", null, 0, null]);
+    expect(response.body).toMatchObject([
+      invalidRequest, { result: { isError: false } }, invalidRequest,
+      { id: 0, error: { code: -32600, message: "Send one tools/call per request" } }, invalidRequest,
+    ]);
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 });

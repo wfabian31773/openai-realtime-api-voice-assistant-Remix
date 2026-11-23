@@ -28,17 +28,17 @@ function envelopeKind(message: unknown): "request" | "ignored" | "invalid" {
   const item = message as Record<string, unknown>;
   if (item.jsonrpc !== "2.0") return "invalid";
   const owns = (key: string) => Object.prototype.hasOwnProperty.call(item, key);
-  if (!owns("method")) return owns("result") || owns("error") ? "ignored" : "invalid";
+  const validId = typeof item.id === "string" || (typeof item.id === "number" && Number.isFinite(item.id));
+  if (!owns("method")) return validId && owns("result") !== owns("error") ? "ignored" : "invalid";
   if (typeof item.method !== "string") return "invalid";
-  if (!owns("id")) return "ignored";
-  return typeof item.id === "string" || (typeof item.id === "number" && Number.isFinite(item.id))
-    ? "request" : "invalid";
+  if (!owns("id")) return item.method.startsWith("notifications/") ? "ignored" : "invalid";
+  return validId ? "request" : "invalid";
 }
 
 export function mountVoiceFleetMcp(app: Express, deps: McpRouteDeps): void {
   const env = deps.env ?? process.env;
   const parseBody = express.raw({ type: () => true, limit: "1mb", inflate: false });
-  const errorReply = (code: number, message: string) => ({ jsonrpc: "2.0", id: null, error: { code, message } });
+  const errorReply = (code: number, message: string, id: string | number | null = null) => ({ jsonrpc: "2.0", id, error: { code, message } });
   const allowedOrigins = new Set((env.VOICE_FLEET_MCP_ALLOWED_ORIGINS || "").split(",").map((origin) => origin.trim()).filter(Boolean));
   const replitDomains = env.REPLIT_DOMAINS || "";
   const publicDomain = resolveAppDomain({
@@ -107,8 +107,9 @@ export function mountVoiceFleetMcp(app: Express, deps: McpRouteDeps): void {
         return;
       }
       // 2025-06-18 removed batching; accept it leniently for older clients.
-      // Sequential dispatch preserves both response order and prepare/commit ordering.
+      // One tool call keeps sequential batches within the proxy's ~60 s deadline.
       const replies = [];
+      let toolCallSeen = false;
       for (const item of message) {
         const kind = envelopeKind(item);
         if (kind === "invalid") {
@@ -116,6 +117,14 @@ export function mountVoiceFleetMcp(app: Express, deps: McpRouteDeps): void {
           continue;
         }
         if (kind === "ignored") continue;
+        const request = item as { method: string; id: string | number };
+        if (request.method === "tools/call") {
+          if (toolCallSeen) {
+            replies.push(errorReply(-32600, "Send one tools/call per request", request.id));
+            continue;
+          }
+          toolCallSeen = true;
+        }
         const reply = await core.handleMessage(item);
         if (reply !== null) replies.push(reply);
       }

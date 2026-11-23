@@ -106,7 +106,7 @@ describe("hosted voice fleet MCP", () => {
   it("returns an empty 202 for responses, notifications, and batches containing only those", async () => {
     const called = vi.fn();
     const { post } = await boot((app) => app.get("/api/plugin/v1/health", called));
-    const notification = { jsonrpc: "2.0", method: "tools/call", params: { name: "voice_fleet_health" } };
+    const notification = { jsonrpc: "2.0", method: "notifications/initialized" };
     const result = { jsonrpc: "2.0", id: 1, result: null };
     const error = { jsonrpc: "2.0", id: 2, error: { code: -32603, message: "Synthetic error" } };
     for (const payload of [notification, result, error, [result, error], [notification, { jsonrpc: "2.0", method: "notifications/initialized" }], [result, notification, error]]) {
