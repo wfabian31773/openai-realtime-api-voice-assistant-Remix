@@ -4,7 +4,7 @@
  * words only.
  */
 import { describe, it, expect } from 'vitest';
-import { callbackNeeded, callerAskedToBeContacted } from './callbackRequested';
+import { callbackNeeded, callerAskedToBeContacted, callerDeclinedContact } from './callbackRequested';
 
 const WORDS_70202 = 'call, please. could they call me when they get into the office?';
 
@@ -61,6 +61,33 @@ describe('callerAskedToBeContacted', () => {
   });
 });
 
+describe('callerDeclinedContact', () => {
+  it('reads a decline in English and Spanish', () => {
+    for (const line of [
+      "You don't need to call back.",
+      'You don’t have to call me.',
+      'Um, I\'ll call back.',
+      'I will call you tomorrow.',
+      "Don't call me.",
+      'Please do not text me.',
+      'There is no need to email me.',
+      'No callback, thanks.',
+      'No me llamen.',
+      'No es necesario que me llamen.',
+      'Yo les llamo mañana.',
+      'Vuelvo a llamar después.',
+    ]) {
+      expect(callerDeclinedContact(line), line).toBe(true);
+    }
+  });
+
+  it('a method answer, an ask or a name is not a decline', () => {
+    for (const line of ['Text.', 'Phone.', 'Email.', 'Call, please.', 'Text is fine.', 'You can call me Mary.', "I'll call my pharmacy.", undefined]) {
+      expect(callerDeclinedContact(line), String(line)).toBe(false);
+    }
+  });
+});
+
 describe('callbackNeeded', () => {
   it("70202: the model's FALSE never outranks a caller who asked", () => {
     expect(
@@ -83,27 +110,44 @@ describe('callbackNeeded', () => {
     });
   });
 
-  it("v269: a chosen contact method does not outrank the model's explicit FALSE", () => {
+  it("v269: the model's FALSE outranks a chosen contact method only when the caller declined", () => {
     // The prompt asks the method question on every call, so the field is
     // filled when the caller declined ("You don't need to call back.").
-    for (const preferredContact of ['phone', 'text', 'email']) {
-      expect(callbackNeeded({ modelSays: false, categoryDefault: true, preferredContact }), preferredContact).toEqual({
-        required: false,
-        overridden: false,
-      });
+    for (const callerWords of ["You don't need to call back.", "Um, I'll call back.", 'No me llamen, gracias.']) {
+      expect(
+        callbackNeeded({ modelSays: false, categoryDefault: true, preferredContact: 'phone', callerWords }),
+        callerWords,
+      ).toEqual({ required: false, overridden: false });
     }
-    expect(
-      callbackNeeded({
-        modelSays: false,
-        categoryDefault: true,
-        preferredContact: 'phone',
-        callerWords: "You don't need to call back.",
-      }).required,
-    ).toBe(false);
-    expect(
-      callbackNeeded({ modelSays: false, categoryDefault: true, preferredContact: 'phone', callerWords: "Um, I'll call back." })
-        .required,
-    ).toBe(false);
+  });
+
+  it('a decline never turns a callback off by itself: it only lets the model\'s FALSE stand', () => {
+    for (const modelSays of [undefined, true] as const) {
+      expect(
+        callbackNeeded({
+          modelSays,
+          categoryDefault: true,
+          preferredContact: 'phone',
+          callerWords: "You don't need to call back.",
+        }).required,
+        String(modelSays),
+      ).toBe(true);
+    }
+  });
+
+  it("Codex P1 on #517: a bare method answer is a callback even when the model sent FALSE", () => {
+    for (const [preferredContact, callerWords] of [
+      ['text', 'Text.'],
+      ['phone', 'Phone.'],
+      ['email', 'Email.'],
+      ['text', 'Text is fine.'],
+      ['phone', undefined],
+    ] as const) {
+      expect(
+        callbackNeeded({ modelSays: false, categoryDefault: true, preferredContact, callerWords }),
+        String(callerWords),
+      ).toEqual({ required: true, overridden: true });
+    }
   });
 
   it("v269: a spoken ask still outranks the model's FALSE beside a chosen method", () => {

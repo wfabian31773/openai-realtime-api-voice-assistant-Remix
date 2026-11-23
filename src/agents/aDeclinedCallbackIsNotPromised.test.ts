@@ -228,4 +228,28 @@ describe('a caller who wants a follow-up still gets one (controls)', () => {
     expect(result).toMatchObject({ success: true, ticketCreated: true, callbackRequired: true });
     expect(String(result.message)).toMatch(/follow up by text/i);
   });
+  // Codex P1 on #517: a bare method answer to the method question is the
+  // caller choosing a follow-up, so the model's FALSE beside it does not stand.
+  for (const c of [
+    { sid: 'CA00000000000000000000000005170001', caller: 'Text.', contact: 'text', said: /follow up by text/i },
+    { sid: 'CA00000000000000000000000005170002', caller: 'Phone.', contact: 'phone', said: /receive a callback/i },
+    { sid: 'CA00000000000000000000000005170003', caller: 'Email.', contact: 'email', said: /follow up by email/i },
+  ] as const) {
+    it(`"${c.caller}" beside the model's FALSE is a follow-up by ${c.contact}`, async () => {
+      const { result, payload } = await file({
+        sid: c.sid,
+        caller: c.caller,
+        args: {
+          request_category: 'cancel_appointment',
+          request_summary: 'Wants to cancel an appointment.',
+          preferred_contact: c.contact,
+          ...(c.contact === 'email' ? { email: 'testa.patient@example.com' } : {}),
+          requires_callback: false,
+        },
+      });
+      expect(result).toMatchObject({ success: true, ticketCreated: true, callbackRequired: true });
+      expect(String(result.message)).toMatch(c.said);
+      expect(String(payload!.reasonForCalling)).not.toContain('[NO CALLBACK NEEDED]');
+    });
+  }
 });

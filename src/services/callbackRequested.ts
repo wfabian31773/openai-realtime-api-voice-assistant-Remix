@@ -27,9 +27,12 @@
  * which the spoken ask below still catches.
  *
  * So, in order: a caller who ASKED out loud is a callback, whatever the model
- * sent (70202); otherwise the model's explicit FALSE stands; otherwise a
- * chosen contact method is a callback; otherwise the model's answer, else the
- * category default.
+ * sent (70202); otherwise the model's explicit FALSE stands when the caller
+ * DECLINED in their own words ("You don't need to call back.", "I'll call
+ * back."); otherwise a chosen contact method is a callback, so a bare "Text."
+ * in answer to the method question still is one whatever the model sent
+ * (Codex P1 on #517); otherwise the model's answer, else the category
+ * default.
  *
  * Reads the caller's own words only (`callerSaid`, the ledger both pipelines
  * feed). NOT `metadata.getTranscript`: the runtime supplies none, and the
@@ -76,12 +79,40 @@ export function callerAskedToBeContacted(callerWords: string | undefined): boole
 }
 
 /**
+ * A decline in the caller's own words, in English or Spanish: "you don't need
+ * to call back", "don't call me", "no need to text", "I'll call back", "no
+ * callback", "no me llamen", "yo les llamo". It only lets the model's own
+ * `requires_callback: false` stand over a chosen contact method; it never
+ * turns a callback off by itself. Deliberately literal: a miss leaves the
+ * chosen method a callback, the direction a request must err in.
+ */
+const DECLINED_CONTACT = new RegExp(
+  [
+    String.raw`\b(?:don'?t|do not|never)\s+(?:call|text|email|contact)\b`,
+    String.raw`\b(?:(?:don'?t|do not) (?:need|have) to|no need to|no reason to|not necessary to)\s+(?:call|text|email|contact)\b`,
+    String.raw`\bi(?:'ll| will) (?:just |try to |try and )?call (?:you(?: guys| all)?(?: back)?|back|again|later|tomorrow|in the morning|myself)\b`,
+    String.raw`\bno (?:callback|call back|call-back|calls)\b`,
+    String.raw`\bno (?:me )?(?:llamen|llame|llames)\b`,
+    String.raw`\bno (?:es necesario|hace falta) que (?:me )?(?:llamen|llame)\b`,
+    String.raw`\byo (?:los |les |lo |le |la )?(?:llamo|vuelvo a llamar)\b`,
+    String.raw`\b(?:vuelvo a llamar|llamo (?:m[aá]s tarde|despu[eé]s|ma[nñ]ana|luego|otro d[ií]a))`,
+  ].join('|'),
+  'i',
+);
+
+export function callerDeclinedContact(callerWords: string | undefined): boolean {
+  if (!callerWords) return false;
+  return DECLINED_CONTACT.test(callerWords.replace(/[’‘]/g, "'"));
+}
+
+/**
  * Whether the ticket needs a callback, decided from the caller rather than
  * from the model alone.
  *
  * - The caller asked out loud to be contacted: TRUE.
- * - Otherwise the model's explicit FALSE: FALSE. A `preferred_contact` the
- *   prompt asks on every call is not the caller asking (v269).
+ * - Otherwise the model's explicit FALSE, when the caller declined in their
+ *   own words: FALSE. A `preferred_contact` the prompt asks on every call is
+ *   not the caller asking (v269), and a bare method answer is not a decline.
  * - Otherwise a chosen contact method: TRUE.
  * - Otherwise the model's explicit answer, else the category default.
  */
@@ -101,7 +132,7 @@ export function callbackNeeded(input: {
 }): { required: boolean; overridden: boolean } {
   const fromModel = input.modelSays !== undefined ? input.modelSays : input.categoryDefault;
   if (callerAskedToBeContacted(input.callerWords)) return { required: true, overridden: fromModel === false };
-  if (input.modelSays === false) return { required: false, overridden: false };
+  if (input.modelSays === false && callerDeclinedContact(input.callerWords)) return { required: false, overridden: false };
   const choseAMethod = Boolean(input.preferredContact && input.preferredContact.trim()) && input.fullyAnswered !== true;
   if (choseAMethod) return { required: true, overridden: fromModel === false };
   return { required: fromModel, overridden: false };
