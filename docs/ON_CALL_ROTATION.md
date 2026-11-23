@@ -34,6 +34,9 @@ triggers, the triage flow and the gate are unchanged.
    (two surgeons on the latest surgery date, a surgeon not in the provider
    pool or marked inactive, a lookup that fails or runs past 1.5 seconds, or
    no confirmed identity), the call goes to on-call and the text says why.
+   One surgeon is one surgeon whether a Console row carries their NPI or
+   only their name: a row the pool matches is keyed on the pool's provider,
+   and two rows the pool does not know are told apart by NPI, then by name.
    The whole routing decision (the rotation read and the Console lookup
    together) has one 2.5-second deadline, so a slow read cannot hold the
    caller longer than that; the Console gets whatever is left of it, never
@@ -54,6 +57,9 @@ triggers, the triage flow and the gate are unchanged.
    - f. Then Dr. Logan, with the same cadence. San Diego and Coachella Valley
      go straight from the provider to Dr. Logan, because he is their
      director.
+   - A director marked inactive is never rung: the level is left out of the
+     chain and the plan says why (`region_director_inactive`,
+     `final_director_inactive`).
 5. **Every attempt is logged** in `on_call_attempts`: who, when, answered or
    not, the text sent, the level, and the caller's CallSid as the
    conversation ID.
@@ -123,8 +129,11 @@ When nobody takes the patient, the urgent notification number
 what happened, from today's number (`TWILIO_PHONE_NUMBER`):
 
 - "NOBODY TOOK THIS URGENT CALL" when every level was tried;
-- "THE ON-CALL ESCALATION STOPPED" when an escalation came due more than two
-  hours after it opened (a restart or an outage held it); nobody else is rung;
+- "THE ON-CALL ESCALATION STOPPED" when the chain ended before it rang a
+  level it had planned, and nobody else is rung: it came due more than two
+  hours after it opened (a restart or an outage held it), its next level
+  could not be read, or the rotation was switched to test while it ran and
+  the next level is not a test number;
 - "THE ON-CALL ESCALATION COULD NOT START" when the in-call transfer was not
   taken and the chain's record could not be written.
 
@@ -132,7 +141,10 @@ For a chain that started in test mode, that text goes to the first test number
 instead and starts with `[TEST MODE]`, so a test chain never asks a real person
 to call a test caller back. A chain that started live keeps sending it to
 `URGENT_NOTIFICATION_NUMBER`, even if the rotation is switched to test while it
-runs, because a real patient is waiting.
+runs, because a real patient is waiting. A chain that started in test mode and
+is still open when the rotation is switched to live rings nobody else, and its
+closing text is not sent (the log says so), because the test numbers are gone
+with test mode; such a chain only ever holds a test caller.
 
 Each of our callback calls rings for 30 seconds (the in-call warm transfer
 rings as it does today). A call whose status never comes back is hung up and
