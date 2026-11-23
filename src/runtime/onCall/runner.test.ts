@@ -940,6 +940,19 @@ describe("a level that is not in the plan", () => {
     expect(h.urgent[0]).toContain(DETAILS.reason);
     expect(h.urgentModes).toEqual(["live"]);
   });
+
+  it("marks a test chain's stop as a test and sends it the test way", async () => {
+    const h = harness({ config: TEST });
+    const esc = await h.runner.afterInCallTransfer(inCall(syntheticTestPlan(TEST), "no_answer", { mode: "test" }));
+    h.store.escalations.get(esc!.id)!.levelIndex = 9;
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    expect(h.calls).toHaveLength(0);
+    expect(h.escalation()).toMatchObject({ status: "failed", details: null });
+    expect(h.urgent).toHaveLength(1);
+    expect(h.urgent[0]).toContain("[TEST MODE] THE ON-CALL ESCALATION STOPPED — its next level could not be read");
+    expect(h.urgentModes).toEqual(["test"]);
+  });
 });
 
 describe("the notes on the texts", () => {
