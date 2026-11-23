@@ -237,6 +237,22 @@ describe("running", () => {
     expect(lines.some((l) => /'nobody took it' text was not sent/.test(l))).toBe(true);
   });
 
+  it("sends the 'nobody took it' text to an urgent number written with punctuation, as E.164", async () => {
+    const { w, tw, store } = running({ URGENT_NOTIFICATION_NUMBER: " (555) 000-7777 " });
+    store.failWrites = true;
+    await w.runner!.afterInCallTransfer(noAnswer());
+    expect(tw.texts.filter((t) => t.to === "+15550007777")).toHaveLength(1);
+    expect(tw.texts.some((t) => t.to.includes("("))).toBe(false);
+  });
+
+  it("says the urgent number is not a phone number, and sends nothing, when it is not one", async () => {
+    const { w, tw, store, lines } = running({ URGENT_NOTIFICATION_NUMBER: "on-call desk" });
+    store.failWrites = true;
+    await w.runner!.afterInCallTransfer(noAnswer());
+    expect(tw.texts).toHaveLength(0);
+    expect(lines.some((l) => /URGENT_NOTIFICATION_NUMBER is not a phone number/.test(l))).toBe(true);
+  });
+
   it("sends the 'nobody took it' text from the chain's caller ID even when TWILIO_PHONE_NUMBER is not set", async () => {
     const { w, tw, store, lines } = running({ TWILIO_PHONE_NUMBER: "" });
     store.failWrites = true;

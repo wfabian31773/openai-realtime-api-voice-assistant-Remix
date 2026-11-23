@@ -6,6 +6,7 @@ import {
   RETRY_GAP_MS,
   RING_GUARD_MS,
   STALE_ESCALATION_MS,
+  TICK_BUDGET_MS,
   attemptNote,
   createOnCallRunner,
   exhaustedNote,
@@ -1235,6 +1236,60 @@ describe("one row that never answers holds no other row (review, 2026-11-23)", (
     const lines = h.log.mock.calls.map(([l]) => String(l));
     expect(lines.some((l) => l.includes(`${a!.callSid}: step failed: store write refused`))).toBe(true);
     expect(lines.some((l) => l.includes("tick failed"))).toBe(false);
+  });
+
+  it("gives up waiting on a tick before its rows' lease runs out", () => {
+    expect(TICK_BUDGET_MS).toBeLessThan(CLAIM_LEASE_MS);
+    expect(CLAIM_LEASE_MS - TICK_BUDGET_MS).toBeGreaterThanOrEqual(10_000);
+  });
+
+  it("does not call a level the chain has left while that level's text was being sent", async () => {
+    let release: (v: { sid: string }) => void = () => {};
+    let held = true;
+    const texts: string[] = [];
+    const sendSms = vi.fn(async (m: { to: string; body: string }) => {
+      texts.push(m.to);
+      if (!held) return { sid: `SM${texts.length}` };
+      return new Promise<{ sid: string }>((res) => {
+        release = res;
+      });
+    });
+    const h = harness({ sendSms, tickBudgetMs: 30 });
+    const plan = wedPlan();
+    const esc = await h.runner.afterInCallTransfer(inCall(plan, "no_answer"));
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    // Level 0's second call: the text hangs, so the call is not placed yet.
+    expect(texts).toEqual([plan.levels[0].phone]);
+    expect(h.calls).toHaveLength(0);
+    // The ringing guard passes and the chain moves on to the director.
+    held = false;
+    h.advance(RING_GUARD_MS + 1_000);
+    await h.runner.tick();
+    const moved = h.escalation();
+    expect(moved.levelIndex).toBe(1);
+    // The hung text now answers: level 0 must not be called.
+    release({ sid: "SMlate" });
+    await new Promise((r) => setTimeout(r, 0));
+    await new Promise((r) => setTimeout(r, 0));
+    expect(h.calls.filter((c) => c.to === plan.levels[0].phone)).toHaveLength(0);
+    const stale = [...h.store.attempts.values()].filter(
+      (a) => a.kind === "call" && a.levelIndex === 0 && a.attemptNo === 2,
+    );
+    expect(stale.every((a) => a.outcome === "failed" && a.providerCallSid == null)).toBe(true);
+    const lines = h.log.mock.calls.map(([l]) => String(l));
+    expect(lines.some((l) => l.includes("chain moved on while level 0's text was being sent"))).toBe(true);
+  });
+
+  it("still places the call when nothing touched the row while its text was sent", async () => {
+    const h = harness();
+    const plan = wedPlan();
+    const esc = await h.runner.afterInCallTransfer(inCall(plan, "no_answer"));
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    expect(h.calls.map((c) => c.to)).toEqual([plan.levels[0].phone]);
+    const lines = h.log.mock.calls.map(([l]) => String(l));
+    expect(lines.some((l) => l.includes("chain moved on"))).toBe(false);
   });
 
   it("does not ring a row twice when its lease runs out under a step still in flight", async () => {

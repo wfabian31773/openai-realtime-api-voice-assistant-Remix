@@ -44,7 +44,8 @@ export interface OnCallConfig {
 
 type Env = Record<string, string | undefined>;
 
-function e164(raw: string | undefined): string | null {
+/** A number as E.164 (+ and 10 to 15 digits), or null. */
+export function e164(raw: string | undefined): string | null {
   const v = toE164(raw);
   if (!v) return null;
   return /^\+\d{10,15}$/.test(v) ? v : null;

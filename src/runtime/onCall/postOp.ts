@@ -114,10 +114,16 @@ export function windowStart(today: string): string {
 
 const TITLE = /^(dr|doctor)\.?\s+/i;
 
+const DEGREE = /^(md|do|od|mmd)$/;
+
 /**
  * "Dr. David M. Choi, MD" and "David Choi, M.D." are the same first and last
  * name. Drops a title, anything after the first comma (the degree), single
  * letters (initials) and punctuation; keeps the first and last word.
+ *
+ * A degree written with no comma ("Jane Smith DO") is dropped only from the
+ * end, and only while more than a first and last name remain: Do and Od are
+ * surnames too, and "Tuan Do" must stay "tuan do" (review of #514, round 4).
  */
 export function nameKeyForMatch(name: string | null | undefined): string | null {
   if (!name) return null;
@@ -128,7 +134,8 @@ export function nameKeyForMatch(name: string | null | undefined): string | null 
     .toLowerCase()
     .replace(/[^a-z\s-]/g, " ")
     .split(/\s+/)
-    .filter((w) => w.length > 1 && !/^(md|do|od|mmd)$/.test(w));
+    .filter((w) => w.length > 1);
+  while (words.length > 2 && DEGREE.test(words[words.length - 1])) words.pop();
   if (words.length < 2) return null;
   return `${words[0]} ${words[words.length - 1]}`;
 }

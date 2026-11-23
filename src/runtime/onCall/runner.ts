@@ -57,10 +57,16 @@ export const CLAIM_LIMIT = 10;
  * A tick stops waiting for its rows after this long, so one send that never
  * answers (the Hub pool has no statement timeout) cannot hold every later tick
  * back. The row keeps going on its own: every send is made after the
- * version-checked "ringing" write, and a row claimed again after its lease has
- * a new version, so a late step lands nothing over the next one.
+ * version-checked "ringing" write, a row claimed again after its lease has a
+ * new version, so a late step lands nothing over the next one, and a step
+ * re-reads its row before it places a call (ring()).
+ *
+ * Shorter than the lease, so the tick that runs after a slow one finds the
+ * slow one's rows still leased for the margin, and does not claim a row the
+ * slow tick is still on in the ordinary case (review of #514, round 4: the two
+ * were equal, so the lease ran out the moment the next tick could start).
  */
-export const TICK_BUDGET_MS = CLAIM_LEASE_MS;
+export const TICK_BUDGET_MS = CLAIM_LEASE_MS - 15_000;
 /** How long the provider's phone rings before Twilio gives up. */
 export const PROVIDER_RING_SECONDS = 30;
 /** The provider's call can never run longer than this. */
@@ -451,6 +457,20 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
     });
 
     const call = await store.logAttempt({ ...base, kind: "call", dialedTo: level.phone });
+    // The text and the two writes above can each take a while (Twilio's own
+    // request timeout is 30 s, and the Hub pool has none), and a ringing row
+    // is due again at the ringing guard. If the chain moved on meanwhile, a
+    // call placed now would ring a level the chain has left, so the row is
+    // read once more first: anything that touched it since the "ringing"
+    // write bumped its version (review of #514, round 4).
+    const current = await store.getEscalation(row.id);
+    if (!current || current.status !== "active" || current.version !== ringing.version) {
+      await store.endAttempt(call.id, "failed", now());
+      log(
+        `[ON-CALL] ${row.callSid}: the chain moved on while level ${row.levelIndex}'s text was being sent; that level is not called`,
+      );
+      return;
+    }
     let placed: { sid: string };
     try {
       placed = await deps.placeCall({

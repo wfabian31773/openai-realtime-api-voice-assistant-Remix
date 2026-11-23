@@ -217,6 +217,17 @@ describe("name keys", () => {
     expect(nameKeyForMatch("Ádá Quíll, DO")).toBe("ada quill");
   });
 
+  it("keeps Do and Od as surnames, and drops a degree written with no comma only from the end", () => {
+    expect(nameKeyForMatch("Tuan Do")).toBe("tuan do");
+    expect(nameKeyForMatch("Dr. Tuan Do, MD")).toBe("tuan do");
+    expect(nameKeyForMatch("Tuan Do MD")).toBe("tuan do");
+    expect(nameKeyForMatch("Tuan Do DO")).toBe("tuan do");
+    expect(nameKeyForMatch("Ada Od")).toBe("ada od");
+    expect(nameKeyForMatch("Ada Quill DO")).toBe("ada quill");
+    expect(nameKeyForMatch("Ada M. Quill M.D.")).toBe("ada quill");
+    expect(nameKeyForMatch("Ada Quill MD DO")).toBe("ada quill");
+  });
+
   it("keeps a hyphenated surname whole", () => {
     expect(nameKeyForMatch("Ada Quill-Vane, MD")).toBe("ada quill-vane");
     expect(nameKeyForMatch("Ada Quill-Vane, MD")).not.toBe(nameKeyForMatch("Ada Vane, MD"));

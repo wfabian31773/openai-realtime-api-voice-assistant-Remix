@@ -10,7 +10,7 @@
  */
 import { getConsolePool, isVerificationConfigured } from "../../services/patientVerification";
 import type { OnCallTransferWiring } from "../runtimeTransfer";
-import { onCallHealth, readOnCallConfig, type OnCallConfig } from "./config";
+import { e164, onCallHealth, readOnCallConfig, type OnCallConfig } from "./config";
 import { createRotationCache } from "./routing";
 import { createOnCallRunner, type OnCallRunner, type OnCallRunnerDeps } from "./runner";
 import { createPgOnCallStore, type OnCallStore, type Query } from "./store";
@@ -124,13 +124,21 @@ export function buildOnCallWiring(env: Env, host: string | undefined, deps: OnCa
     // a real person to call a test caller back.
     notifyUrgent: async (body, mode) => {
       const test = mode === "test";
-      const to = test ? config.testPhones[0] : env.URGENT_NOTIFICATION_NUMBER?.trim();
+      // Normalised the way every other number the rotation reads is, so a
+      // number written with punctuation still reaches Twilio, and one that
+      // is not a phone number is said to be one rather than refused by
+      // Twilio with nothing in the log naming the setting (review of #514,
+      // round 4).
+      const raw = env.URGENT_NOTIFICATION_NUMBER?.trim();
+      const to = test ? config.testPhones[0] : e164(raw);
       const from = config.callerId;
       if (!to || !from) {
         log(
           test
             ? "[ON-CALL] the 'nobody took it' text was not sent: a test chain needs ON_CALL_TEST_PHONES"
-            : "[ON-CALL] the 'nobody took it' text was not sent: URGENT_NOTIFICATION_NUMBER is not set",
+            : raw
+              ? "[ON-CALL] the 'nobody took it' text was not sent: URGENT_NOTIFICATION_NUMBER is not a phone number"
+              : "[ON-CALL] the 'nobody took it' text was not sent: URGENT_NOTIFICATION_NUMBER is not set",
         );
         return;
       }
