@@ -79,10 +79,34 @@ If two providers press a key at nearly the same moment, the one the
 escalation records as having taken the patient (`accepted_by`) is told it is
 theirs and the other hears that it has already been taken.
 
-If the caller asks for the on-call team again while an escalation is already
-running for their call, nothing new is dialled: the agent is told the team is
-already being paged, tells the caller so, and files anything new on the
-ticket.
+### One chain per call
+
+A call has at most one escalation chain running at a time.
+
+- If the caller asks for the on-call team again while a chain is running for
+  their call, nothing new is dialled: the agent is told the team is already
+  being paged, tells the caller so, and files anything new on the ticket.
+  This includes a second request that arrives while the first is still
+  being routed. The chain is claimed the moment the first request reaches
+  the transfer, before anything is read, so two requests in the same instant
+  cannot both start one.
+- If the caller asks again after their chain has finished (someone took the
+  patient, every level was tried, or it was stopped), the second request
+  takes today's path: the fixed on-call number, rung as before the rotation.
+  It does not start a second chain.
+- If the chain's record for this call cannot be read (a database outage), the
+  second request also takes today's path, so an urgent caller always rings a
+  person rather than being told a chain is paging when nobody can see one.
+- If the first request could not open its record at all (a database outage
+  at the moment it started), the next request routes through the rotation
+  again.
+- If the in-call dial fails outright after the provider was texted, the chain
+  is handed on as a failed first call, so the retry and the directors still
+  follow.
+
+The rotation also runs when `HUMAN_AGENT_NUMBER` is not set: the number to
+ring comes from the rotation. With the rotation off, an unset
+`HUMAN_AGENT_NUMBER` still means nothing is dialled, as today.
 
 ### The levels and their timing
 
@@ -93,6 +117,22 @@ ticket.
 | next | region director: text + call, then a second call + reminder text |
 | last | Dr. Logan: text + call, then a second call + reminder text |
 | after the last call | the escalation is marked `exhausted` |
+
+When nobody takes the patient, the urgent notification number
+(`URGENT_NOTIFICATION_NUMBER`) gets one text with the patient's details and
+what happened, from today's number (`TWILIO_PHONE_NUMBER`):
+
+- "NOBODY TOOK THIS URGENT CALL" when every level was tried;
+- "THE ON-CALL ESCALATION STOPPED" when an escalation came due more than two
+  hours after it opened (a restart or an outage held it); nobody else is rung;
+- "THE ON-CALL ESCALATION COULD NOT START" when the in-call transfer was not
+  taken and the chain's record could not be written.
+
+For a chain that started in test mode, that text goes to the first test number
+instead and starts with `[TEST MODE]`, so a test chain never asks a real person
+to call a test caller back. A chain that started live keeps sending it to
+`URGENT_NOTIFICATION_NUMBER`, even if the rotation is switched to test while it
+runs, because a real patient is waiting.
 
 Each of our callback calls rings for 30 seconds (the in-call warm transfer
 rings as it does today). A call whose status never comes back is hung up and

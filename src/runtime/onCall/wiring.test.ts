@@ -218,6 +218,17 @@ describe("running", () => {
     expect(lines.some((l) => /a test chain needs ON_CALL_TEST_PHONES/.test(l))).toBe(true);
   });
 
+  it("sends a live chain's text to the urgent number even after the rotation is switched to test", async () => {
+    const { w, tw, store } = running({ ON_CALL_ROTATION_MODE: "test", ON_CALL_TEST_PHONES: "+15550002222" });
+    store.failWrites = true;
+    await w.runner!.afterInCallTransfer(noAnswer());
+    expect(tw.texts.filter((t) => t.to === "+15550002222")).toHaveLength(0);
+    const sent = tw.texts.filter((t) => t.to === "+15550007777");
+    expect(sent).toHaveLength(1);
+    expect(sent[0].body).not.toMatch(/\[TEST MODE\]/);
+    expect(sent[0].body).toMatch(/THE ON-CALL ESCALATION COULD NOT START/);
+  });
+
   it("logs and sends nothing when the urgent number is not set", async () => {
     const { w, tw, store, lines } = running({ URGENT_NOTIFICATION_NUMBER: "" });
     store.failWrites = true;

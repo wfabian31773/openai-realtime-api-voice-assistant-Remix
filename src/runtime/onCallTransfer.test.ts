@@ -8,7 +8,14 @@
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import twilio from "twilio";
-import { createRuntimeTransfer, ON_CALL_LANES, TRANSFER_ACCEPT_PATH, TRANSFER_STATUS_PATH, type OnCallTransferWiring } from "./runtimeTransfer";
+import {
+  createRuntimeTransfer,
+  ON_CALL_LANES,
+  rotationMayTakeTheDial,
+  TRANSFER_ACCEPT_PATH,
+  TRANSFER_STATUS_PATH,
+  type OnCallTransferWiring,
+} from "./runtimeTransfer";
 import type { TransferTwilioOps } from "./warmTransfer";
 import type { UrgentTransferAlerts } from "./urgentTransferAlerts";
 import type { WebhookRequest } from "./voiceWebhook";
@@ -413,6 +420,42 @@ describe("one chain per call, read from the chain's own row", () => {
     expect(built.handed).toHaveLength(1);
   });
 
+  it("does not leave the call claimed after its record could not be read", async () => {
+    const { ops, dialed } = fakeOps();
+    const built = buildWiring();
+    const transfer = transferWith(ops, built.wiring);
+    const handoff = transfer.handoffFor("no-ivr", META);
+
+    urgent();
+    const first = handoff();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    transfer.handleStatus(signed(TRANSFER_STATUS_PATH, { CallSid: "CAoffice", CallStatus: "no-answer" }));
+    await expect(first).rejects.toThrow(/handoff_failed:NO_ANSWER/);
+    await vi.waitFor(() => expect(built.handed).toHaveLength(1));
+
+    const realGet = built.store.getEscalationByCall.bind(built.store);
+    built.store.getEscalationByCall = async () => {
+      throw new Error("hub unreachable");
+    };
+    urgent();
+    const second = handoff();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    transfer.handleAccept(signed(TRANSFER_ACCEPT_PATH, { CallSid: "CAoffice", Digits: "1" }));
+    await second;
+
+    // The record can be read again, and this call's chain has since ended.
+    built.store.getEscalationByCall = realGet;
+    const row = [...built.store.escalations.values()][0];
+    row.status = "exhausted";
+    urgent();
+    const third = handoff();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    expect(dialed).toHaveLength(3);
+    expect(dialed[2].to).toBe(ENV.HUMAN_AGENT_NUMBER);
+    transfer.handleAccept(signed(TRANSFER_ACCEPT_PATH, { CallSid: "CAoffice", Digits: "1" }));
+    await third;
+  });
+
   it("hands the chain to the runner as failed when the dial throws after the provider was texted", async () => {
     const { ops, dialed } = fakeOps();
     const built = buildWiring();
@@ -434,6 +477,13 @@ describe("one chain per call, read from the chain's own row", () => {
 });
 
 describe("which dials the rotation may take", () => {
+  it("never takes a PCP dial, which goes to the PCP queue", () => {
+    expect(rotationMayTakeTheDial({ allowed: true, destination: "+15550004300", policy: "pcp" })).toBe(false);
+    expect(rotationMayTakeTheDial({ allowed: true, destination: "+15550004300", policy: "clinical" })).toBe(true);
+    expect(rotationMayTakeTheDial({ allowed: false, reason: "pcp_destination_not_configured" })).toBe(false);
+    expect(rotationMayTakeTheDial({ allowed: false, reason: "clinical_destination_not_configured" })).toBe(true);
+  });
+
   it("rings the rotation's level 0 when HUMAN_AGENT_NUMBER is not set", async () => {
     const { ops, dialed } = fakeOps();
     const built = buildWiring();
@@ -581,6 +631,24 @@ describe("today's path, byte for byte", () => {
   it("in weekday daytime hours, which are not on call", async () => {
     const built = buildWiring({ at: WEEKDAY_DAYTIME });
     await ringsTheFixedNumber(built.wiring);
+    expect(built.texts).toHaveLength(0);
+    expect(built.handed).toHaveLength(0);
+  });
+
+  it("in weekday daytime hours, for every escalation on the call, not only the first", async () => {
+    const built = buildWiring({ at: WEEKDAY_DAYTIME });
+    const { ops, dialed } = fakeOps();
+    const transfer = transferWith(ops, built.wiring);
+    const handoff = transfer.handoffFor("no-ivr", META);
+    for (const n of [1, 2]) {
+      urgent();
+      const outcome = handoff();
+      await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+      expect(dialed).toHaveLength(n);
+      expect(dialed[n - 1].to).toBe(ENV.HUMAN_AGENT_NUMBER);
+      transfer.handleAccept(signed(TRANSFER_ACCEPT_PATH, { CallSid: "CAoffice", Digits: "1" }));
+      await outcome;
+    }
     expect(built.texts).toHaveLength(0);
     expect(built.handed).toHaveLength(0);
   });

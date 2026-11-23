@@ -52,6 +52,7 @@ function harness(opts: { config?: OnCallConfig; start?: Date; placeCall?: any; s
   const texts: Array<{ to: string; from: string; body: string; at: Date }> = [];
   const calls: Array<{ to: string; from: string; twiml: string; statusCallback: string; timeout: number; timeLimit: number; at: Date }> = [];
   const urgent: string[] = [];
+  const urgentModes: string[] = [];
   let sid = 0;
   const sendSms =
     opts.sendSms ??
@@ -67,8 +68,9 @@ function harness(opts: { config?: OnCallConfig; start?: Date; placeCall?: any; s
     });
   const notifyUrgent =
     opts.notifyUrgent ??
-    vi.fn(async (body: string) => {
+    vi.fn(async (body: string, mode: string) => {
       urgent.push(body);
+      urgentModes.push(mode);
     });
   const hungUp: string[] = [];
   const endCall =
@@ -94,6 +96,7 @@ function harness(opts: { config?: OnCallConfig; start?: Date; placeCall?: any; s
     texts,
     calls,
     urgent,
+    urgentModes,
     hungUp,
     log,
     sendSms,
@@ -192,6 +195,7 @@ describe("the cadence (success criterion: retry plus nudge within 5 minutes, the
     expect(h.escalation()).toMatchObject({ status: "exhausted", details: null, callerNumber: null });
     expect(h.urgent).toHaveLength(1);
     expect(h.urgent[0]).toMatch(/NOBODY TOOK THIS URGENT CALL — all 3 on-call levels were tried/);
+    expect(h.urgentModes).toEqual(["live"]);
     expect(h.urgent[0]).toContain(DETAILS.reason);
     await h.runner.tick();
     expect(h.calls).toHaveLength(5);
@@ -734,6 +738,7 @@ describe("what keeps the chain moving when something goes wrong", () => {
     expect(h.urgent).toHaveLength(1);
     expect(h.urgent[0]).toMatch(/THE ON-CALL ESCALATION COULD NOT START/);
     expect(h.urgent[0]).toContain(DETAILS.reason);
+    expect(h.urgentModes).toEqual(["live"]);
   });
 
   it("says nothing to the urgent number when an accepted transfer cannot be recorded", async () => {
@@ -812,12 +817,28 @@ describe("what keeps the chain moving when something goes wrong", () => {
     expect(h.escalation()).toMatchObject({ status: "active" });
   });
 
+  it("sends a test chain's closing text as a test", async () => {
+    const h = harness({ config: TEST });
+    await h.runner.afterInCallTransfer(inCall(syntheticTestPlan(TEST), "no_answer", { mode: "test" }));
+    for (let i = 0; i < 20 && h.escalation()!.status === "active"; i++) {
+      h.advance(RETRY_GAP_MS);
+      const before = h.calls.length;
+      await h.runner.tick();
+      if (h.calls.length > before) await h.runner.onProviderStatus(h.lastCallAttempt().id, "no-answer");
+    }
+    expect(h.escalation()).toMatchObject({ status: "exhausted" });
+    expect(h.urgent).toHaveLength(1);
+    expect(h.urgent[0]).toContain("[TEST MODE] NOBODY TOOK THIS URGENT CALL");
+    expect(h.urgentModes).toEqual(["test"]);
+  });
+
   it("marks a stale escalation's text as a test in test mode", async () => {
     const h = harness({ config: TEST });
     const esc = await h.runner.afterInCallTransfer(inCall(syntheticTestPlan(TEST), "no_answer", { mode: "test" }));
     h.at(new Date(esc!.createdAt.getTime() + STALE_ESCALATION_MS + 1));
     await h.runner.tick();
     expect(h.urgent[0]).toContain("[TEST MODE] THE ON-CALL ESCALATION STOPPED");
+    expect(h.urgentModes).toEqual(["test"]);
   });
 
   it("opens one escalation per call and hands back the existing one", async () => {

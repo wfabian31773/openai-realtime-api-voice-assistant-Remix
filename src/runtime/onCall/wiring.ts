@@ -120,7 +120,7 @@ export function buildOnCallWiring(env: Env, host: string | undefined, deps: OnCa
     // goes to the first test phone instead, so a test call never asks a real
     // person to call a test caller back.
     notifyUrgent: async (body, mode) => {
-      const test = mode === "test" || config.mode === "test";
+      const test = mode === "test";
       const to = test ? config.testPhones[0] : env.URGENT_NOTIFICATION_NUMBER?.trim();
       const from = env.TWILIO_PHONE_NUMBER?.trim();
       if (!to || !from) {
