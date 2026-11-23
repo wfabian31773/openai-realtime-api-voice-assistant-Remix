@@ -93,6 +93,25 @@ const DATA = {
   partners: ['Partner One Optometry'],
 };
 
+/** The record a call booking leaves on the contact (v222 confirmation, v226 held cancel), synthetic. */
+const PRIOR_BOOKING = {
+  outreach_text: {
+    confirmation: {
+      state: 'sent',
+      booking_id: 'booking-earlier-270',
+      by: 'call',
+      call_sid: 'CA00000000000000000000000000000002',
+      when: 'Tue, Feb 5 at 9:00 AM',
+      place: 'Partner Two Eyecare, 2 Sample Ave, Ste 4, Sampletown',
+      phone: '5550120000',
+      replaced_day: 'Mar 20',
+      cancel: 'cancelled',
+      queued_at: '2041-01-10T20:00:00.000Z',
+      due_at: '2041-01-10T20:02:00.000Z',
+    },
+  },
+};
+
 /** The office's phone in the practice's own list, said in three groups. */
 const packPhone = (name: string) => spokenPhone(AZUL_VISION_LOCATIONS.find((l) => l.name === name)!.phone);
 
@@ -100,11 +119,11 @@ let store: FakeOutboundStore;
 let attemptId: string;
 let available: NpxSlot[];
 
-async function setUp(sid: string, office: string | undefined = DATA.office) {
+async function setUp(sid: string, office: string | undefined = DATA.office, extraData: Record<string, unknown> = {}) {
   resetOutreachSessionsForTests();
   resetOutreachAvailabilityForTests();
   store = new FakeOutboundStore();
-  const customData: Record<string, unknown> = { ...DATA };
+  const customData: Record<string, unknown> = { ...DATA, ...extraData };
   if (office === undefined) delete customData.office;
   else customData.office = office;
   store.addContact({ id: 'c1', phone: '+15555550111', status: 'calling', firstName: 'Testa', lastName: 'Synthetic', customData });
@@ -162,7 +181,12 @@ describe('(A1) the partner practice phone is in the choices the agent read', () 
     expect(options.length).toBeGreaterThan(0);
     for (const o of options) expect(o.phone).toBe(GROUPED);
     expect(JSON.stringify(options)).not.toContain(BARE);
-    expect(String(found.next)).toMatch(/If they ask for a practice's phone number, say that choice's phone exactly as written here, never any other number/);
+    expect(String(found.next)).toMatch(/If they ask for the phone of one of these practices, say that choice's phone exactly as written here and no other number for it/);
+    // #518 review round 2: the choices' phone is scoped to the partner
+    // practice, so a caller asking for our own office is sent to
+    // our_office_phone rather than told the partner's number.
+    expect(String(found.next)).toMatch(/If they ask for our own office's number, say our_office_phone from confirm_patient_birthdate, never a number recalled/);
+    expect(String(found.next)).not.toMatch(/never any other number\./);
   });
 
   it('a choice with no phone on file carries none, and no other number stands in', async () => {
@@ -187,6 +211,24 @@ describe('(A2) our own office phone, once the date of birth matches', () => {
     await run(CONFIRM_DOB_TOOL_NAME, { date_of_birth: 'January 2nd, 1950' });
     const again = await run(CONFIRM_DOB_TOOL_NAME, { date_of_birth: 'January 2nd, 1950' });
     expect(again.our_office_phone).toBe(packPhone('Rancho Cucamonga'));
+  });
+
+  it('a verified caller who has already booked also gets our office phone (#518 review round 2)', async () => {
+    const run = await setUp('CA6a7ffd6bf215505f505c66289c5ddc71', 'Rancho Cucamonga', PRIOR_BOOKING);
+    const r = await run(CONFIRM_DOB_TOOL_NAME, { date_of_birth: 'January 2nd, 1950' });
+    expect(r.verified).toBe(true);
+    expect(r.already_booked).toBe(true);
+    expect(r.our_office_phone).toBe(packPhone('Rancho Cucamonga'));
+    const again = await run(CONFIRM_DOB_TOOL_NAME, { date_of_birth: 'January 2nd, 1950' });
+    expect(again.already_booked).toBe(true);
+    expect(again.our_office_phone).toBe(packPhone('Rancho Cucamonga'));
+  });
+
+  it('a booked caller whose office the list does not hold gets no office phone', async () => {
+    const run = await setUp('CA6a7ffd6bf215505f505c66289c5ddc71', 'Montebello West', PRIOR_BOOKING);
+    const r = await run(CONFIRM_DOB_TOOL_NAME, { date_of_birth: 'January 2nd, 1950' });
+    expect(r.already_booked).toBe(true);
+    expect(r).not.toHaveProperty('our_office_phone');
   });
 
   it('CA6cf7585fa87eb09518d6cc836cf6ac8b (Covina, never verified): no office phone before the date of birth matches', async () => {

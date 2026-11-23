@@ -1161,7 +1161,7 @@ registerTool({
     }
     if (s.verified) {
       return bookedEarlier
-        ? priorBookingVerified(bookedEarlier)
+        ? priorBookingVerified(bookedEarlier, s)
         : verifiedAnswer(s);
     }
     // Spent tries stay spent: a third guess must not unlock what two wrong
@@ -1183,7 +1183,7 @@ registerTool({
       heard !== null && heard.year === onFile.year && heard.month === onFile.month && heard.day === onFile.day;
     if (match) {
       s.verified = true;
-      if (bookedEarlier) return priorBookingVerified(bookedEarlier);
+      if (bookedEarlier) return priorBookingVerified(bookedEarlier, s);
       return verifiedAnswer(s);
     }
     if (s.dobTries < MAX_DOB_TRIES) {
@@ -1480,7 +1480,8 @@ registerTool({
         'If they want a different day or time, call this again with what they now say. If they ask what is open, use the overview. ' +
         'When they pick one, say it back with the doctor and the city, say that booking it cancels their current appointment with us, ' +
         'and ask them to confirm; on a yes, call book_sooner_exam with that choice\'s date and time (and its city). ' +
-        'If they ask for a practice\'s phone number, say that choice\'s phone exactly as written here, never any other number.',
+        'If they ask for the phone of one of these practices, say that choice\'s phone exactly as written here and no other number for it. ' +
+        'If they ask for our own office\'s number, say our_office_phone from confirm_patient_birthdate, never a number recalled.',
     };
   },
 });
@@ -2288,13 +2289,20 @@ export function bookingChangeLine(contact: OutboundContact, booking: NonNullable
   }
 }
 
-/** A patient who booked earlier, once their date of birth matches. */
-function priorBookingVerified(b: PriorBooking): ToolResult {
+/**
+ * A patient who booked earlier, once their date of birth matches. It carries
+ * the Azul office's phone too (v270, #518 review round 2): a verified caller
+ * who has already booked may ask for our number as any other verified caller
+ * may, and the guardrail permits only a number a tool gave.
+ */
+function priorBookingVerified(b: PriorBooking, s: OutreachSession): ToolResult {
+  const phone = ourOfficePhone(s.contact);
   return {
     success: true,
     verified: true,
     already_booked: true,
     booked_appointment: priorBookingInFull(b),
+    ...(phone ? { our_office_phone: phone } : {}),
     say: priorBookingInFull(b),
     fix:
       'Say that slowly, and repeat any part they ask for, one piece at a time. Offer no other time. If they want to ' +
