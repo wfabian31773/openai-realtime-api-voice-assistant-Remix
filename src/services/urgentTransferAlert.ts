@@ -132,6 +132,8 @@ export function urgentFallbackTicketParams(input: {
   callSid?: string;
   agentUsed: string;
   handoff?: UrgentHandoffFailure;
+  /** The v268 on-call rotation took this call and is still calling (ON_CALL_CHAIN_TICKET_LINE). */
+  onCallChain?: boolean;
 }): SyncAgentTicketParams {
   const d = input.escalationDetails;
   const formattedPhone = fallbackCallbackPhone(d?.callbackNumber, input.callerId);
@@ -226,16 +228,29 @@ export function handoffFailedLine(h: UrgentHandoffFailure): string {
   return `HANDOFF FAILED (${h.status}${rang}): the caller was NOT connected to the on-call provider.`;
 }
 
+/**
+ * The staff line on a ring-out ticket when the after-hours on-call rotation
+ * (v268) took the call: the chain is still calling on its own, so whoever works
+ * the ticket knows the patient may already be hearing from a provider. No
+ * caller data in it.
+ */
+export const ON_CALL_CHAIN_TICKET_LINE =
+  'THE ON-CALL ROTATION IS STILL CALLING: the system is calling the on-call provider again and, if nobody ' +
+  "answers, the region's medical director and then the final director. The patient may already be getting " +
+  'a call back from one of them.';
+
 /** What happened, what to do, what was attempted — one copy for both payloads. */
 function fallbackDescriptionLines(input: {
   why: string;
   dialTarget?: string;
   escalationDetails?: Pick<EscalationDetails, 'reason' | 'symptomsSummary'>;
   handoff?: UrgentHandoffFailure;
+  onCallChain?: boolean;
 }): string[] {
   const d = input.escalationDetails;
   const lines: string[] = [input.why, 'Please call the patient back immediately.'];
   if (input.handoff) lines.push(handoffFailedLine(input.handoff));
+  if (input.onCallChain) lines.push(ON_CALL_CHAIN_TICKET_LINE);
   if (input.dialTarget) lines.push(`Attempted transfer to: ${input.dialTarget}`);
   if (d?.reason) lines.push(`Reason: ${d.reason}`);
   if (d?.symptomsSummary) lines.push(`Symptoms: ${d.symptomsSummary}`);
@@ -299,6 +314,8 @@ export function urgentRingOutBesideParams(input: {
   agentUsed: string;
   earlierTicket: string;
   handoff?: UrgentHandoffFailure;
+  /** The v268 on-call rotation took this call and is still calling (ON_CALL_CHAIN_TICKET_LINE). */
+  onCallChain?: boolean;
 }): UrgentRingOutBesideParams {
   const d = input.escalationDetails;
   const { fullName, standIn } = nameOrStandIn(d?.patientFirstName, d?.patientLastName);

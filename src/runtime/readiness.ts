@@ -2141,9 +2141,25 @@ import { callEnvironment } from "./callRecord";
  * wire; a yes is refused, nothing is recorded as answered, and the model is
  * told to file (afterHoursAnsweredQuestion.ts). Above main's v266 (#512,
  * `c2841ff6`); v268 is #514 on its open branch. No migration.
+ * On main since #515 (`32d0e528`).
+ *
+ * v268 — THE AFTER-HOURS ON-CALL ROTATION (2026-11-23). Operator: a new
+ * after-hours process from 2026-12-01, built now. An urgent after-hours
+ * transfer on the runtime (no-ivr) rings the week's on-call provider read
+ * from a table (Tuesday 5 PM to the next Tuesday 8 AM Pacific; swaps and
+ * covers win; holidays rotate like any day), or the surgeon when the patient
+ * had surgery in the last 7 days per the Console, then retries with a nudge
+ * text, then the region's medical director, then the final director, and
+ * logs every attempt (src/runtime/onCall/). Dark until
+ * ON_CALL_ROTATION_MODE is test or live; test mode rings only
+ * ON_CALL_TEST_PHONES. The 12 urgent triggers, the triage flow and the
+ * caller's words are unchanged. Above main's v267 (#515, `32d0e528`), which it
+ * contains along with v266 (#512, `c2841ff6`); v245 is #488 on its open
+ * branch. Migration
+ * migrations/add_on_call_rotation.sql, written and NOT applied.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v267-a-follow-up-owed-is-not-answered-20261123";
+  "voice-runtime-v268-the-after-hours-on-call-rotation-20261123";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

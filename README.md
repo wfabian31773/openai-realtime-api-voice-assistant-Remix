@@ -48,6 +48,9 @@ This project demonstrates how to use OpenAI's SIP Connector to the Realtime API 
 
     HUMAN_AGENT_NUMBER=+15551112222
     ```
+
+    `HUMAN_AGENT_NUMBER` is the one number a sanctioned urgent transfer rings. On the after-hours line (no-IVR, on the runtime) the on-call rotation can take that over: with `ON_CALL_ROTATION_MODE=test` or `live` an urgent after-hours transfer rings the week's on-call provider from the rotation tables, retries, and escalates to the region's medical director and then the final director. Its settings are `ON_CALL_ROTATION_MODE` (`off`, the default, `test` or `live`), `ON_CALL_TEST_PHONES` (the only numbers test mode rings), `ON_CALL_CALLER_ID` (the number provider calls and texts come from; never the Wayne Operator Line) and `ON_CALL_POST_OP_REQUIRE_KEPT`. Weekday daytime, and any setting it cannot honour, falls back to `HUMAN_AGENT_NUMBER`. See [docs/ON_CALL_ROTATION.md](docs/ON_CALL_ROTATION.md).
+
 2. In any terminal, execute:
     ```bash
     ngrok http 8000 --url https://{DOMAIN}
