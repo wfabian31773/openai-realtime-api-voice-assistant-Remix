@@ -129,9 +129,10 @@ can control its own direct sessions even though `/capabilities` requires
 scope, ownership, calling windows, holidays, opt-outs and limits. Live state
 remains in fleet memory.
 
-Operator reads validate Twilio SIDs locally: CA + 32 lowercase hex for
-inbound calls, SM/MM + 32 for SMS, RE + 32 for voicemail. Operator SMS send
-requires `to`, nonblank `body` and a stable 1–200-character `idempotency_key`.
+Operator reads validate Twilio SIDs locally: CA + 32 hex digits (either case) for
+inbound calls, SM/MM + 32 for SMS, RE + 32 for voicemail. SID case is preserved
+in fleet requests. Operator SMS send requires `to`, nonblank `body` and a stable
+1–200-character `idempotency_key`.
 It uses the operator number; owner texts send immediately and other targets
 need approval, with opt-out checks enforced by the API. Operator prepare
 normalizes caller_script/opening_line aliases to callerScript/openingLine.

@@ -15,7 +15,7 @@ const names = (await rpc('tools/list')).result.tools.map((tool) => tool.name);
 assert.equal(names.length, 26);
 const hex = '0123456789abcdef'.repeat(2);
 for (const [tool, key, good, bads, path] of [
-  ['operator_inbound_get', 'callSid', 'CA' + hex, ['SM' + hex, 'CA' + hex.slice(1), 'CA' + hex.toUpperCase(), '../x'], '/operator-line/inbound/'],
+  ['operator_inbound_get', 'callSid', 'CA' + hex, ['SM' + hex, 'CA' + hex.slice(1), 'CA' + hex.slice(1) + 'g', '../x'], '/operator-line/inbound/'],
   ['operator_sms_get', 'messageSid', 'MM' + hex, ['CA' + hex, 'SMxyz'], '/operator-line/sms/'],
   ['operator_voicemail_get', 'recordingSid', 'RE' + hex, ['CA' + hex, ''], '/operator-line/voicemail/'],
 ]) {
@@ -23,6 +23,10 @@ for (const [tool, key, good, bads, path] of [
   const before = seen.length;
   for (const bad of bads) assert((await call(tool, { [key]: bad })).isError);
   assert.equal(seen.length, before);
+  for (const sid of [good.slice(0, 2) + hex.toUpperCase(), good.slice(0, 2) + 'aBcDeF0123456789'.repeat(2)]) {
+    assert(!(await call(tool, { [key]: sid })).isError);
+    assert.equal(seen.at(-1).path, path + sid);
+  }
   for (const includeContent of [undefined, false, true]) {
     const result = await call(tool, { [key]: good, includeContent });
     const text = result.content[0].text;

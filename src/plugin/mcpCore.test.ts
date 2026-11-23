@@ -216,6 +216,40 @@ describe("voice fleet MCP core", () => {
     }
   });
 
+  it("masks 100 KB adversarial strings and included content in under 50 ms", () => {
+    const timestamp = "2026-11-23T10:30:00Z";
+    const nested = `record ${'{"note":'.repeat(12_500)}9095550113`;
+    let serialized = JSON.stringify({ note: "9".repeat(100_000) });
+    for (let i = 0; i < 4; i++) serialized = JSON.stringify(serialized);
+    const nestedArrays = "[".repeat(100) + JSON.stringify("synthetic ".repeat(10_000)) + "]".repeat(100);
+    const cases: [string, string, string][] = [
+      ["digits then prose and timestamp", `${"9".repeat(100_000)} prose ${timestamp}`, `***-***-9999 prose ${timestamp}`],
+      ["many separators", "9-".repeat(50_000), "***-***-9999-"],
+      ["repeated extension markers", `9095550113${"x".repeat(100_000)}12`, "***-***-0113"],
+      ["separator run", `9095550113${"-".repeat(100_000)}12`, "***-***-1312"],
+      ["failed hash markers", `9095550113${"#".repeat(100_000)}xx12`, "***-***-0113"],
+      ["digits without phone shape", "9".repeat(100_000), "***-***-9999"],
+      ["parenthesized groups with prose", `9095550113${"(1)".repeat(33_333)} tail 12`, "***-***-1112"],
+      ["URL key whitespace without assignment", `url${" ".repeat(100_000)}z`, `url${" ".repeat(100_000)}z`],
+      ["nested JSON-ish text", nested, nested.replace("9095550113", "***-***-0113")],
+      ["serialized JSON", serialized, serialized.replace("9".repeat(100_000), "***-***-9999")],
+      ["nested JSON arrays", nestedArrays, nestedArrays],
+    ];
+    for (const [label, input, expected] of cases) {
+      for (const [path, apply] of [
+        ["maskString", (text: string) => maskString(text)],
+        ["mask includeContent", (text: string) => (mask({ body: text }, "", true) as { body: string }).body],
+      ] as const) {
+        apply(input); // One warmup per input and entry point.
+        const start = performance.now();
+        const output = apply(input);
+        const elapsed = performance.now() - start;
+        expect(output, `${label}: ${path}`).toBe(expected);
+        expect(elapsed, `${label}: ${path}`).toBeLessThan(50);
+      }
+    }
+  });
+
   it.each([
     ["555/0100", "***-***-0100"],
     ["(909)\n555-0113", "***-***-0113"],
@@ -289,7 +323,9 @@ describe("voice fleet MCP core", () => {
       "2026-11-23", "2026-11-23T10:30:00Z", "2026-11-23T10:30:00.123456Z",
       "2026-11-23T10:30:00.123-05:00", "2026-11-23T10:30:00+0530",
       "12345678-1234-4123-8123-123456789012",
-      ...["CA", "PN", "SM", "MM", "RE", "AC"].map((prefix) => prefix + "123456789012345678901234567890ab"),
+      ...["CA", "PN", "SM", "MM", "RE", "AC"].flatMap((prefix) =>
+        ["123456789012345678901234567890ab", "123456789012345678901234567890AB", "123456789012345678901234567890aB"]
+          .map((hex) => prefix + hex)),
     ];
     const ids = {
       id: "12345678901234567890", callId: "9876543210123456", ticketId: "ticket-1234567890",
@@ -447,6 +483,27 @@ describe("voice fleet MCP core", () => {
     const wire = JSON.parse(JSON.stringify(reply));
     expect(wire.result.isError).toBe(false);
     expect(JSON.parse(wire.result.content[0].text).data).toEqual(expected);
+  });
+
+  it.each([
+    ["operator_inbound_get", "callSid", "CA", "/operator-line/inbound/"],
+    ["operator_sms_get", "messageSid", "SM", "/operator-line/sms/"],
+    ["operator_sms_get", "messageSid", "MM", "/operator-line/sms/"],
+    ["operator_voicemail_get", "recordingSid", "RE", "/operator-line/voicemail/"],
+  ])("validates either hex case and preserves SID text for %s (%s, %s)", async (name, key, prefix, path) => {
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => Response.json({ ok: true }));
+    const core = create();
+    for (const hex of ["ABCDEF0123456789".repeat(2), "aBcDeF0123456789".repeat(2)]) {
+      const sid = prefix + hex;
+      expect(await core.handleMessage(call(name, { [key]: sid }))).toMatchObject({ result: { isError: false } });
+      expect(fetch).toHaveBeenLastCalledWith(`http://127.0.0.1:5000/api/plugin/v1${path}${sid}`, expect.objectContaining({ method: "GET" }));
+    }
+    fetch.mockClear();
+    for (const sid of ["XX" + "a".repeat(32), prefix.toLowerCase() + "a".repeat(32), prefix + "a".repeat(31),
+      prefix + "a".repeat(33), prefix + "g".repeat(32), prefix + "a".repeat(31) + "!"]) {
+      expect(await core.handleMessage(call(name, { [key]: sid }))).toMatchObject({ result: { isError: true } });
+    }
+    expect(fetch).not.toHaveBeenCalled();
   });
 
   it("leaves no unprotected 7+ digit run across seeded synthetic phone formats and extensions", () => {

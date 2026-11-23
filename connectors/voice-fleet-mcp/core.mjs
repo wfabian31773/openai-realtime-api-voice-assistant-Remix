@@ -30,7 +30,7 @@ export function operatorPrepareBody(a = {}) {
 }
 const str = (d) => ({ type: "string", description: d });
 
-const SID = { call: /^CA[0-9a-f]{32}$/, sms: /^(SM|MM)[0-9a-f]{32}$/, rec: /^RE[0-9a-f]{32}$/ };
+const SID = { call: /^CA[0-9a-fA-F]{32}$/, sms: /^(SM|MM)[0-9a-fA-F]{32}$/, rec: /^RE[0-9a-fA-F]{32}$/ };
 const CONTENT_KEYS = /^(body|text|transcript|transcription|transcriptionText|content|turns|messages)$/i;
 const PHI_KEYS = /^(name|callerName|fromName|firstName|lastName|dob|dateOfBirth|email|subject)$/i;
 const URL_KEYS = /^(mediaUrl|mediaUrls|recordingUrl|url|uri|mediaUri)$/i;
@@ -76,6 +76,8 @@ for (const [first, last, initial] of [[0x24eb, 0x24f4, 11], [0x24fe, 0x24fe, 10]
 }
 const DIGIT_VALUES = new Map();
 function normalizePhonePoint(point) {
+  const ascii = point.charCodeAt(0);
+  if (ascii < 128) return ascii < 32 || ascii === 127 ? "" : point;
   const other = OTHER_DIGITS.get(point.codePointAt(0));
   if (other !== undefined) return other;
   return point.normalize("NFKC").replace(/\p{Nd}/gu, (digit) => {
@@ -92,9 +94,20 @@ function normalizePhonePoint(point) {
 // Matching-only text and UTF-16 offsets. Only internally generated placeholders
 // become barriers; literal private-use delimiters are ordinary obfuscation.
 function phoneView(text, protectedValues = new Map()) {
+  // Plain printable ASCII already has identity offsets; avoid allocating an
+  // offset entry per character on the common (and large adversarial) path.
+  if (!/[^\x20-\x7e]|\\/.test(text)) return { normalized: text, starts: null, ends: null };
   const starts = [], ends = [], parts = [];
   for (let offset = 0; offset < text.length;) {
     const start = offset;
+    const ascii = text.charCodeAt(offset);
+    if (ascii < 128 && ascii !== 92) {
+      offset++;
+      if (ascii >= 32 && ascii !== 127) {
+        parts.push(text[start]); starts.push(start); ends.push(offset);
+      }
+      continue;
+    }
     const placeholder = /^\uE000[a-p]{8}\uE001/.exec(text.slice(offset, offset + 10));
     let normalized;
     if (text.startsWith("\uE000\uE000", offset)) {
@@ -132,37 +145,48 @@ const PHONE_GAP = /^[\p{White_Space}\p{P}\p{S}]*$/u;
 const LETTER_GAP = /^[\p{L}\p{White_Space}\p{P}\p{S}]*$/u;
 const digitText = (value) => typeof value === "number" && Number.isFinite(value)
   ? value.toLocaleString("en-US", { useGrouping: false, maximumFractionDigits: 20 }) : String(value);
-function arrayDigits(value, key) {
+function arrayDigitCount(value, key, cache) {
   if (Array.isArray(value)) {
-    const parts = value.map((item) => arrayDigits(item, key));
-    return parts.every((part) => part !== null) ? parts.join("") : null;
+    // Nested arrays are inspected again at each descendant. Cache counts, not
+    // concatenated digit strings, so depth cannot multiply normalization work.
+    let counts = cache.get(value);
+    if (counts?.has(key)) return counts.get(key);
+    let count = 0;
+    for (const item of value) {
+      const part = arrayDigitCount(item, key, cache);
+      if (part === null) { count = null; break; }
+      count += part;
+    }
+    if (!counts) cache.set(value, counts = new Map());
+    counts.set(key, count);
+    return count;
   }
   if (typeof value !== "string" && typeof value !== "number") return null;
   const text = digitText(value);
   if (isTypedId(text, key)) return null;
   const { normalized } = phoneView(text);
-  return /^\d+$/.test(normalized) ? normalized : PHONE_GAP.test(normalized) ? "" : null;
+  return /^\d+$/.test(normalized) ? normalized.length : PHONE_GAP.test(normalized) ? 0 : null;
 }
-function maskDigitArray(value, key) {
+function maskDigitArray(value, key, cache) {
   let result = null, first = 0, count = 0;
   const redact = (item) => Array.isArray(item) ? item.map(redact) : "[redacted digits]";
   for (let i = 0; i <= value.length; i++) {
-    const digits = i < value.length ? arrayDigits(value[i], key) : null;
+    const digits = i < value.length ? arrayDigitCount(value[i], key, cache) : null;
     if (digits === null) {
       if (count >= 7 && (i - first > 1 || Array.isArray(value[first]))) {
         result ??= value.slice();
         for (let j = first; j < i; j++) result[j] = redact(value[j]);
       }
       first = i + 1; count = 0;
-    } else count += digits.length;
+    } else count += digits;
   }
   return result;
 }
-function maskPhoneData(value, key = "") {
-  if (Array.isArray(value)) return (maskDigitArray(value, key) ?? value).map((item) => maskPhoneData(item, key));
+function maskPhoneData(value, key = "", digitCache = new WeakMap()) {
+  if (Array.isArray(value)) return (maskDigitArray(value, key, digitCache) ?? value).map((item) => maskPhoneData(item, key, digitCache));
   if (value && typeof value === "object") return Object.fromEntries(Object.entries(value)
     .filter(([k]) => !isMediaUrlKey(k))
-    .map(([k, v]) => [maskPhone(k), maskPhoneData(v, k)]));
+    .map(([k, v]) => [maskPhone(k), maskPhoneData(v, k, digitCache)]));
   if (typeof value === "string") return maskPhone(value, key);
   if (typeof value === "number" && Number.isFinite(value)) {
     const text = digitText(value), masked = maskPhone(text, key);
@@ -207,7 +231,7 @@ function removeMediaUrls(value) {
   if (decoded === null) return "[redacted encoded content]";
   // Arrays, escaped keys, single quotes and prose assignments cannot reliably
   // be removed field-by-field. Prefer dropping the enclosing text to a leak.
-  if (/\b(?:media[\s+_-]*urls?|recording[\s+_-]*urls?|url|uri|media[\s+_-]*uri)(?:\s*["']?\s*[:=]|\s+(?=https?:))/i.test(decoded)) {
+  if (/\b(?:media[\s+_-]*urls?|recording[\s+_-]*urls?|url|uri|media[\s+_-]*uri)(?:\s*(?:["']\s*)?[:=]|\s+(?=https?:))/i.test(decoded)) {
     return "[redacted URL]";
   }
   let removed = false;
@@ -266,7 +290,19 @@ function maskPhone(value, key = "") {
     // survive while a token inside a phone cannot shield its surrounding groups.
     const before = phoneView(text.slice(tokenEnd, index), protectedValues).normalized;
     const after = phoneView(text.slice(end, tokens[i + 1]?.index ?? text.length), protectedValues).normalized;
-    const left = /(\d+)([\p{White_Space}\p{P}\p{S}]*)$/u.exec(before);
+    // Walk the suffix once: an unanchored digit+ suffix search retries every
+    // digit when a long run is followed by prose before this token.
+    let gapStart = before.length;
+    while (gapStart) {
+      const last = before.charCodeAt(gapStart - 1);
+      const start = gapStart - (last >= 0xdc00 && last <= 0xdfff && gapStart > 1 &&
+        before.charCodeAt(gapStart - 2) >= 0xd800 && before.charCodeAt(gapStart - 2) <= 0xdbff ? 2 : 1);
+      if (!PHONE_GAP.test(before.slice(start, gapStart))) break;
+      gapStart = start;
+    }
+    let digitStart = gapStart;
+    while (digitStart && /[0-9]/.test(before[digitStart - 1])) digitStart--;
+    const left = digitStart < gapStart ? [null, before.slice(digitStart, gapStart), before.slice(gapStart)] : null;
     const right = /^([\p{White_Space}\p{P}\p{S}]*)(\d+)/u.exec(after);
     const embedded = (left && (left[1].length < 7 || !/\p{White_Space}/u.test(left[2]))) ||
       (right && (right[2].length < 7 || !/\p{White_Space}/u.test(right[1])));
@@ -277,41 +313,61 @@ function maskPhone(value, key = "") {
   tokenPieces.push(text.slice(tokenEnd));
   text = tokenPieces.join("");
   const { normalized, starts, ends } = phoneView(text, protectedValues);
-  const groups = Array.from(normalized.matchAll(/\d+/g));
-  const gaps = groups.map((group, i) => i ? normalized.slice(groups[i - 1].index + groups[i - 1][0].length, group.index) : "\0");
+  const groups = normalized.match(/\d+/g) ?? [];
+  const positions = [];
+  let searchStart = 0;
+  for (const group of groups) {
+    const index = normalized.indexOf(group, searchStart);
+    positions.push(index);
+    searchStart = index + group.length;
+  }
+  const gaps = groups.map((group, i) => i ? normalized.slice(positions[i - 1] + groups[i - 1].length, positions[i]) : "\0");
   const joins = gaps.map((gap) => LETTER_GAP.test(gap));
-  const wordGaps = gaps.map((gap) => /\p{White_Space}\p{L}+[\p{P}\p{S}]*\p{White_Space}/u.test(gap));
+  const wordGaps = gaps.map((gap) => gap.length >= 3 && /\p{White_Space}\p{L}+[\p{P}\p{S}]*\p{White_Space}/u.test(gap));
   const following = new Array(groups.length).fill(0);
-  for (let i = groups.length - 1; i >= 0; i--) following[i] = groups[i][0].length +
+  for (let i = groups.length - 1; i >= 0; i--) following[i] = groups[i].length +
     (i + 1 < groups.length && joins[i + 1] && !wordGaps[i + 1] && !/[,;]/.test(gaps[i + 1]) ? following[i + 1] : 0);
   const pieces = [];
   let previousEnd = 0, first = 0, count = 0, hasExtension = false;
   const emit = (last) => {
     if (count < 7) return;
-    let start = groups[first].index;
+    let start = positions[first];
     while (start > 0 && /[+(]/.test(normalized[start - 1])) start--;
-    let end = groups[last].index + groups[last][0].length;
+    let end = positions[last] + groups[last].length;
     if (normalized[end] === ")") end++;
     const run = normalized.slice(start, end);
     let phone = run;
-    const marker = /(?:extension|ext\.?|x|#)[\p{White_Space}\p{P}\p{S}]*(?=\d)/iu.exec(run);
+    // Consume separator runs even when the marker has no following digit.
+    const markers = /(?:extension|ext\.?|x|#)[\p{White_Space}\p{P}\p{S}]*/giu;
+    let marker;
+    while ((marker = markers.exec(run)) && !/[0-9]/.test(run[markers.lastIndex] ?? "")) { /* advance */ }
     if (marker && run.slice(0, marker.index).replace(/\D/g, "").length >= 7) phone = run.slice(0, marker.index);
     // Parenthesized suffixes, like explicit extensions, must not expose digits
     // alongside the phone's last four. A short prefix is part of the number.
-    for (const parens of phone.matchAll(/\(\d+\)/g)) {
-      if (phone.slice(0, parens.index).replace(/\D/g, "").length >= 7 &&
-        /^(?:\(\d+\)[\p{White_Space}\p{P}\p{S}]*)+$/u.test(phone.slice(parens.index))) {
-        phone = phone.slice(0, parens.index);
-        break;
-      }
+    // Reuse digit-group indexes instead of rescanning every candidate's prefix
+    // and suffix. All checked suffix gaps are disjoint.
+    let prefixDigits = count, suffixEnd = start + phone.length;
+    let suffixValid = true, suffixStart = suffixEnd;
+    for (let i = phone.includes("(") ? last : first - 1; i >= first; i--) {
+      const group = groups[i], groupStart = positions[i], groupEnd = groupStart + group.length;
+      prefixDigits -= group.length;
+      if (groupEnd >= start + phone.length || normalized[groupStart - 1] !== "(" || normalized[groupEnd] !== ")") continue;
+      suffixValid = suffixValid && PHONE_GAP.test(normalized.slice(groupEnd + 1, suffixEnd));
+      if (suffixValid && prefixDigits >= 7) suffixStart = groupStart - 1;
+      suffixEnd = groupStart - 1;
     }
-    const originalStart = starts[start], originalEnd = ends[end - 1];
+    phone = phone.slice(0, suffixStart - start);
+    const originalStart = starts ? starts[start] : start, originalEnd = ends ? ends[end - 1] : end;
     pieces.push(text.slice(previousEnd, originalStart), `***-***-${phone.replace(/\D/g, "").slice(-4)}`);
     previousEnd = originalEnd;
   };
   for (let i = 0; i < groups.length; i++) {
     const gap = gaps[i];
-    const extension = count >= 7 && /^[\p{White_Space}\p{P}\p{S}]*(?:extension|ext\.?|x|#)[\p{White_Space}\p{P}\p{S}]*$/iu.test(gap);
+    if (gap === "-" || gap === "." || gap === "") {
+      count += groups[i].length;
+      continue;
+    }
+    const extension = count >= 7 && (PHONE_GAP.test(gap) ? gap.includes("#") : /^[\p{White_Space}\p{P}\p{S}]*(?:extension|ext\.?|x)[\p{White_Space}\p{P}\p{S}]*$/iu.test(gap));
     // Ambiguous words may split a single phone (909 a 555 0113). Only clear
     // prose cues can separate an incomplete side; otherwise mask the whole run.
     const proseGap = /\p{White_Space}(?:at|on|room|call|now|or|and|then)[\p{P}\p{S}]*\p{White_Space}/iu.test(gap);
@@ -321,17 +377,17 @@ function maskPhone(value, key = "") {
     // followed by a time supports treating a trailing short group as prose.
     // Other valid groupings, e.g. 123 4567 890, must stay together.
     const lengths = i - first;
-    const completePhone = (lengths === 3 || lengths === 4 && groups[first][0] === "1") &&
-      groups[i - 3][0].length === 3 && groups[i - 2][0].length === 3 && groups[i - 1][0].length === 4;
+    const completePhone = (lengths === 3 || lengths === 4 && groups[first] === "1") &&
+      groups[i - 3].length === 3 && groups[i - 2].length === 3 && groups[i - 1].length === 4;
     const trailingGroup = !hasExtension && completePhone && i - first >= 2 &&
-      gap === " " && /^(?:[1-9]|1[0-2])$/.test(groups[i][0]) && following[i] < 7 &&
-      /^[\p{White_Space}]*[ap]m\b/iu.test(normalized.slice(groups[i].index + groups[i][0].length));
+      gap === " " && /^(?:[1-9]|1[0-2])$/.test(groups[i]) && following[i] < 7 &&
+      /^[\p{White_Space}]*[ap]m\b/iu.test(normalized.slice(positions[i] + groups[i].length));
     if (i && (extension || /\(/.test(gap)) && count >= 7) hasExtension = true;
     if (i && (!joins[i] || wordBoundary || trailingGroup ||
       (!hasExtension && count >= 7 && /[,;]/.test(gap) && following[i] >= 7))) {
       emit(i - 1); first = i; count = 0; hasExtension = false;
     }
-    count += groups[i][0].length;
+    count += groups[i].length;
   }
   if (groups.length) emit(groups.length - 1);
   pieces.push(text.slice(previousEnd));
@@ -340,27 +396,33 @@ function maskPhone(value, key = "") {
     (placeholder) => placeholder === delimiter + delimiter ? delimiter : protectedValues.get(placeholder));
 }
 
+// A failed address consumes the whole local-part run, avoiding a retry at
+// every character of a long word/digit run without an @.
+function maskEmails(value) {
+  return value.replace(/([\w.+-]+@[\w-]+\.[\w.]+)|[\w.+-]+/g,
+    (token, email) => email ? "[email]" : token);
+}
+
 export function maskString(value) {
-  return maskPhone(value
+  return maskPhone(maskEmails(value
     .replace(/\bsi\.[a-f0-9]{32}\.[a-f0-9]{64}\b/gi, "[redacted]")
-    .replace(/\b[a-f0-9]{64}\b/gi, "[redacted]")
-    .replace(/[\w.+-]+@[\w-]+\.[\w.]+/g, "[email]"));
+    .replace(/\b[a-f0-9]{64}\b/gi, "[redacted]")));
 }
 
 // Match the box connector: content and all its descendants retain everything
 // except phone digits and media/recording URLs when includeContent is true.
-export function mask(value, key = "", includeContent = false, inContent = false) {
+export function mask(value, key = "", includeContent = false, inContent = false, digitCache = new WeakMap()) {
   const isContent = inContent || (includeContent && CONTENT_KEYS.test(key));
-  if (Array.isArray(value)) return (maskDigitArray(value, key) ?? value).map((item) => mask(item, key, includeContent, isContent));
+  if (Array.isArray(value)) return (maskDigitArray(value, key, digitCache) ?? value).map((item) => mask(item, key, includeContent, isContent, digitCache));
   if (value && typeof value === "object") {
     return Object.fromEntries(Object.entries(value).filter(([k]) => !isMediaUrlKey(k))
-      .map(([k, v]) => [maskPhone(k), mask(v, k, includeContent, isContent)]));
+      .map(([k, v]) => [maskPhone(k), mask(v, k, includeContent, isContent, digitCache)]));
   }
   if (typeof value === "number") return maskPhoneData(value, key);
   if (typeof value !== "string") return value;
   if (isContent) return maskPhone(value, key);
   if (PHI_KEYS.test(key) || CONTENT_KEYS.test(key)) return value ? `[redacted ${value.length} chars]` : value;
-  return maskPhone(value.replace(/[\w.+-]+@[\w-]+\.[\w.]+/g, "[email]"), key);
+  return maskPhone(maskEmails(value), key);
 }
 
 // Informational helper; the fleet API remains authoritative for hours/holidays.
