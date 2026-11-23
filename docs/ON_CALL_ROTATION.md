@@ -49,6 +49,11 @@ second transfer request and would read it as a failed transfer.
    One surgeon is one surgeon whether a Console row carries their NPI or
    only their name: a row the pool matches is keyed on the pool's provider,
    and two rows the pool does not know are told apart by NPI, then by name.
+   A row whose NPI matches nobody in the pool is matched by name only to a
+   pool provider with no NPI on file; a pool provider whose NPI is a
+   different one is a different person with the same name, and the call goes
+   to on-call with the surgeon-not-in-pool note (one Console provider name
+   carried two NPIs on 2026-11-23).
    The whole routing decision (the rotation read and the Console lookup
    together) has one 2.5-second deadline, so a slow read cannot hold the
    caller longer than that; the Console gets whatever is left of it, never
@@ -112,7 +117,10 @@ team is being paged (not that the transfer failed), tells the caller so,
 confirms the callback number and files the ticket. The urgent ring-out ticket
 says the rotation is still calling: the provider again, then the region's
 medical director and the final director, so a staffer working it knows the
-patient may already be getting a call back from one of them.
+patient may already be getting a call back from one of them. Its transfer
+line names who was rung and in what role ("<name> (this week's on-call
+provider)"), never the number, because on a rotation run the number is a
+provider's own phone. Off the rotation it names the fixed number, as before.
 
 The agent and the ticket say the team is being paged only when the chain's
 record confirmed, within 2 seconds of the ring-out, that the chain is open and
@@ -250,7 +258,9 @@ Phone numbers are never shown there, only how many test numbers are set.
      director; email and NPI are read when present. Header names are matched
      loosely ("Escalation Director", "Director", "Phone Number" and so on).
      The NPI is how a post-op patient's surgeon is found in the pool, so a
-     surgeon with no NPI is matched by name only.
+     surgeon with no NPI is matched by name only, and a surgeon entered with
+     a wrong NPI is not matched at all when the Console row carries the right
+     one: check the NPI against the Console before importing.
    - The schedule CSV needs a week column (the Tuesday the week starts) and a
      provider column.
    - A director who is not in the pool goes in `--directors <file.csv>` with

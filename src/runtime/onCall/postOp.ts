@@ -23,7 +23,8 @@
  *     over its reschedule flag, NextGen Bible §2.1);
  *   - the most recent such date names exactly one surgeon;
  *   - that surgeon is in the on-call table, matched by NPI, else by first and
- *     last name, and is active.
+ *     last name against a pool row with no NPI on file (a pool row carrying
+ *     another NPI is another person), and is active.
  * Anything else goes to the on-call provider with a note in the alert text.
  *
  * NOT YET KEPT. NextGen marks a surgery kept days after it happens: measured
