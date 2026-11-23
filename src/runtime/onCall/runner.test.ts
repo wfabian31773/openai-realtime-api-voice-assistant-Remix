@@ -378,6 +378,29 @@ describe("a pickup at any step stops the chain (success criterion)", () => {
     expect(h.calls[1].to).toBe(phoneOf(IE_DIRECTOR));
   });
 
+  it("gives a level's first call answered with no key press its second call and reminder, as a no-answer would (review of #514, round 15)", async () => {
+    const h = harness();
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    await h.runner.onProviderStatus(h.lastCallAttempt().id, "no-answer");
+    await h.runner.tick(); // the director's text and first call
+    expect(h.calls).toHaveLength(2);
+    const first = h.lastCallAttempt();
+    expect(first).toMatchObject({ levelIndex: 1, attemptNo: 1 });
+    expect(await h.runner.onProviderAck(first.id, "")).toBe("declined");
+    const texts = h.texts.length;
+    h.advance(RETRY_GAP_MS);
+    await h.runner.tick();
+    expect(h.calls).toHaveLength(3);
+    expect(h.calls[2].to).toBe(phoneOf(IE_DIRECTOR));
+    expect(h.lastCallAttempt()).toMatchObject({ levelIndex: 1, attemptNo: 2 });
+    expect(h.texts).toHaveLength(texts + 1);
+    expect(h.texts[texts].to).toBe(phoneOf(IE_DIRECTOR));
+    expect(h.texts[texts].body).toMatch(/REMINDER/);
+    expect(h.escalation()).toMatchObject({ status: "active", levelIndex: 1 });
+  });
+
   it("answers the key press without waiting on another call's hang-up (review of #514, round 14)", async () => {
     const never = vi.fn(() => new Promise<void>(() => {}));
     const h = harness({ endCall: never });

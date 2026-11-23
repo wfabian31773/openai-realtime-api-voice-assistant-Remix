@@ -158,8 +158,9 @@ ended:
   the attempt keeps the outcome it had and the chain stays exhausted, because
   the urgent number has already been told nobody took the patient, and the
   update is what tells it someone may now be calling (review of #514, round
-  13). A press with no key, or a press when the rotation is switched off, still
-  hears "This urgent call has already been closed."
+  13). A press with no key still hears "This urgent call has already been
+  closed." Section 6 says what a press hears after the rotation is switched
+  off.
 
 ### When the first call is not taken
 
@@ -357,6 +358,14 @@ The boot log prints one of:
 
 `running: false` with a `disabledBecause` or `blockedBy` says why it is off.
 Phone numbers are never shown there, only how many test numbers are set.
+
+A deployment switched off while a chain was running finishes that chain and
+says so in the log (section 6):
+
+```
+[ON-CALL] <CallSid>: the rotation is off; closed at level <n>, nobody else is called
+[ON-CALL] the rotation is off: no chain is still open; the drain stops
+```
 
 ---
 
@@ -592,9 +601,37 @@ ORDER BY at;
    Republish. The boot line reads `LIVE`.
 
 To turn it off at any time: `ON_CALL_ROTATION_MODE=off` (or unset) and
-republish. Urgent calls go back to the fixed number at once. An escalation
-already running rings nobody more, and a key press on a call already placed
-hears that the urgent call has been closed.
+republish. Urgent calls go back to the fixed number at once, and no new chain
+is opened. A chain that was still running when the switch was made is finished
+by the switched-off deployment rather than left open (review of #514, round
+15):
+
+- **Nobody else is rung or texted.** At the chain's next step (a second call,
+  the next level, or a call that was waiting to be placed), the chain is
+  closed `cancelled` and `URGENT_NOTIFICATION_NUMBER` gets one text saying the
+  rotation was switched off while it was running, with the patient's details
+  as on every urgent text. That text comes from the rotation's own caller ID
+  (`ON_CALL_CALLER_ID`, or `TWILIO_PHONE_NUMBER`), and never from the Wayne
+  Operator Line: if the only number left is the operator line, the text is not
+  sent and the log says so. A chain already on its last call of its last level
+  ends `exhausted` as it would have, with the usual "nobody took it" text.
+- **A provider already rung can still take the patient.** A key press on a
+  call placed before the switch is recorded as it would have been: while the
+  chain is open it takes the patient and the provider hears the callback
+  number; after the chain has ended it hears that nobody was reached in time,
+  and the urgent number gets the usual update. A key press that cannot be
+  recorded (the Hub not answering) hears "We could not record that, and we
+  are no longer calling other providers for this patient. If you can, please
+  call the patient from the number in the text message", never that we will
+  keep trying.
+- **It stops by itself.** The switched-off deployment checks every 10 seconds
+  until no chain is open, then stops for good and logs
+  `[ON-CALL] the rotation is off: no chain is still open; the drain stops`.
+  It also stops after two hours and 16½ minutes (the longest a chain can be
+  held, plus the ringing guard, plus 10 minutes). On a deployment whose
+  on-call tables were never created, it asks the Hub twice, 10 minutes apart,
+  and stops (`the on-call tables are not on the Hub, so no chain can be
+  open`); those two `information_schema` reads are all it costs.
 
 ---
 

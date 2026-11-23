@@ -219,6 +219,9 @@ describe("the SQL store", () => {
     }
     expect(SQL.endAttemptAccepted).toMatch(/e\.status = 'active'/);
     expect(SQL.endAttemptAccepted).toMatch(/outcome = 'in_progress'/);
+    // The switched-off drain stops once no chain is open; reading any other
+    // status would stop it with a chain still ringing, or never (round 15).
+    expect(SQL.hasActive).toMatch(/from on_call_escalations where status = 'active' limit 1/);
     expect(SQL.acceptLate).toContain(`outcome in (${LATE_ACCEPTABLE_OUTCOMES.map((o) => `'${o}'`).join(", ")})`);
     expect(LATE_ACCEPTABLE_OUTCOMES).not.toContain("taken_elsewhere");
   });
