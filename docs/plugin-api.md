@@ -12,6 +12,82 @@ this change** — Wayne applies Hub migrations.
 Matching contract: bearer tokens `si.<jti>.<secret>`, hashed secret, scopes,
 constant-time compare, 5-minute single-use confirm token minted **on approve**.
 
+## Hosted MCP (`POST /api/plugin/v1/mcp`)
+
+Built, **not deployed**: the zero-dependency voice-fleet connector also runs
+as a stateless Streamable HTTP endpoint on this same Express app. The public
+server is `server/index.ts` on `API_PORT`, default 5000. Team Bots can select
+**Remote HTTPS** and use
+`https://openai-realtime-api-voice-assistant-remix--fabianwayne1.replit.app/api/plugin/v1/mcp`
+with header `Authorization: Bearer <plugin token>` after publication.
+
+Authentication runs before body parsing, using the existing
+`parseBearerToken` / `verifyStoredToken` flow (jti lookup, hashed secret,
+expiry and revocation). Missing or invalid credentials return 401 with
+`WWW-Authenticate: Bearer realm="voice-fleet-mcp"`. **No new scope is added**:
+each tool forwards the caller's exact bearer to the REST API, whose existing
+scope, ownership, approval and write gates still apply.
+
+HTTP POST checks `Origin` before parsing or dispatch. Set
+`VOICE_FLEET_MCP_ALLOWED_ORIGINS` to a comma-separated list of exact allowed
+origins (whitespace trimmed), e.g. `https://bot.example,http://localhost:3000`.
+The app's own configured public origin is also allowed, using the existing
+`DOMAIN` / `REPLIT_DOMAINS` / `REPLIT_DEV_DOMAIN` resolution (`DOMAIN` first;
+published hosts preferred in production). Bare domains use HTTPS and only the
+origin part of a configured URL is used. No implicit localhost origin or request
+host/forwarding header is trusted. A present, unlisted `Origin` returns 403 with
+a JSON error and no dispatch; an absent `Origin` is allowed for server-to-server
+clients. This setting applies to hosted HTTP only.
+
+Both transports support `2025-06-18`, `2025-03-26` and `2024-11-05`.
+`initialize` echoes a supported requested version, otherwise selects the latest
+(`2025-06-18`). HTTP accepts an absent `MCP-Protocol-Version` header and returns
+400 with a JSON error for an unsupported header value.
+
+POST accepts JSON-RPC messages or batches and returns ordinary JSON in input
+order. Protocol `2025-06-18` removed batching; accepting it remains a lenient
+compatibility extension. Client responses (`result`/`error` without `method`)
+and notifications are ignored; a POST containing only those returns 202
+without a body. Mixed batches answer requests and omit responses/notifications.
+Batches over 20 entries return HTTP 400 / `-32600 Batch too large (max 20)`
+with `id: null` before any dispatch.
+Each message must be an object with `jsonrpc: "2.0"`. Requests require a string
+method and a string or finite number id; notifications have a string method and
+no id. Invalid envelopes, including `{}`, requests with `id: null`, and messages
+with both `method` and either `result` or `error`, receive
+`-32600 Invalid Request` with `id: null` and trigger no downstream fetches for
+that item. A single invalid message or empty batch returns HTTP 400; invalid
+batch members produce error entries in order with valid replies. These boundary
+checks do not change stdio behavior.
+There are no MCP
+sessions or SSE streams. Invalid JSON returns 400 with `-32700`; the body cap
+is 1 MB (413). Authenticated GET/DELETE return 405 with `Allow: POST`.
+The raw-body voice proxy remains before the global parsers; MCP bypasses
+those parsers and authenticates before its own bounded parser runs.
+
+The upstream defaults to `http://127.0.0.1:${API_PORT || 5000}`, with a trusted
+`VOICE_FLEET_MCP_INTERNAL_BASE_URL` override. Request host/forwarding headers
+never select it. `VOICE_FLEET_TIMEOUT_MS` defaults to 30000. The connector
+never logs tokens or bodies. As in the original connector, operator SID reads
+and operator SMS-send replies use the connector's `mask()` to mask phones to
+their last four digits, omit media/recording URL fields, and redact string content
+and name/DOB/email/subject fields by default. On the three operator reads,
+`includeContent: true` returns content fields and all descendants unredacted
+except for phone masking and URL removal. Embedded Twilio API Media/Recordings
+URLs (any version, case, extension or query), Twilio CDN URLs and conservatively
+all non-API Twilio subdomain URLs become `[redacted URL]`, including in prose,
+serialized JSON and escaped/percent-encoded text. Nearby connector-separated
+digit fragments share one mask: `909555-01 and 13` becomes `***-***-0113`, and
+`909-555-0113 and 12` becomes `***-***-1312`; clear times, rooms and dates after
+complete phones survive. Names/emails outside content remain masked. Other tools, including
+full transcripts and live-call status, preserve fleet JSON. Both transports
+apply the same rules. Live tools call their routes directly without a
+`/capabilities` preflight, preserving access for `calls:direct`-only tokens;
+the REST API enforces capability, scope and ownership checks.
+
+Both transports share the same 26 tools and `serverInfo.version = 4.0.0`.
+See [connector setup and tests](../connectors/voice-fleet-mcp/README.md).
+
 ## Scopes
 
 | scope | tools | who gets it |

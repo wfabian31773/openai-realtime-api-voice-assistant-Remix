@@ -185,10 +185,15 @@ describe.each(Object.keys(LANES) as Slug[])('%s, bound for the runtime', (slug) 
       const wire = wireTool(slug, name)!.parameters;
       // v204 adds ONE thing on purpose: `callerStatedARequest` is required on
       // the wire for the two PCP filing tools while the zod keeps it optional
-      // (`requireOnTheWire`). Everything else must still be the SDK's own.
+      // (`requireOnTheWire`). v267 does the same for no-ivr's
+      // record_answered_question and `follow_up_owed`. Everything else must
+      // still be the SDK's own.
       const expected = withoutDescriptions(sdkSchema) as Schema & { required?: string[] };
       if (slug === 'pcp' && WIRE_REQUIRED_PCP.has(name)) {
         expected.required = [...(expected.required ?? []), 'callerStatedARequest'];
+      }
+      if (slug === 'no-ivr' && name === 'record_answered_question') {
+        expected.required = [...(expected.required ?? []), 'follow_up_owed'];
       }
       expect(withoutDescriptions(wire), `${slug}/${name}`).toEqual(expected);
     }
@@ -284,7 +289,11 @@ describe('what the descriptions cost on the wire', () => {
     // records requester and requester name (operator ruling 2026-11-09,
     // records never ring the on-call; who asked has to reach Medical Records).
     // Measured 13,569 after trimming the new descriptions to one line each.
-    ['no-ivr', 13_650],
+    // v267 RAISED no-ivr once, 13,650 -> 14,050: record_answered_question
+    // gained follow_up_owed, required on the wire, so the model says whether
+    // anything is still owed before it closes a call as answered (6 after-hours
+    // requests lost behind that record in 14 days). Measured 13,986.
+    ['no-ivr', 14_050],
     // v197 RAISED pcp once, 7,000 -> 7,500: handle_patient_medical_records_request
     // gained the eight fields it asks for (operator, 2026-11-10, on PCP-82755:
     // the answers had nowhere to land). Measured 7,422 after cutting every new

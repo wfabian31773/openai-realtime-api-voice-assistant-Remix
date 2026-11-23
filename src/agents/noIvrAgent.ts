@@ -1,6 +1,7 @@
 import { nameKey, rememberVerifiedIdentity } from '../tools/verifiedIdentity';
 import { nameOnTheNumber, verifyPatient } from '../services/patientVerification';
 import { filedUnderAnotherNameNote, recordNameForTheFiling } from './afterHoursFiledName';
+import { FOLLOW_UP_OWED_DESCRIPTION, answeredQuestionResult } from './afterHoursAnsweredQuestion';
 import { callerAffirmedThePhoneMatch } from '../tools/greetingAffirmation';
 import { dobKey } from '../services/callFactsLedger';
 import { recognisedFirstName } from '../services/greetingPersonalisation';
@@ -27,7 +28,7 @@ import { URGENT_SYMPTOMS, getCurrentDateTimeContext } from "../config/knowledgeB
 // of its entries are conditionals written as prose. See afterHoursTriage.ts.
 import { renderTriagePrompt } from "../tools/afterHoursTriage";
 import { recordingExecute, recordToolEvent, flushAzulTimeline } from "../services/toolTimeline";
-import { keepFieldDescriptions } from "../services/toolFieldDescriptions";
+import { keepFieldDescriptions, requireOnTheWire } from "../services/toolFieldDescriptions";
 // The queue lanes' "ask once, then file anyway" ruling (operator, 2026-09-04),
 // which this lane never reached because it builds create_ticket by hand.
 import { decideDobEscape, dobStatusNote, dobEscapeMarker, type DobStatus } from "../tools/dobEscape";
@@ -2182,12 +2183,16 @@ This does NOT affect the call - it's purely for internal tracking.`,
     },
   });
 
-  const recordAnsweredQuestionTool = recordedTool({
+  // v267: the model says whether anything is still owed (afterHoursAnsweredQuestion.ts);
+  // a yes is refused, so the call is not read as answered and the floor still files.
+  const recordAnsweredQuestionTool = requireOnTheWire(recordedTool({
     name: "record_answered_question",
     description: "Record that every caller request was fully answered and no staff action or follow-up remains. Call only after asking if anything else is needed. Never use for unresolved requests or failed ticket filings.",
-    parameters: z.object({}),
-    execute: async () => ({ success: true, ticketCreated: false, callbackRequired: false }),
-  });
+    parameters: z.object({
+      follow_up_owed: z.boolean().optional().describe(FOLLOW_UP_OWED_DESCRIPTION),
+    }),
+    execute: async ({ follow_up_owed }) => answeredQuestionResult(follow_up_owed),
+  }), ['follow_up_owed']);
 
   const createTicketTool = recordedTool({
     name: "create_ticket",

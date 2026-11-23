@@ -2133,6 +2133,16 @@ import { callEnvironment } from "./callRecord";
  * v265 (#513, `c2c9709f`); v245 is #488 on its open branch. No migration.
  * On main since #512 (`c2841ff6`).
  *
+ * v267 — A FOLLOW-UP OWED IS NOT AN ANSWERED CALL (2026-11-23). The
+ * after-hours line's record_answered_question took no arguments, and once it
+ * was recorded the teardown floor filed nothing; on 7 no-ivr calls of
+ * 2026-11-08..22 the agent still owed the caller a follow-up and no ticket of
+ * any provenance exists. The tool now takes follow_up_owed, required on the
+ * wire; a yes is refused, nothing is recorded as answered, and the model is
+ * told to file (afterHoursAnsweredQuestion.ts). Above main's v266 (#512,
+ * `c2841ff6`); v268 is #514 on its open branch. No migration.
+ * On main since #515 (`32d0e528`).
+ *
  * v268 — THE AFTER-HOURS ON-CALL ROTATION (2026-11-23). Operator: a new
  * after-hours process from 2026-12-01, built now. An urgent after-hours
  * transfer on the runtime (no-ivr) rings the week's on-call provider read
@@ -2143,8 +2153,8 @@ import { callEnvironment } from "./callRecord";
  * logs every attempt (src/runtime/onCall/). Dark until
  * ON_CALL_ROTATION_MODE is test or live; test mode rings only
  * ON_CALL_TEST_PHONES. The 12 urgent triggers, the triage flow and the
- * caller's words are unchanged. Above main's v266 (#512, `c2841ff6`); v267
- * is reserved for unmerged work on another branch; v245 is #488 on its open
+ * caller's words are unchanged. Above main's v267 (#515, `32d0e528`), which it
+ * contains along with v266 (#512, `c2841ff6`); v245 is #488 on its open
  * branch. Migration
  * migrations/add_on_call_rotation.sql, written and NOT applied.
  */
