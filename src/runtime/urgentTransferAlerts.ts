@@ -23,7 +23,12 @@ import {
 
 export interface UrgentTransferAlerts {
   /** The heads-up text, sent BEFORE the on-call phone rings. */
-  smsBeforeDial(input: { callerNumber?: string; escalationDetails?: EscalationDetails }): void;
+  smsBeforeDial(input: {
+    callerNumber?: string;
+    escalationDetails?: EscalationDetails;
+    /** A line put at the top of the text (v268: who the on-call rotation is ringing). */
+    note?: string;
+  }): void;
   /** The urgent ticket, filed when a transfer rang and nobody took it. */
   fallbackTicket(input: {
     callSid: string;
@@ -125,7 +130,11 @@ export function defaultUrgentTransferAlerts(
       void (async () => {
         try {
           const body = buildUrgentTransferSms(
-            { callerNumber: input.callerNumber, escalationDetails: input.escalationDetails },
+            {
+              callerNumber: input.callerNumber,
+              escalationDetails: input.escalationDetails,
+              ...(input.note ? { note: input.note } : {}),
+            },
             urgentAlertTime(now()),
           );
           await (await smsClient()).messages.create({

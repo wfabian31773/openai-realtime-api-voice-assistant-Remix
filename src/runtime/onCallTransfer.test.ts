@@ -14,6 +14,7 @@ import {
   rotationMayTakeTheDial,
   TRANSFER_ACCEPT_PATH,
   TRANSFER_STATUS_PATH,
+  urgentTextRotationNote,
   type OnCallTransferWiring,
 } from "./runtimeTransfer";
 import type { TransferTwilioOps } from "./warmTransfer";
@@ -487,6 +488,65 @@ describe("an urgent after-hours call with the rotation on", () => {
     await outcome;
   });
 
+  it("marks that heads-up text in test mode: the rotation is ringing test numbers, not the provider", async () => {
+    const { ops } = fakeOps();
+    const built = buildWiring();
+    const rec = recordingAlerts();
+    const transfer = transferWith(ops, built.wiring, rec.alerts);
+    urgent();
+    const outcome = transfer.handoffFor("no-ivr", META)();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    expect(rec.beforeDial).toHaveLength(1);
+    const input = rec.beforeDial[0] as { note?: string; escalationDetails?: { reason?: string } };
+    expect(input.note).toBe("[TEST MODE] The on-call rotation is ringing test numbers, not the provider.");
+    // The patient's details are still in the text, never behind a link.
+    expect(input.escalationDetails?.reason).toBe("Sudden loss of vision in the left eye");
+    transfer.handleAccept(signed(TRANSFER_ACCEPT_PATH, { CallSid: "CAoffice", Digits: "1" }));
+    await outcome;
+  });
+
+  it("names whose phone is ringing on that heads-up text in live mode", async () => {
+    const { ops } = fakeOps();
+    const built = buildWiring({ env: { ON_CALL_ROTATION_MODE: "live", ON_CALL_CALLER_ID: ROTATION_CALLER_ID } });
+    const rec = recordingAlerts();
+    const transfer = transferWith(ops, built.wiring, rec.alerts);
+    urgent();
+    const outcome = transfer.handoffFor("no-ivr", META)();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    await vi.waitFor(() => expect(built.texts).toHaveLength(1));
+    const input = rec.beforeDial[0] as { note?: string };
+    const first = syntheticRotation().providers.find((p) => p.id === 1)!;
+    expect(input.note).toBe(`The on-call rotation is ringing ${levelLabel({ role: "on_call", name: first.fullName })}.`);
+    expect(input.note).not.toContain("[TEST MODE]");
+    transfer.handleAccept(signed(TRANSFER_ACCEPT_PATH, { CallSid: "CAoffice", Digits: "1" }));
+    await outcome;
+  });
+
+  it("times the ring-out ticket's ring from the dial, not from the dial plus the hand-off wait", async () => {
+    const { ops } = fakeOps();
+    const built = buildWiring();
+    built.wiring.handoffResultWaitMs = 1_100;
+    let finish: () => void = () => undefined;
+    const gate = new Promise<void>((ok) => (finish = ok));
+    const inner = built.wiring.runner.afterInCallTransfer;
+    built.wiring.runner = {
+      afterInCallTransfer: async (r) => {
+        await gate;
+        return inner(r);
+      },
+    };
+    const rec = recordingAlerts();
+    const transfer = transferWith(ops, built.wiring, rec.alerts);
+    urgent();
+    const outcome = transfer.handoffFor("no-ivr", META)();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    transfer.handleStatus(signed(TRANSFER_STATUS_PATH, { CallSid: "CAoffice", CallStatus: "no-answer" }));
+    await expect(outcome).rejects.toThrow(/^handoff_failed:NO_ANSWER$/);
+    // The dial rang out at once; the 1.1 s spent waiting on the hand-off is not ringing.
+    expect((rec.tickets[0] as { handoff: { ringSeconds: number } }).handoff.ringSeconds).toBe(0);
+    finish();
+  });
+
   it("never starts a second chain for one call: a second escalation dials nobody", async () => {
     const { ops, dialed } = fakeOps();
     const built = buildWiring();
@@ -825,6 +885,27 @@ describe("which dials the rotation may take", () => {
 describe("live mode: a level with no phone", () => {
   const LIVE = { ON_CALL_ROTATION_MODE: "live", ON_CALL_CALLER_ID: ROTATION_CALLER_ID };
 
+  it("names the level actually rung on the heads-up text, not the one with no phone", async () => {
+    const base = syntheticRotation();
+    const rotation: RotationData = {
+      ...base,
+      providers: base.providers.map((p) => (p.id === 1 ? provider(1, "Inland Empire", { phone: "" }) : p)),
+    };
+    const { ops } = fakeOps();
+    const built = buildWiring({ env: LIVE, rotation });
+    const rec = recordingAlerts();
+    const transfer = transferWith(ops, built.wiring, rec.alerts);
+    urgent();
+    const outcome = transfer.handoffFor("no-ivr", META)();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    const director = base.providers.find((p) => p.id === IE_DIRECTOR)!;
+    expect((rec.beforeDial[0] as { note?: string }).note).toBe(
+      `The on-call rotation is ringing ${levelLabel({ role: "region_director", name: director.fullName })}.`,
+    );
+    transfer.handleAccept(signed(TRANSFER_ACCEPT_PATH, { CallSid: "CAoffice", Digits: "1" }));
+    await outcome;
+  });
+
   it("skips a first level with no phone and rings the next level", async () => {
     const base = syntheticRotation();
     const rotation: RotationData = {
@@ -888,6 +969,20 @@ describe("today's path, byte for byte", () => {
     await ringsTheFixedNumber(built.wiring);
     expect(built.texts).toHaveLength(0);
     expect(built.handed).toHaveLength(0);
+  });
+
+  it("with the rotation switched off, the heads-up text carries no rotation line", async () => {
+    const built = buildWiring({ env: { ON_CALL_ROTATION_MODE: "off" } });
+    const rec = recordingAlerts();
+    const { ops } = fakeOps();
+    const transfer = transferWith(ops, built.wiring, rec.alerts);
+    urgent();
+    const outcome = transfer.handoffFor("no-ivr", META)();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    expect(rec.beforeDial).toHaveLength(1);
+    expect(rec.beforeDial[0]).not.toHaveProperty("note");
+    transfer.handleAccept(signed(TRANSFER_ACCEPT_PATH, { CallSid: "CAoffice", Digits: "1" }));
+    await outcome;
   });
 
   it("with the rotation switched off, never reads the rotation or the caller's identity and logs nothing about it", async () => {
@@ -980,5 +1075,31 @@ describe("today's path, byte for byte", () => {
     await ringsTheFixedNumber(built.wiring, "answering-service");
     expect(built.texts).toHaveLength(0);
     expect(built.handed).toHaveLength(0);
+  });
+});
+
+describe("the rotation line on the urgent heads-up text", () => {
+  const plan = {
+    levels: [
+      { role: "surgeon" as const, providerId: 7, name: "Dr. Example Surgeon", phone: "+15550777777" },
+      { role: "final" as const, providerId: 9, name: "Dr. Example Final", phone: "+15550999999" },
+    ],
+    notes: [],
+  };
+
+  it("in live mode names the first level the chain rings, by role", () => {
+    expect(urgentTextRotationNote(plan, "live")).toBe(
+      "The on-call rotation is ringing Dr. Example Surgeon (the patient's surgeon).",
+    );
+  });
+
+  it("in test mode says the rotation is ringing test numbers, and names nobody", () => {
+    const note = urgentTextRotationNote(plan, "test")!;
+    expect(note).toBe("[TEST MODE] The on-call rotation is ringing test numbers, not the provider.");
+    expect(note).not.toContain("Example");
+  });
+
+  it("says nothing for a plan with no level", () => {
+    expect(urgentTextRotationNote({ levels: [], notes: [] }, "live")).toBeUndefined();
   });
 });

@@ -122,11 +122,22 @@ export function syntheticTestPlan(config: OnCallConfig): ChainPlan {
   };
 }
 
-/** In test mode every level rings a test number, level by level. */
+/**
+ * In test mode every level that has a phone rings a test number, level by
+ * level. A level with no dialable phone keeps none, so a test chain skips the
+ * same levels a live one would (review of #514); the test number for each
+ * level is still chosen by the level's place in the chain.
+ */
 export function withTestPhones(plan: ChainPlan, config: OnCallConfig): ChainPlan {
   if (config.mode !== "test") return plan;
-  return { ...plan, levels: plan.levels.map((l, i) => ({ ...l, phone: testPhoneFor(config, i) })) };
+  return {
+    ...plan,
+    levels: plan.levels.map((l, i) => ({ ...l, phone: DIALABLE.test(l.phone) ? testPhoneFor(config, i) : "" })),
+  };
 }
+
+/** The shape every dial checks (`dialablePlan`, the runner's `isPhone`). */
+const DIALABLE = /^\+\d{10,15}$/;
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T | null> {
   let timer: NodeJS.Timeout | undefined;

@@ -4,6 +4,7 @@ import {
   createRotationCache,
   decideRoute,
   syntheticTestPlan,
+  withTestPhones,
   type RouteInput,
 } from "./routing";
 import { CONSOLE_UNAVAILABLE_NOTE, NO_IDENTITY_NOTE } from "./postOp";
@@ -300,6 +301,26 @@ describe("test mode", () => {
       "+15550100002",
     ]);
     expect(ids(d)?.map((x) => x[1])).toEqual([1, IE_DIRECTOR, FINAL_DIRECTOR]);
+  });
+
+  it("keeps a level with no phone empty in test mode, so the chain skips it as live would", async () => {
+    const plan = {
+      levels: [
+        { role: "on_call" as const, providerId: 1, name: "A", phone: "+15550111111" },
+        { role: "region_director" as const, providerId: 2, name: "B", phone: "" },
+        { role: "final" as const, providerId: 3, name: "C", phone: "not a number" },
+        { role: "final" as const, providerId: 4, name: "D", phone: "+15550444444" },
+      ],
+      notes: [],
+    };
+    expect(withTestPhones(plan, TEST).levels.map((l) => l.phone)).toEqual([
+      "+15550100001",
+      "",
+      "",
+      // The test number is still chosen by the level's place in the chain.
+      "+15550100002",
+    ]);
+    expect(withTestPhones(plan, LIVE)).toBe(plan);
   });
 
   it("runs a synthetic chain over the test numbers before the rotation is imported", async () => {

@@ -297,6 +297,22 @@ export function rotationMayTakeTheDial(policy: ReturnType<typeof resolveHandoffD
  * to ring now and the runner cannot ring a level with none either. Null when
  * no level has a phone, so the call takes today's path.
  */
+/**
+ * The line at the top of today's urgent text when the rotation took the dial:
+ * that text still goes to URGENT_NOTIFICATION_NUMBER on every urgent call, a
+ * real caller's in test mode included (docs/ON_CALL_ROTATION.md section 5),
+ * so it says whose phone is ringing. In test mode that is a test number, never
+ * the provider, which the reader needs to know when the caller is real
+ * (review of #514).
+ */
+export function urgentTextRotationNote(plan: ChainPlan, mode: string | undefined): string | undefined {
+  const first = plan.levels[0];
+  if (!first) return undefined;
+  return mode === "test"
+    ? "[TEST MODE] The on-call rotation is ringing test numbers, not the provider."
+    : `The on-call rotation is ringing ${levelLabel(first)}.`;
+}
+
 export function dialablePlan(plan: ChainPlan): ChainPlan | null {
   const first = plan.levels.findIndex((l) => E164.test(l.phone));
   if (first < 0) return null;
@@ -906,7 +922,12 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
           // With the rotation ringing, the dial happens even when the policy
           // had no number of its own (clinical_destination_not_configured).
           if ((policy.allowed && policy.policy !== "pcp") || holder.run) {
-            urgentAlerts.smsBeforeDial({ callerNumber: metadata.callerPhone, escalationDetails: details });
+            const note = holder.run ? urgentTextRotationNote(holder.run.plan, onCall?.config.mode) : undefined;
+            urgentAlerts.smsBeforeDial({
+              callerNumber: metadata.callerPhone,
+              escalationDetails: details,
+              ...(note ? { note } : {}),
+            });
           }
           if (mode === "blind") {
             /**
@@ -1142,6 +1163,10 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
           throw e;
         }
         const handed = holder.run ? handOff(holder.run, outcome) : null;
+        // The ring is read here, before the hand-off wait below, so the
+        // ticket's ring time is the dial's and not the dial's plus that wait
+        // (review of #514).
+        const ringSeconds = Math.round((Date.now() - dialStartedAt) / 1000);
         /**
          * WHAT THE CALLER AND THE TICKET ARE TOLD WAITS FOR THE HAND-OFF,
          * briefly. A not-taken dial is "the on-call team is being paged" only
@@ -1178,7 +1203,6 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
           // refusal that rang nobody even if the dial itself answered
           // UNAVAILABLE: it carries on to the ticket (review of #514).
           if (!outcome.ok && outcome.status === "UNAVAILABLE" && !holder.run) return { outcome, chainCarriesOn };
-          const ringSeconds = Math.round((Date.now() - dialStartedAt) / 1000);
           /**
            * THE URGENT SAFETY NET — the old core's `fileUrgentHandoffFallbackTicket`.
            *

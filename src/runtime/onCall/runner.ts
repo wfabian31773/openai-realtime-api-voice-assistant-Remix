@@ -225,9 +225,15 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
       urgentAlertTime(now()),
     );
 
-  /** Never rings a number outside the test list while either side is in test mode. */
+  /**
+   * Never rings a number outside the test list while either side is in test
+   * mode. A level with no phone rings nobody either way, so it is not outside
+   * the list: it is skipped below as it would be live (review of #514).
+   */
   const outsideTheTestList = (e: EscalationRow, level: ChainLevel) =>
-    (e.mode === "test" || config.mode === "test") && !config.testPhones.includes(level.phone);
+    (e.mode === "test" || config.mode === "test") &&
+    isPhone(level.phone) &&
+    !config.testPhones.includes(level.phone);
 
   async function notifyQuietly(body: string, callSid: string, mode: OnCallMode) {
     try {

@@ -1029,6 +1029,28 @@ describe("test mode", () => {
     expect(h.escalation()).toMatchObject({ status: "accepted", acceptedBy: null });
   });
 
+  it("skips a test level with no phone straight to the next level, as live does, instead of cancelling", async () => {
+    const h = harness({ config: TEST });
+    const plan = syntheticTestPlan(TEST);
+    plan.levels[1] = { ...plan.levels[1], phone: "" };
+    const esc = await h.runner.afterInCallTransfer(inCall(plan, "no_answer", { mode: "test" }));
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    await h.runner.onProviderStatus(h.lastCallAttempt().id, "no-answer");
+    expect(h.escalation()).toMatchObject({ levelIndex: 1, attemptNo: 1, phase: "due" });
+    const before = h.calls.length;
+    await h.runner.tick(); // level 1 has no number
+    expect(h.escalation()).toMatchObject({ status: "active", levelIndex: 2, attemptNo: 1 });
+    expect(h.urgent).toHaveLength(0);
+    const level1 = [...h.store.attempts.values()].filter((a) => a.levelIndex === 1);
+    expect(level1).toHaveLength(1);
+    expect(level1[0]).toMatchObject({ kind: "call", outcome: "failed", dialedTo: null });
+    expect(h.calls.length).toBe(before);
+    await h.runner.tick();
+    expect(h.calls.length).toBe(before + 1);
+    expect(h.calls[h.calls.length - 1].to).toBe(TEST.testPhones[1]);
+  });
+
   it("marks every text as a test", async () => {
     const h = harness({ config: TEST });
     const esc = await h.runner.afterInCallTransfer(inCall(syntheticTestPlan(TEST), "no_answer", { mode: "test" }));
