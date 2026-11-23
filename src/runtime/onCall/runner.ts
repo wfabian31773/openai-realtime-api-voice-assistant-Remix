@@ -711,12 +711,24 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
 
     const logged = await store.logAttempt({ ...base, kind: "call", dialedTo: level.phone });
     state.call = logged;
-    // The text and the two writes above can each take a while (Twilio's own
-    // request timeout is 30 s, and the Hub pool has none), and a ringing row
-    // is due again at the ringing guard. If the chain moved on meanwhile, a
-    // call placed now would ring a level the chain has left, so the row is
-    // read once more first: anything that touched it since the "ringing"
-    // write bumped its version (review of #514, round 4).
+    // The call says the details are in a text only when one reached this
+    // number on this escalation (review of #514, round 12).
+    let textSent = smsOk;
+    if (!textSent) {
+      try {
+        textSent = await detailsTextReached(row.id, row.callSid, level.phone);
+      } catch (err) {
+        log(`[ON-CALL] ${row.callSid}: could not read level ${row.levelIndex}'s earlier texts: ${(err as Error)?.message ?? err}`);
+      }
+    }
+    // The text, the writes above and the earlier-texts read can each take a
+    // while (Twilio's own request timeout is 30 s, and the Hub pool has
+    // none), and a ringing row is due again at the ringing guard. If the
+    // chain moved on meanwhile, a call placed now would ring a level the
+    // chain has left, so the row is read once more first: anything that
+    // touched it since the "ringing" write bumped its version (review of
+    // #514, round 4). Nothing is awaited between this read and the dial, so
+    // every slow step is before it (round 18).
     const current = await store.getEscalation(row.id);
     if (!current || current.status !== "active" || current.version !== ringingVersion) {
       // The chain moved on, so nothing here moves it again, even if this
@@ -730,16 +742,6 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
         `[ON-CALL] ${row.callSid}: the chain moved on while level ${row.levelIndex}'s text was being sent; that level is not called`,
       );
       return;
-    }
-    // The call says the details are in a text only when one reached this
-    // number on this escalation (review of #514, round 12).
-    let textSent = smsOk;
-    if (!textSent) {
-      try {
-        textSent = await detailsTextReached(row.id, row.callSid, level.phone);
-      } catch (err) {
-        log(`[ON-CALL] ${row.callSid}: could not read level ${row.levelIndex}'s earlier texts: ${(err as Error)?.message ?? err}`);
-      }
     }
     let placed: { sid: string };
     try {

@@ -2274,6 +2274,41 @@ describe("a provider call whose text did not send (review of #514, round 12)", (
     expect(h.log.mock.calls.some(([l]) => /could not read level 1's earlier texts/.test(String(l)))).toBe(true);
   });
 
+  it("does not call a level the chain left while its earlier texts were being read (review of #514, round 18)", async () => {
+    const { sendSms } = failingTextsTo([phoneOf(IE_DIRECTOR)]);
+    const h = harness({ sendSms });
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    await h.runner.onProviderStatus(h.lastCallAttempt().id, "no-answer");
+    const before = h.calls.length;
+    // The text to the director fails, so the earlier texts are read; while
+    // that read is out, something else touches the row.
+    const real = h.store.attemptsFor.bind(h.store);
+    let textFailed = false;
+    (sendSms as any).mockImplementationOnce(async () => {
+      textFailed = true;
+      throw new Error("sms down");
+    });
+    vi.spyOn(h.store, "attemptsFor").mockImplementation(async (sid: string) => {
+      if (textFailed) {
+        textFailed = false;
+        const e = [...h.store.escalations.values()][0];
+        h.store.escalations.set(e.id, { ...e, version: e.version + 1 });
+      }
+      return real(sid);
+    });
+    await h.runner.tick();
+    expect(h.calls.slice(before).filter((c) => c.to === phoneOf(IE_DIRECTOR))).toHaveLength(0);
+    const unplaced = [...h.store.attempts.values()].filter(
+      (a) => a.kind === "call" && a.levelIndex === 1 && a.providerCallSid == null,
+    );
+    expect(unplaced.length).toBeGreaterThan(0);
+    expect(unplaced.every((a) => a.outcome === "failed")).toBe(true);
+    const lines = h.log.mock.calls.map(([l]) => String(l));
+    expect(lines.some((l) => l.includes("chain moved on while level 1's text was being sent"))).toBe(true);
+  });
+
   it("reads the number again to a second key press from the call that took the patient", async () => {
     const { sendSms } = failingTextsTo([phoneOf(IE_DIRECTOR)]);
     const h = harness({ sendSms });
