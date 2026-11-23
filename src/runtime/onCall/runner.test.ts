@@ -1357,4 +1357,34 @@ describe("one row that never answers holds no other row (review, 2026-11-23)", (
     expect(h.calls).toHaveLength(0);
     expect(h.escalation()).toMatchObject({ phase: "ringing" });
   });
+
+  it("texts and calls once when a step stalls before its ringing write past the budget and the lease (review of #514, round 8)", async () => {
+    // The step stalls in its first store read, before anything is sent. The
+    // tick gives up on it at the budget, the lease runs out, and a later tick
+    // claims the row again (a new version) and rings it. When the stalled read
+    // answers, its ringing write is against the old version and lands
+    // nothing, so it sends nothing.
+    const h = harness({ tickBudgetMs: 30 });
+    const plan = wedPlan();
+    const esc = await h.runner.afterInCallTransfer(inCall(plan, "no_answer"));
+    const attemptsFor = h.store.attemptsFor.bind(h.store);
+    let release: () => void = () => {};
+    let stalls = 1;
+    vi.spyOn(h.store, "attemptsFor").mockImplementation(async (sid) => {
+      if (stalls-- > 0) await new Promise<void>((res) => (release = res));
+      return attemptsFor(sid);
+    });
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    expect(h.texts).toHaveLength(0);
+    h.advance(CLAIM_LEASE_MS + 1_000);
+    await h.runner.tick();
+    expect(h.texts.map((t) => t.to)).toEqual([plan.levels[0].phone]);
+    expect(h.calls.map((c) => c.to)).toEqual([plan.levels[0].phone]);
+    release();
+    for (let i = 0; i < 5; i++) await new Promise((r) => setTimeout(r, 0));
+    expect(h.texts).toHaveLength(1);
+    expect(h.calls).toHaveLength(1);
+    expect(h.escalation()).toMatchObject({ phase: "ringing", attemptNo: 2 });
+  });
 });
