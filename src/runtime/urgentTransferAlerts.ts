@@ -34,6 +34,8 @@ export interface UrgentTransferAlerts {
     agentUsed: string;
     /** What the dial did, written on the ticket as a HANDOFF FAILED line (v163). */
     handoff?: UrgentHandoffFailure;
+    /** The on-call rotation took this call and is still calling (v268). */
+    onCallChain?: boolean;
   }): void;
 }
 
@@ -174,6 +176,7 @@ export function defaultUrgentTransferAlerts(
                   agentUsed: input.agentUsed,
                   earlierTicket: earlier,
                   handoff: input.handoff,
+                  onCallChain: input.onCallChain,
                 }),
               )
             : await createTicket(
@@ -185,6 +188,7 @@ export function defaultUrgentTransferAlerts(
                   callSid: input.callSid,
                   agentUsed: input.agentUsed,
                   handoff: input.handoff,
+                  onCallChain: input.onCallChain,
                 }),
               );
           if (result.success) {

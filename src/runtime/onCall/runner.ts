@@ -519,7 +519,7 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
     else await ring(row);
   }
 
-  return {
+  const runner: OnCallRunner = {
     async afterInCallTransfer(r) {
       if (r.plan.levels.length === 0) return null;
       const first = r.plan.levels[0];
@@ -595,6 +595,14 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
               log(`[ON-CALL] ${r.callSid}: the taken transfer's escalation is still open: ${(again as Error)?.message ?? again}`);
             }
           }
+        } else if (opened) {
+          // The chain's row is open and due: the next tick rings attempt 2 and
+          // the levels after it. Only the first attempt's log rows are missing,
+          // so nobody is told the chain did not start.
+          log(
+            `[ON-CALL] ${r.callSid}: the chain is open and carries on; its first attempt may be missing from on_call_attempts`,
+          );
+          return opened;
         } else {
           const note =
             (r.mode === "test" ? "[TEST MODE] " : "") +
@@ -695,7 +703,7 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
 
     start() {
       if (timer) return;
-      timer = setInterval(() => void this.tick(), TICK_MS);
+      timer = setInterval(() => void runner.tick(), TICK_MS);
       timer.unref?.();
     },
 
@@ -704,4 +712,5 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
       timer = null;
     },
   };
+  return runner;
 }

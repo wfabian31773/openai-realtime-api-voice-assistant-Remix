@@ -212,6 +212,14 @@ export const ON_CALL_LANES: ReadonlySet<string> = new Set(["no-ivr"]);
  */
 export const ON_CALL_CHAIN_RUNNING = "on_call_chain_already_running";
 
+/**
+ * The slug the after-hours agent hears when its own escalation started the
+ * on-call chain and the in-call transfer was not taken: the chain carries on
+ * calling the provider and then the directors, so the caller is told the
+ * on-call team is being paged, not only that nobody could be reached.
+ */
+export const HANDOFF_CHAIN_STARTED = "handoff_failed:CHAIN_STARTED";
+
 /** How long the dial waits for the full-details text to be accepted before it rings. */
 export const PRE_DIAL_SMS_WAIT_MS = 2_000;
 /** How long the runner hand-off waits for that text's answer before recording it as unknown. */
@@ -1003,6 +1011,8 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
        * would capture successes only, which is the half that needs recording
        * least.
        */
+      /** Set by `settle` when this attempt handed a chain to the runner and the dial was not taken. */
+      let chainCarriesOn = false;
       const settle = async (): Promise<TransferOutcome> => {
         /**
          * READ THE SIDE CHANNEL BEFORE `attempt()`, because attempt's own
@@ -1068,6 +1078,7 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
           throw e;
         }
         if (holder.run) handOff(holder.run, outcome);
+        chainCarriesOn = Boolean(holder.run) && !outcome.ok;
         try {
           /**
            * A POLICY REFUSAL IS NOT A DIAL. Codex P2, PR #273.
@@ -1113,6 +1124,9 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
               // caller was never connected and how long the phone rang (70166).
               // UNAVAILABLE returned above; the ternary only narrows the type.
               handoff: { status: outcome.status === "UNAVAILABLE" ? "FAILED" : outcome.status, ringSeconds },
+              // v268: the chain this dial started is still calling, so the
+              // ticket says so beside its call-back line.
+              ...(holder.run ? { onCallChain: true } : {}),
             });
           }
           /**
@@ -1159,8 +1173,14 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
           // paging rang nobody, but it is not "could not be placed": the
           // chain is retrying and escalating on its own, so the agent gets
           // its own slug and its own words (v268).
+          // A chain this attempt started is still paging even though the
+          // in-call dial was not taken: its own slug and words too (v268).
           throw new Error(
-            `handoff_failed:${outcome.reason === ON_CALL_CHAIN_RUNNING ? "CHAIN_RUNNING" : outcome.status}`,
+            outcome.reason === ON_CALL_CHAIN_RUNNING
+              ? "handoff_failed:CHAIN_RUNNING"
+              : chainCarriesOn
+                ? HANDOFF_CHAIN_STARTED
+                : `handoff_failed:${outcome.status}`,
           );
         }
       };

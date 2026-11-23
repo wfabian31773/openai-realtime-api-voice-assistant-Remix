@@ -91,6 +91,16 @@ If two providers press a key at nearly the same moment, the one the
 escalation records as having taken the patient (`accepted_by`) is told it is
 theirs and the other hears that it has already been taken.
 
+### When the first call is not taken
+
+When the on-call provider does not take the in-call transfer, the caller is
+not connected, but the chain has only started. The agent is told the on-call
+team is being paged (not that the transfer failed), tells the caller so,
+confirms the callback number and files the ticket. The urgent ring-out ticket
+says the rotation is still calling: the provider again, then the region's
+medical director and the final director, so a staffer working it knows the
+patient may already be getting a call back from one of them.
+
 ### One chain per call
 
 A call has at most one escalation chain running at a time.

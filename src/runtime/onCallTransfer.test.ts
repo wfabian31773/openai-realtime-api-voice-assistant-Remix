@@ -259,7 +259,7 @@ describe("an urgent after-hours call with the rotation on", () => {
     const outcome = transfer.handoffFor("no-ivr", META)();
     await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
     transfer.handleAccept(signed(TRANSFER_ACCEPT_PATH, { CallSid: "CAoffice", Digits: "" }));
-    await expect(outcome).rejects.toThrow(/handoff_failed:DECLINED/);
+    await expect(outcome).rejects.toThrow(/^handoff_failed:CHAIN_STARTED$/);
     await vi.waitFor(() => expect(built.handed).toHaveLength(1));
     expect(built.handed[0].warm.outcome).toBe("declined");
     expect(built.handed[0].warm.providerCallSid).toBeNull();
@@ -273,9 +273,23 @@ describe("an urgent after-hours call with the rotation on", () => {
     const outcome = transfer.handoffFor("no-ivr", META)();
     await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
     transfer.handleStatus(signed(TRANSFER_STATUS_PATH, { CallSid: "CAoffice", CallStatus: "no-answer" }));
-    await expect(outcome).rejects.toThrow(/handoff_failed:NO_ANSWER/);
+    await expect(outcome).rejects.toThrow(/^handoff_failed:CHAIN_STARTED$/);
     await vi.waitFor(() => expect(built.handed).toHaveLength(1));
     expect(built.handed[0].warm.outcome).toBe("no_answer");
+  });
+
+  it("files the ring-out ticket saying the rotation is still calling", async () => {
+    const { ops } = fakeOps();
+    const built = buildWiring();
+    const rec = recordingAlerts();
+    const transfer = transferWith(ops, built.wiring, rec.alerts);
+    urgent();
+    const outcome = transfer.handoffFor("no-ivr", META)();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    transfer.handleStatus(signed(TRANSFER_STATUS_PATH, { CallSid: "CAoffice", CallStatus: "no-answer" }));
+    await expect(outcome).rejects.toThrow(/^handoff_failed:CHAIN_STARTED$/);
+    expect(rec.tickets).toHaveLength(1);
+    expect(rec.tickets[0]).toMatchObject({ onCallChain: true });
   });
 
   it("keeps today's heads-up text to the urgent notification number, unchanged", async () => {
@@ -301,7 +315,7 @@ describe("an urgent after-hours call with the rotation on", () => {
     const first = handoff();
     await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
     transfer.handleStatus(signed(TRANSFER_STATUS_PATH, { CallSid: "CAoffice", CallStatus: "no-answer" }));
-    await expect(first).rejects.toThrow(/handoff_failed:NO_ANSWER/);
+    await expect(first).rejects.toThrow(/^handoff_failed:CHAIN_STARTED$/);
 
     urgent();
     // Its own slug: the chain is still paging, which is not "could not be placed".
@@ -391,7 +405,7 @@ describe("one chain per call, read from the chain's own row", () => {
     const first = handoff();
     await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
     transfer.handleStatus(signed(TRANSFER_STATUS_PATH, { CallSid: "CAoffice", CallStatus: "no-answer" }));
-    await expect(first).rejects.toThrow(/handoff_failed:NO_ANSWER/);
+    await expect(first).rejects.toThrow(/^handoff_failed:CHAIN_STARTED$/);
     await vi.waitFor(() => expect(built.handed).toHaveLength(1));
     built.store.failWrites = false;
 
@@ -417,7 +431,7 @@ describe("one chain per call, read from the chain's own row", () => {
     const first = handoff();
     await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
     transfer.handleStatus(signed(TRANSFER_STATUS_PATH, { CallSid: "CAoffice", CallStatus: "no-answer" }));
-    await expect(first).rejects.toThrow(/handoff_failed:NO_ANSWER/);
+    await expect(first).rejects.toThrow(/^handoff_failed:CHAIN_STARTED$/);
     await vi.waitFor(() => expect(built.handed).toHaveLength(1));
     built.store.failWrites = false;
 
@@ -443,7 +457,7 @@ describe("one chain per call, read from the chain's own row", () => {
     const first = handoff();
     await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
     transfer.handleStatus(signed(TRANSFER_STATUS_PATH, { CallSid: "CAoffice", CallStatus: "no-answer" }));
-    await expect(first).rejects.toThrow(/handoff_failed:NO_ANSWER/);
+    await expect(first).rejects.toThrow(/^handoff_failed:CHAIN_STARTED$/);
     await vi.waitFor(() => expect(built.handed).toHaveLength(1));
 
     built.store.getEscalationByCall = async () => {
@@ -470,7 +484,7 @@ describe("one chain per call, read from the chain's own row", () => {
     const first = handoff();
     await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
     transfer.handleStatus(signed(TRANSFER_STATUS_PATH, { CallSid: "CAoffice", CallStatus: "no-answer" }));
-    await expect(first).rejects.toThrow(/handoff_failed:NO_ANSWER/);
+    await expect(first).rejects.toThrow(/^handoff_failed:CHAIN_STARTED$/);
     await vi.waitFor(() => expect(built.handed).toHaveLength(1));
 
     const realGet = built.store.getEscalationByCall.bind(built.store);
@@ -672,6 +686,22 @@ describe("today's path, byte for byte", () => {
     const built = buildWiring({ at: WEEKDAY_DAYTIME });
     await ringsTheFixedNumber(built.wiring);
     expect(built.texts).toHaveLength(0);
+    expect(built.handed).toHaveLength(0);
+  });
+
+  it("in weekday daytime hours, a ring-out still tells the agent nobody answered, and its ticket names no chain", async () => {
+    const built = buildWiring({ at: WEEKDAY_DAYTIME });
+    const rec = recordingAlerts();
+    const { ops, dialed } = fakeOps();
+    const transfer = transferWith(ops, built.wiring, rec.alerts);
+    urgent();
+    const outcome = transfer.handoffFor("no-ivr", META)();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    expect(dialed[0].to).toBe(ENV.HUMAN_AGENT_NUMBER);
+    transfer.handleStatus(signed(TRANSFER_STATUS_PATH, { CallSid: "CAoffice", CallStatus: "no-answer" }));
+    await expect(outcome).rejects.toThrow(/^handoff_failed:NO_ANSWER$/);
+    expect(rec.tickets).toHaveLength(1);
+    expect(rec.tickets[0]).not.toHaveProperty("onCallChain");
     expect(built.handed).toHaveLength(0);
   });
 

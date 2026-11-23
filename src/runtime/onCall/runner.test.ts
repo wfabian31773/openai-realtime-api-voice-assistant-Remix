@@ -741,6 +741,24 @@ describe("what keeps the chain moving when something goes wrong", () => {
     expect(h.urgentModes).toEqual(["live"]);
   });
 
+  it("keeps a chain whose row opened when the first attempt's log row cannot be written, and tells nobody it did not start", async () => {
+    const h = harness();
+    const realLog = h.store.logAttempt.bind(h.store);
+    h.store.logAttempt = async (a: any) => {
+      if (a.kind === "warm_transfer") throw new Error("write timed out");
+      return realLog(a);
+    };
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    expect(esc).toMatchObject({ status: "active", levelIndex: 0, attemptNo: 2 });
+    expect(h.urgent).toHaveLength(0);
+    h.store.logAttempt = realLog;
+    h.at(new Date(WED_NIGHT.getTime() + 40_000 + RETRY_GAP_MS));
+    await h.runner.tick();
+    expect(h.calls).toHaveLength(1);
+    expect(h.calls[0].to).toBe(phoneOf(1));
+    expect(h.lastCallAttempt()).toMatchObject({ levelIndex: 0, attemptNo: 2 });
+  });
+
   it("says nothing to the urgent number when an accepted transfer cannot be recorded", async () => {
     const h = harness();
     h.store.failWrites = true;

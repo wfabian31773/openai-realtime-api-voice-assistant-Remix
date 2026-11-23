@@ -612,6 +612,20 @@ export const HANDOFF_CHAIN_RUNNING_DIRECTIVE =
   'confirm the callback number once; then call create_ticket with anything new. Never say they were connected, ' +
   'that a new transfer was placed, or that their request was submitted before create_ticket returns success.';
 
+/**
+ * This escalation started the on-call chain and the in-call transfer was not
+ * taken (v268): the system is calling the on-call provider again on its own and
+ * then the directors, and the URGENT callback record is being filed. No claim
+ * that anyone answered.
+ */
+export const HANDOFF_CHAIN_STARTED_DIRECTIVE =
+  'The on-call provider did not pick up the transfer and the caller was NOT connected. The on-call team is ' +
+  'being paged: the system is calling the on-call provider again on its own and, if they do not answer, the ' +
+  'medical director, and an URGENT callback record is being filed. Do not call escalate_to_human again. Tell ' +
+  'the caller the on-call team is being paged and will call them back as soon as possible; confirm the callback ' +
+  'number once; then call create_ticket with what you have. Never say they were connected or that their request ' +
+  'was submitted before create_ticket returns success.';
+
 /** Same, for any other failure (a leg failure, a decline, a throw): no claim about an answer or a record. */
 export const HANDOFF_ERROR_DIRECTIVE =
   'Transfer failed - please take a message instead. The caller was NOT connected. Do not call escalate_to_human ' +
@@ -3348,6 +3362,8 @@ PREREQUISITE: one quick ask for name and DOB; transfer even if unavailable. Clin
           ? HANDOFF_FAILED_DIRECTIVE
           : failure === 'handoff_failed:CHAIN_RUNNING'
             ? HANDOFF_CHAIN_RUNNING_DIRECTIVE
+            : failure === 'handoff_failed:CHAIN_STARTED'
+              ? HANDOFF_CHAIN_STARTED_DIRECTIVE
             : failure === 'handoff_failed:UNAVAILABLE'
               ? HANDOFF_NOT_PLACED_DIRECTIVE
               : HANDOFF_ERROR_DIRECTIVE;

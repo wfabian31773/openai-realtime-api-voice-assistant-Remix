@@ -18,6 +18,7 @@ import { ACCEPT_WINDOW_MS, type TransferTwilioOps } from "./warmTransfer";
 import { escalationDetailsMap } from "../services/escalationStore";
 import {
   buildUrgentTransferSms,
+  ON_CALL_CHAIN_TICKET_LINE,
   ringOutCrossReference,
   URGENT_TRANSFER_NOT_ANSWERED,
   urgentFallbackTicketParams,
@@ -401,6 +402,67 @@ describe("a ring-out after the caller's request was filed files the urgent recor
     });
     expect(() => alerts.fallbackTicket({ ...RING_OUT, escalationDetails: URGENT })).not.toThrow();
     await vi.waitFor(() => expect(lines.join("\n")).toMatch(/urgent fallback ticket failed for CAcaller: HTTP 500/));
+  });
+});
+
+/**
+ * THE ROTATION IS STILL CALLING (v268). A ring-out the on-call chain took is
+ * not the end of the paging: the runner calls the provider again and then the
+ * directors. The ticket says so beside its call-back line, on both payloads,
+ * and only when a chain was handed.
+ */
+describe("a ring-out the on-call rotation took says the rotation is still calling", () => {
+  const RING_OUT = {
+    callSid: "CAcaller",
+    callerNumber: META.callerPhone,
+    escalationDetails: URGENT,
+    why: URGENT_TRANSFER_NOT_ANSWERED,
+    dialTarget: ENV.HUMAN_AGENT_NUMBER,
+    agentUsed: "no-ivr",
+  };
+
+  function alertsWith(earlier: string | undefined) {
+    const own: Array<ReturnType<typeof urgentFallbackTicketParams>> = [];
+    const besides: UrgentRingOutBesideParams[] = [];
+    const alerts = defaultUrgentTransferAlerts(ENV, () => undefined, {
+      createTicket: async (p) => {
+        own.push(p);
+        return { success: true, ticketNumber: "VA-1" };
+      },
+      ticketAlreadyOnCall: async () => earlier,
+      submitBeside: async (p) => {
+        besides.push(p);
+        return { success: true, ticketNumber: "VA-2" };
+      },
+    });
+    return { alerts, own, besides };
+  }
+
+  it("on the call's own ticket", async () => {
+    const { alerts, own } = alertsWith(undefined);
+    alerts.fallbackTicket({ ...RING_OUT, onCallChain: true });
+    await vi.waitFor(() => expect(own).toHaveLength(1));
+    expect(own[0].description).toContain(ON_CALL_CHAIN_TICKET_LINE);
+    expect(own[0].description).toContain("Please call the patient back immediately.");
+  });
+
+  it("on the record filed beside the caller's request", async () => {
+    const { alerts, besides } = alertsWith("VA-70441");
+    alerts.fallbackTicket({ ...RING_OUT, onCallChain: true });
+    await vi.waitFor(() => expect(besides).toHaveLength(1));
+    expect(besides[0].reasonForCalling).toContain(ON_CALL_CHAIN_TICKET_LINE);
+    expect(besides[0].reasonForCalling.split("\n")[0]).toBe("Request Type: Urgent/Emergency Transfer");
+  });
+
+  it("not on a ring-out the rotation did not take", async () => {
+    for (const earlier of [undefined, "VA-70441"]) {
+      const { alerts, own, besides } = alertsWith(earlier);
+      alerts.fallbackTicket(RING_OUT);
+      await vi.waitFor(() => expect(own.length + besides.length).toBe(1));
+      const text = own[0]?.description ?? besides[0]?.reasonForCalling ?? "";
+      expect(text).not.toContain(ON_CALL_CHAIN_TICKET_LINE);
+      expect(text).not.toMatch(/ROTATION/);
+    }
   });
 });
 
