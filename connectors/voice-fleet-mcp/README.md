@@ -45,6 +45,8 @@ is allowed for server-to-server clients. Host/forwarding headers never grant acc
 
 HTTP uses POST with plain JSON replies. Although `2025-06-18` removed JSON-RPC
 batching, input batches remain accepted leniently and replies retain input order.
+Batches over 20 entries return HTTP 400 / `-32600 Batch too large (max 20)`
+with `id: null` before any dispatch.
 Each HTTP POST may contain at most **one `tools/call`**: the first valid
 `tools/call` request runs; each later one returns `-32600` with the exact message
 `Send one tools/call per request` and its own id, without execution. This limit
@@ -55,7 +57,8 @@ This avoids accumulating 30-second tool calls past the gateway's roughly
 Each message must be an object with `jsonrpc: "2.0"`. Requests require a string
 method and a string or finite number id; only `notifications/*` methods may omit
 the id. Id-less methods such as `tools/call` return `-32600` without dispatch.
-Invalid envelopes (including `{}` and requests with `id: null`) return
+Invalid envelopes (including `{}`, requests with `id: null`, and messages with
+both `method` and either `result` or `error`) return
 `-32600 Invalid Request` with `id: null`, without downstream fetches for that item.
 A single invalid message or empty batch returns HTTP 400; invalid batch members
 produce error entries alongside valid replies.
@@ -132,6 +135,9 @@ need approval, with opt-out checks enforced by the API. Operator prepare
 normalizes caller_script/opening_line aliases to callerScript/openingLine.
 Its optional `scenario_id`, `initiated_by`, `language` and `maxDurationSec`
 fields omit empty strings and preserve `null`, matching the imported connector.
+The supported `requested_by` provenance alias is forwarded as-is, including
+empty strings and `null`, so the fleet can validate it and reject conflicts
+with `initiated_by`. Its input schema now advertises the alias.
 Tool schemas describe discovery; the original handlers normalize and validate
 their own inputs before sending requests. Other payload validation remains with
 the fleet API. A supplied `confirmToken` takes precedence over any unused `id`.
@@ -139,9 +145,10 @@ At the JSON-RPC boundary, tool `arguments` must be an object; omission uses `{}`
 
 ## Masking
 
-Both transports retain the original connector's output behavior. The three
-operator SID reads and `operator_sms_send` mask phones to their last four
-digits (`***-***-0113`) and omit media/recording URL fields at every depth.
+Both transports retain the original connector's output behavior. The connector's
+`mask()` applies to the three operator SID reads and `operator_sms_send`, masking
+phones to their last four digits (`***-***-0113`) and omitting media/recording
+URL fields at every depth.
 By default, string content and name/DOB/email/subject fields become
 `[redacted N chars]`; emails embedded in other strings become `[email]`.
 
@@ -173,12 +180,16 @@ node connectors/voice-fleet-mcp/test-operator-prepare-offline.mjs
 
 The offline `.mjs` scripts mock fetch directly and are also run by Vitest.
 `tools-list-b7f9b822.json` records the original connector's full tool catalog;
-the core tests compare every name, description and input schema exactly.
+the core tests compare serialized discovery exactly except for the added
+`operator_prepare_call.requested_by` input schema.
 `fixtures/server-b7f9b822.txt` is the exact original server source. The parity
 tests evaluate its handlers against mocked fetch and compare method, encoded
 path/query, serialized body and tool result with the core for all 26 tools, including empty
 optional fields, extra fields and snake/camel aliases. Only the original imports,
 exports and stdio listener are excluded; no git history or token file is needed.
+The intentional request-body difference from `b7f9b822` is forwarding
+`operator_prepare_call.requested_by`; the sweep tests its unchanged values and
+the fleet parser's provenance/conflict checks separately.
 HTTP security tests run the mounted middleware and raw parser in process without
 sockets; the remaining HTTP integration tests use a local server. Both use an
 in-memory token store; no DB is loaded.

@@ -30,6 +30,7 @@ function envelopeKind(message: unknown): "request" | "ignored" | "invalid" {
   const owns = (key: string) => Object.prototype.hasOwnProperty.call(item, key);
   const validId = typeof item.id === "string" || (typeof item.id === "number" && Number.isFinite(item.id));
   if (!owns("method")) return validId && owns("result") !== owns("error") ? "ignored" : "invalid";
+  if (owns("result") || owns("error")) return "invalid";
   if (typeof item.method !== "string") return "invalid";
   if (!owns("id")) return item.method.startsWith("notifications/") ? "ignored" : "invalid";
   return validId ? "request" : "invalid";
@@ -93,6 +94,10 @@ export function mountVoiceFleetMcp(app: Express, deps: McpRouteDeps): void {
       message = JSON.parse(Buffer.isBuffer(req.body) ? req.body.toString("utf8") : "");
     } catch {
       res.status(400).json(errorReply(-32700, "Parse error"));
+      return;
+    }
+    if (Array.isArray(message) && message.length > 20) {
+      res.status(400).json(errorReply(-32600, "Batch too large (max 20)"));
       return;
     }
     const core = createVoiceFleetMcp({

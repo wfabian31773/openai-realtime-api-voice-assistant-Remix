@@ -21,9 +21,12 @@ owns the same 26 tools for HTTP and stdio; initialize reports connector
 The stored plugin-token validator is reused before parsing, then the caller's
 exact bearer is forwarded to loopback; no new scope, dependency or migration.
 The global parsers skip MCP so the route owns its auth-first 1 MB limit and
-JSON-RPC parse errors; the raw voice proxy keeps its ordering. Phones last-4,
-names/DOB/content/emails/tokens redacted on every tool response, including
-legacy includeContent calls. Stdio env/defaults and per-call token-file reads
+JSON-RPC parse errors; the raw voice proxy keeps its ordering. On operator SID
+reads and SMS-send replies, the connector's `mask()` masks phones to last-4,
+redacts named sensitive string fields and drops media/recording URLs. Operator
+reads with `includeContent: true` return content and descendants unredacted
+except phones last-4 and media/recording URLs dropped. Other tools preserve
+fleet JSON. Stdio env/defaults and per-call token-file reads
 are retained. Offline tests now use mocked fetch, fix the stale approvalId
 fixture to the documented id hand-off, and require an error when neither id
 nor confirmToken is supplied. Validation: `npx tsc -p . --noEmit` passes;

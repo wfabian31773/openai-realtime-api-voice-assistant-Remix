@@ -22,9 +22,15 @@ describe("voice fleet MCP core", () => {
     for (const [time, allowed] of [["2026-10-27T16:00:00Z", true], ["2026-10-27T15:59:00Z", false], ["2026-10-28T03:00:00Z", false], ["2026-11-23T17:00:00Z", true]] as const) expect(inCallingWindow(new Date(time))).toBe(allowed);
   });
 
-  it("matches every original tool name, description and input schema from b7f9b822", async () => {
+  it("retains tools/list bytes from b7f9b822 except the intentional requested_by schema addition", async () => {
     const reply = await create().handleMessage({ jsonrpc: "2.0", id: 1, method: "tools/list" });
-    expect(reply).toEqual({ jsonrpc: "2.0", id: 1, result: { tools: originalTools } });
+    const tools = originalTools.map((tool) => tool.name !== "voice_fleet_operator_prepare_call" ? tool : {
+      ...tool, inputSchema: { ...tool.inputSchema, properties: {
+        ...tool.inputSchema.properties,
+        requested_by: { type: "string", enum: ["owner_request", "bot_initiative"], description: "Alias for initiated_by; both must agree when supplied" },
+      } },
+    });
+    expect(JSON.stringify(reply)).toBe(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { tools } }));
   });
 
   it("negotiates only supported protocol versions, preferring the latest otherwise", async () => {

@@ -2,6 +2,7 @@ import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createVoiceFleetMcp } from "../../connectors/voice-fleet-mcp/core.mjs";
+import { parseOperatorPayload } from "./operatorLine";
 
 const baseUrl = "https://fleet.example.test";
 const confirmToken = "a".repeat(64);
@@ -88,6 +89,8 @@ async function parity(name: string, args: Args, reply?: unknown, status?: number
 afterEach(() => vi.restoreAllMocks());
 
 describe("voice fleet request parity with b7f9b822 (socket-free)", () => {
+  // Intentional exception: operator_prepare_call now forwards requested_by
+  // unchanged and advertises it in tools/list; all other parity stays exact.
   it("covers every tool in the original and current catalogs", async () => {
     const names = Object.keys(inputs).map(toolName).sort();
     expect(names).toEqual(originalTools.map((tool) => tool.name).sort());
@@ -131,6 +134,28 @@ describe("voice fleet request parity with b7f9b822 (socket-free)", () => {
       { callerScript: undefined, caller_script: "Synthetic script" },
       { openingLine: "", opening_line: "Conflict" },
     ]) await parity("operator_prepare_call", { phone, purpose: "Synthetic purpose", ...script });
+  });
+
+  it("intentionally forwards requested_by as-is so the fleet records provenance and rejects conflicts", async () => {
+    const cases: Array<[Args, string | null]> = [
+      [{ requested_by: "owner_request" }, "owner_request"],
+      [{ requested_by: "bot_initiative" }, "bot_initiative"],
+      [{ initiated_by: "owner_request", requested_by: "owner_request" }, "owner_request"],
+      [{ initiated_by: "bot_initiative", requested_by: "owner_request" }, null],
+      [{ initiated_by: "owner_request", requested_by: "bot_initiative" }, null],
+      ...["", null, false, 0, {}, [], " owner_request "].map((requested_by): [Args, null] => [{ requested_by }, null]),
+    ];
+    for (const [fields, initiator] of cases) {
+      const args = { phone, purpose: "Synthetic purpose", ...fields };
+      const expected = await capture(() => invokeOriginal("operator_prepare_call", args));
+      const actual = await capture(() => invoke("operator_prepare_call", args));
+      expect(actual).toEqual({ ...expected, requests: expected.requests.map((request) => ({
+        ...request, body: JSON.stringify({ ...JSON.parse(request.body!), requested_by: fields.requested_by }),
+      })) });
+      const parsed = parseOperatorPayload(JSON.parse(actual.requests[0].body!), {});
+      if (initiator) expect(parsed).toMatchObject({ ok: true, payload: { initiated_by: initiator } });
+      else expect(parsed).toMatchObject({ ok: false, error: "initiated_by/requested_by must be owner_request or bot_initiative and agree when both are supplied" });
+    }
   });
 
   for (const name of ["commit", "commit_call_live", "operator_commit_call"]) {

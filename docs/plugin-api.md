@@ -49,9 +49,12 @@ order. Protocol `2025-06-18` removed batching; accepting it remains a lenient
 compatibility extension. Client responses (`result`/`error` without `method`)
 and notifications are ignored; a POST containing only those returns 202
 without a body. Mixed batches answer requests and omit responses/notifications.
+Batches over 20 entries return HTTP 400 / `-32600 Batch too large (max 20)`
+with `id: null` before any dispatch.
 Each message must be an object with `jsonrpc: "2.0"`. Requests require a string
 method and a string or finite number id; notifications have a string method and
-no id. Invalid envelopes, including `{}` and requests with `id: null`, receive
+no id. Invalid envelopes, including `{}`, requests with `id: null`, and messages
+with both `method` and either `result` or `error`, receive
 `-32600 Invalid Request` with `id: null` and trigger no downstream fetches for
 that item. A single invalid message or empty batch returns HTTP 400; invalid
 batch members produce error entries in order with valid replies. These boundary
@@ -66,10 +69,11 @@ The upstream defaults to `http://127.0.0.1:${API_PORT || 5000}`, with a trusted
 `VOICE_FLEET_MCP_INTERNAL_BASE_URL` override. Request host/forwarding headers
 never select it. `VOICE_FLEET_TIMEOUT_MS` defaults to 30000. The connector
 never logs tokens or bodies. As in the original connector, operator SID reads
-and operator SMS-send replies mask phones to their last four digits, omit
-media/recording URL fields, and redact string content and name/DOB/email/subject
-fields by default. On the three operator reads, `includeContent: true` returns
-content fields and all descendants unredacted except for phone masking and URL
+and operator SMS-send replies use the connector's `mask()` to mask phones to
+their last four digits, omit media/recording URL fields, and redact string content
+and name/DOB/email/subject fields by default. On the three operator reads,
+`includeContent: true` returns content fields and all descendants unredacted
+except for phone masking and URL
 removal; names/emails outside content remain masked. Other tools, including
 full transcripts and live-call status, preserve fleet JSON. Both transports
 apply the same rules. Live tools call their routes directly without a

@@ -8,6 +8,7 @@ const prepare = (args) => call('operator_prepare_call', args);
 const schema = (await rpc('tools/list')).result.tools.find((tool) => tool.name === 'voice_fleet_operator_prepare_call').inputSchema;
 for (const key of Object.keys(schema.properties)) assert(allowed.has(key));
 assert.deepEqual(schema.required, ['phone']);
+assert.deepEqual(schema.properties.requested_by.enum, ['owner_request', 'bot_initiative']);
 const phone = '+19095550000';
 for (const [input, expected] of [
   [{ purpose: 'Ask about hours', callerScript: 'Synthetic script', language: 'en', maxDurationSec: 120, initiated_by: 'owner_request' }, { purpose: 'Ask about hours', callerScript: 'Synthetic script', language: 'en', maxDurationSec: 120, initiated_by: 'owner_request' }],
@@ -15,6 +16,8 @@ for (const [input, expected] of [
   [{ purpose: 'Synthetic purpose', caller_script: 'S', opening_line: 'O' }, { purpose: 'Synthetic purpose', callerScript: 'S', openingLine: 'O' }],
   [{ scenario_id: 'A3' }, { scenario_id: 'A3' }],
   [{ scenario_id: 'A1', purpose: 'goal' }, { scenario_id: 'A1', purpose: 'goal' }],
+  ...['owner_request', 'bot_initiative', '', null].map((requested_by) => [{ purpose: 'Synthetic purpose', requested_by }, { purpose: 'Synthetic purpose', requested_by }]),
+  [{ purpose: 'Synthetic purpose', initiated_by: 'bot_initiative', requested_by: 'owner_request' }, { purpose: 'Synthetic purpose', initiated_by: 'bot_initiative', requested_by: 'owner_request' }],
 ]) {
   const result = await prepare({ phone, ...input });
   assert(!result.isError, result.content[0].text);

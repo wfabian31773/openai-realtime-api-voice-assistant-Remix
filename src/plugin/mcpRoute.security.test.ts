@@ -125,6 +125,38 @@ describe("hosted MCP HTTP security boundary (socket-free)", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
+  it("rejects batches over 20 entries before dispatch and accepts exactly 20", async () => {
+    const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => Response.json({ ok: true }));
+    const { post } = boot();
+    const pings = Array.from({ length: 20 }, (_, id) => ({ jsonrpc: "2.0", id, method: "ping" }));
+    for (const batch of [[tool, ...pings], [...pings, tool], Array(21).fill({ jsonrpc: "2.0", method: "notifications/initialized" })]) {
+      const response = await post(batch);
+      expect(response).toMatchObject({ status: 400, body: {
+        jsonrpc: "2.0", id: null, error: { code: -32600, message: "Batch too large (max 20)" },
+      } });
+      expect(response.headers.get("content-type")).toContain("application/json");
+    }
+    expect(fetch).not.toHaveBeenCalled();
+    const accepted = await post([tool, ...pings.slice(1)]);
+    expect(accepted.status).toBe(200);
+    expect(accepted.body).toHaveLength(20);
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects method/result/error mixtures without downstream fetches, including notifications and batch members", async () => {
+    const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Unexpected downstream fetch"));
+    const { post } = boot();
+    for (const fields of [{ result: null }, { result: false }, { error: null }, { error: {} }, { result: {}, error: {} }]) {
+      for (const request of [tool, { jsonrpc: "2.0", method: "notifications/initialized" }]) {
+        const payload = { ...request, ...fields };
+        expect(await post(payload)).toMatchObject({ status: 400, body: invalidRequest });
+        expect(await post([payload, { jsonrpc: "2.0", id: "ping", method: "ping" }]))
+          .toMatchObject({ status: 200, body: [invalidRequest, { id: "ping", result: {} }] });
+      }
+    }
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it.each(["tools/call", "initialize", "ping", "tools/list", "unknown"])("rejects id-less %s without downstream fetches", async (method) => {
     const fetch = vi.spyOn(globalThis, "fetch").mockRejectedValue(new Error("Unexpected downstream fetch"));
     const { post } = boot();
