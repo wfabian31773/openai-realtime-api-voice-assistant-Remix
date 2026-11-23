@@ -1219,6 +1219,24 @@ describe("one row that never answers holds no other row (review, 2026-11-23)", (
     expect(claim).toHaveBeenCalledTimes(2);
   });
 
+  it("names the row whose step failed and still rings the other row", async () => {
+    const h = harness({ tickBudgetMs: 1_000 });
+    const plan = wedPlan();
+    const a = await h.runner.afterInCallTransfer(inCall(plan, "no_answer"));
+    const b = await h.runner.afterInCallTransfer(inCall(plan, "no_answer", { callSid: OTHER_SID }));
+    const update = h.store.updateEscalation.bind(h.store);
+    vi.spyOn(h.store, "updateEscalation").mockImplementation(async (id, version, patch) => {
+      if (id === a!.id) throw new Error("store write refused");
+      return update(id, version, patch);
+    });
+    h.at(new Date(Math.max(a!.nextAt!.getTime(), b!.nextAt!.getTime())));
+    await h.runner.tick();
+    expect(h.calls).toHaveLength(1);
+    const lines = h.log.mock.calls.map(([l]) => String(l));
+    expect(lines.some((l) => l.includes(`${a!.callSid}: step failed: store write refused`))).toBe(true);
+    expect(lines.some((l) => l.includes("tick failed"))).toBe(false);
+  });
+
   it("does not ring a row twice when its lease runs out under a step still in flight", async () => {
     const h = harness({ sendSms: vi.fn(never), tickBudgetMs: 30 });
     const plan = wedPlan();
