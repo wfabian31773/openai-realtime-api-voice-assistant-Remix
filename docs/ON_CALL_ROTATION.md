@@ -109,6 +109,24 @@ same moment) still takes the patient: the press is logged as accepted, the
 chain is brought due at once, and the next pass finds the press and closes
 the chain on it. Nothing else is rung in between.
 
+Any key counts, `#` and `*` included. A pickup with no key press (a person
+who listens and hangs up, a voicemail, a hang-up during the prompt) is logged
+`declined` and counted as not taken: the chain carries on, with a second call
+at the same level or, after the second, the next level. The two cannot be told
+apart (section 8, question 6).
+
+A key press can arrive after we have already logged that call as over
+(`no_answer`, `declined`, `busy`, `failed` or `no_status`): Twilio's status
+for the call and the provider's key press can cross. While the chain is still
+running, that press still takes the patient: the attempt is rewritten to
+`accepted`, the provider hears that the patient is theirs, and any call of
+ours ringing in its place is hung up. The next level may already have had its
+text by then, so a director can receive a text about a patient someone else
+has taken; the chain stops before calling them. Once the chain has ended
+(someone else took the patient, every level was tried, or it was stopped), a
+late press hears "This urgent call has already been closed." and the chain is
+not reopened.
+
 ### When the first call is not taken
 
 When the on-call provider does not take the in-call transfer, the caller is
@@ -197,6 +215,17 @@ ring comes from the rotation. With the rotation off, an unset
 | next | region director: text + call, then a second call + reminder text |
 | last | Dr. Logan: text + call, then a second call + reminder text |
 | after the last call | the escalation is marked `exhausted` |
+
+A level with no dialable number on file (a provider, surgeon or director whose
+phone is blank or not a full number) is passed over: one failed call is logged
+for it and the chain goes straight to the next level, with no retry and no
+wait. The texts say so in words, never as a call that was not taken: when the
+first level has no number, the next level's text and the urgent text to
+`URGENT_NOTIFICATION_NUMBER` both say "<name> (this week's on-call provider)
+has no dialable number on file and was not called."; a level passed over in
+the middle of the chain is named on the next level's text the same way, and
+several in a row are named together, in order. Fix the number with
+`scripts/on-call-change.ts` (section 4).
 
 When nobody takes the patient, the urgent notification number
 (`URGENT_NOTIFICATION_NUMBER`) gets one text with the patient's details and
@@ -493,7 +522,12 @@ WHERE call_sid = '<CallSid>';
 or a voicemail, and no key was pressed, including a hang-up during the
 prompt), `busy`, `failed`, `no_status`, `taken_elsewhere`
 (another of our calls took the patient first, and this one was hung up),
-`sent`, `send_failed` or `in_progress`. The patient details and the caller's number are kept on the
+`sent`, `send_failed` or `in_progress`. The table refuses any other value (a
+`CHECK` constraint in the migration), so a misspelt outcome fails its write
+instead of reading as something else. A call logged `no_answer`, `declined`,
+`busy`, `failed` or `no_status` and then rewritten to `accepted` is a late key
+press (section 1, "What the provider hears"): its `ended_at` is the moment of
+the press. The patient details and the caller's number are kept on the
 escalation only while someone is being paged, and are erased when it closes.
 
 ---
@@ -555,9 +589,17 @@ hears that the urgent call has been closed.
    mode's fallback when the rotation cannot decide, dial `HUMAN_AGENT_NUMBER`.
    The old core used `NO_IVR_HUMAN_AGENT_NUMBER` for this line.
    `URGENT_NOTIFICATION_NUMBER` still gets today's urgent text as well.
-6. **Voicemail.** A provider's voicemail that answers our call and plays over
-   the key-press prompt can read as `declined`; the chain carries on either
-   way.
+6. **A pickup with no key press.** A call that is picked up and ends with no
+   key press is logged `declined` and the chain carries on (a second call,
+   then the next level), whoever picked up: a voicemail that played over the
+   prompt, a provider who listened and hung up meaning to call the patient
+   back, or a hang-up during the prompt. Twilio reports all three the same
+   way, so the rotation cannot tell them apart. Today's warm transfer reads a
+   pickup with no key press the same way. If a provider who picks up and hangs
+   up should count as taking the patient, the cost is that a voicemail would
+   too and the chain would stop with nobody on the call; the safer change is
+   to keep the chain going and say "picked up, no key pressed" on the next
+   level's text. Which do you want?
 7. **A closed holiday on a Tuesday.** Its daytime hours go to the outgoing
    week's provider, because the week turns over at 5:00 PM. If the incoming
    provider should take those hours, that is an override for the day.
