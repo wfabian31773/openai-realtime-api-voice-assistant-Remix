@@ -2131,9 +2131,19 @@ import { callEnvironment } from "./callRecord";
  * names when the filing names the record's doctor or office and nobody else
  * on file answers to the filed name (afterHoursFiledName.ts). Above main's
  * v265 (#513, `c2c9709f`); v245 is #488 on its open branch. No migration.
+ * On main since #512 (`c2841ff6`).
+ *
+ * v267 — A FOLLOW-UP OWED IS NOT AN ANSWERED CALL (2026-11-23). The
+ * after-hours line's record_answered_question took no arguments, and once it
+ * was recorded the teardown floor filed nothing; on 7 no-ivr calls of
+ * 2026-11-08..22 the agent still owed the caller a follow-up and no ticket of
+ * any provenance exists. The tool now takes follow_up_owed, required on the
+ * wire; a yes is refused, nothing is recorded as answered, and the model is
+ * told to file (afterHoursAnsweredQuestion.ts). Above main's v266 (#512,
+ * `c2841ff6`); v268 is #514 on its open branch. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v266-an-after-hours-ticket-names-the-patient-20261122";
+  "voice-runtime-v267-a-follow-up-owed-is-not-answered-20261123";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
