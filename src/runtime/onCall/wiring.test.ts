@@ -198,6 +198,26 @@ describe("running", () => {
     expect(urgent[0].body).toMatch(/THE ON-CALL ESCALATION COULD NOT START/);
   });
 
+  it("sends a test chain's 'nobody took it' text to the first test phone, never the urgent number", async () => {
+    const { w, tw, store } = running({ ON_CALL_ROTATION_MODE: "test", ON_CALL_TEST_PHONES: "+15550002222,+15550003333" });
+    store.failWrites = true;
+    await w.runner!.afterInCallTransfer({ ...noAnswer(), mode: "test" });
+    expect(tw.texts.filter((t) => t.to === "+15550007777")).toHaveLength(0);
+    const sent = tw.texts.filter((t) => t.to === "+15550002222");
+    expect(sent).toHaveLength(1);
+    expect(sent[0].from).toBe("+15550000000");
+    expect(sent[0].body).toMatch(/\[TEST MODE\]/);
+    expect(sent[0].body).toMatch(/THE ON-CALL ESCALATION COULD NOT START/);
+  });
+
+  it("keeps a test-mode chain's text off the urgent number after the rotation is switched to live", async () => {
+    const { w, tw, store, lines } = running();
+    store.failWrites = true;
+    await w.runner!.afterInCallTransfer({ ...noAnswer(), mode: "test" });
+    expect(tw.texts.filter((t) => t.to === "+15550007777")).toHaveLength(0);
+    expect(lines.some((l) => /a test chain needs ON_CALL_TEST_PHONES/.test(l))).toBe(true);
+  });
+
   it("logs and sends nothing when the urgent number is not set", async () => {
     const { w, tw, store, lines } = running({ URGENT_NOTIFICATION_NUMBER: "" });
     store.failWrites = true;

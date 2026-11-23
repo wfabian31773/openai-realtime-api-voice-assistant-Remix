@@ -116,12 +116,19 @@ export function buildOnCallWiring(env: Env, host: string | undefined, deps: OnCa
       await (await twilio()).calls(sid).update({ status: "completed" });
     },
     // The text that says nobody took the call goes where today's urgent text
-    // goes, from today's number. It is not a provider call.
-    notifyUrgent: async (body) => {
-      const to = env.URGENT_NOTIFICATION_NUMBER?.trim();
+    // goes, from today's number. It is not a provider call. A test chain's
+    // goes to the first test phone instead, so a test call never asks a real
+    // person to call a test caller back.
+    notifyUrgent: async (body, mode) => {
+      const test = mode === "test" || config.mode === "test";
+      const to = test ? config.testPhones[0] : env.URGENT_NOTIFICATION_NUMBER?.trim();
       const from = env.TWILIO_PHONE_NUMBER?.trim();
       if (!to || !from) {
-        log("[ON-CALL] the 'nobody took it' text was not sent: URGENT_NOTIFICATION_NUMBER or TWILIO_PHONE_NUMBER is not set");
+        log(
+          test
+            ? "[ON-CALL] the 'nobody took it' text was not sent: a test chain needs ON_CALL_TEST_PHONES and TWILIO_PHONE_NUMBER"
+            : "[ON-CALL] the 'nobody took it' text was not sent: URGENT_NOTIFICATION_NUMBER or TWILIO_PHONE_NUMBER is not set",
+        );
         return;
       }
       await (await twilio()).messages.create({ body, from, to });

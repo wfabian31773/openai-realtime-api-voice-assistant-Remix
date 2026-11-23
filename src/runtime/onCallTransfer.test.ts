@@ -14,7 +14,7 @@ import type { UrgentTransferAlerts } from "./urgentTransferAlerts";
 import type { WebhookRequest } from "./voiceWebhook";
 import { escalationDetailsMap } from "../services/escalationStore";
 import { readOnCallConfig } from "./onCall/config";
-import { createFakeOnCallStore } from "./onCall/store.fake";
+import { createFakeOnCallStore, type FakeOnCallStore } from "./onCall/store.fake";
 import { provider, syntheticRotation, IE_DIRECTOR } from "./onCall/testRotation";
 import type { RotationData } from "./onCall/rotation";
 import type { InCallTransferResult } from "./onCall/runner";
@@ -67,6 +67,7 @@ function signed(path: string, body: Record<string, string>): WebhookRequest {
 
 interface Built {
   wiring: OnCallTransferWiring;
+  store: FakeOnCallStore;
   texts: Array<{ to: string; from: string; body: string; at: number }>;
   handed: InCallTransferResult[];
   order: string[];
@@ -87,9 +88,25 @@ function buildWiring(over: {
   const order: string[] = [];
   const wiring: OnCallTransferWiring = {
     runner: {
+      // Opens the chain's row the way the real runner does, and closes it on a
+      // pickup, so the transfer's one-chain-per-call check reads a real row.
       afterInCallTransfer: async (r) => {
         handed.push(r);
-        return null;
+        const row = await store.openEscalation({
+          callSid: r.callSid,
+          mode: r.mode,
+          routing: r.routing,
+          plan: r.plan,
+          details: r.details,
+          callerNumber: r.callerNumber,
+          nextAt: at,
+          levelStartedAt: r.levelStartedAt,
+          attemptNo: 2,
+        });
+        if (row && r.warm.outcome === "accepted") {
+          return store.closeEscalation(row.id, row.version, { status: "accepted" });
+        }
+        return row;
       },
     },
     config: readOnCallConfig(
@@ -110,7 +127,7 @@ function buildWiring(over: {
     },
     now: () => at,
   };
-  return { wiring, texts, handed, order };
+  return { wiring, store, texts, handed, order };
 }
 
 function recordingAlerts(): { alerts: UrgentTransferAlerts; beforeDial: unknown[]; tickets: unknown[] } {
@@ -260,6 +277,201 @@ describe("an urgent after-hours call with the rotation on", () => {
 
   it("covers every after-hours lane", () => {
     expect([...ON_CALL_LANES].sort()).toEqual(["dev-no-ivr", "no-ivr", "no-ivr-v2"]);
+  });
+});
+
+describe("one chain per call, read from the chain's own row", () => {
+  it("refuses a second escalation that arrives while the first is still being routed", async () => {
+    const { ops, dialed } = fakeOps();
+    const built = buildWiring();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const realGet = built.wiring.rotation.get;
+    const wiring: OnCallTransferWiring = {
+      ...built.wiring,
+      rotation: { get: async () => (await gate, realGet()) },
+    };
+    const transfer = transferWith(ops, wiring);
+    const handoff = transfer.handoffFor("no-ivr", META);
+
+    urgent();
+    const first = handoff();
+    urgent();
+    await expect(handoff()).rejects.toThrow(/^handoff_failed:CHAIN_RUNNING$/);
+    expect(dialed).toHaveLength(0);
+
+    release();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    expect(dialed).toHaveLength(1);
+    transfer.handleAccept(signed(TRANSFER_ACCEPT_PATH, { CallSid: "CAoffice", Digits: "1" }));
+    await first;
+    await vi.waitFor(() => expect(built.handed).toHaveLength(1));
+  });
+
+  it("takes today's path for an escalation after this call's chain has finished", async () => {
+    const { ops, dialed } = fakeOps();
+    const built = buildWiring();
+    const transfer = transferWith(ops, built.wiring);
+    const handoff = transfer.handoffFor("no-ivr", META);
+
+    urgent();
+    const first = handoff();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    transfer.handleAccept(signed(TRANSFER_ACCEPT_PATH, { CallSid: "CAoffice", Digits: "1" }));
+    await first;
+    await vi.waitFor(() => expect([...built.store.escalations.values()][0]?.status).toBe("accepted"));
+
+    urgent();
+    const second = handoff();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    expect(dialed).toHaveLength(2);
+    expect(dialed[1].to).toBe(ENV.HUMAN_AGENT_NUMBER);
+    expect(dialed[1].from).toBe(ENV.TWILIO_PHONE_NUMBER);
+    expect(built.texts).toHaveLength(1);
+    transfer.handleAccept(signed(TRANSFER_ACCEPT_PATH, { CallSid: "CAoffice", Digits: "1" }));
+    await second;
+    expect(built.handed).toHaveLength(1);
+  });
+
+  it("routes a second escalation again when the runner could not open a row for the first", async () => {
+    const { ops, dialed } = fakeOps();
+    const built = buildWiring();
+    const transfer = transferWith(ops, built.wiring);
+    const handoff = transfer.handoffFor("no-ivr", META);
+
+    built.store.failWrites = true;
+    urgent();
+    const first = handoff();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    transfer.handleStatus(signed(TRANSFER_STATUS_PATH, { CallSid: "CAoffice", CallStatus: "no-answer" }));
+    await expect(first).rejects.toThrow(/handoff_failed:NO_ANSWER/);
+    await vi.waitFor(() => expect(built.handed).toHaveLength(1));
+    built.store.failWrites = false;
+
+    urgent();
+    const second = handoff();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    expect(dialed).toHaveLength(2);
+    expect(dialed[1].to).toBe(TEST_PHONES[0]);
+    expect(built.texts).toHaveLength(2);
+    transfer.handleAccept(signed(TRANSFER_ACCEPT_PATH, { CallSid: "CAoffice", Digits: "1" }));
+    await second;
+    await vi.waitFor(() => expect(built.handed).toHaveLength(2));
+  });
+
+  it("lets only one of two same-tick escalations start a chain once the first chain is over", async () => {
+    const { ops, dialed } = fakeOps();
+    const built = buildWiring();
+    const transfer = transferWith(ops, built.wiring);
+    const handoff = transfer.handoffFor("no-ivr", META);
+
+    built.store.failWrites = true;
+    urgent();
+    const first = handoff();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    transfer.handleStatus(signed(TRANSFER_STATUS_PATH, { CallSid: "CAoffice", CallStatus: "no-answer" }));
+    await expect(first).rejects.toThrow(/handoff_failed:NO_ANSWER/);
+    await vi.waitFor(() => expect(built.handed).toHaveLength(1));
+    built.store.failWrites = false;
+
+    urgent();
+    const second = handoff();
+    urgent();
+    await expect(handoff()).rejects.toThrow(/^handoff_failed:CHAIN_RUNNING$/);
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    expect(dialed).toHaveLength(2);
+    transfer.handleAccept(signed(TRANSFER_ACCEPT_PATH, { CallSid: "CAoffice", Digits: "1" }));
+    await second;
+    await vi.waitFor(() => expect(built.handed).toHaveLength(2));
+  });
+
+  it("takes today's path when the chain's row cannot be read", async () => {
+    const { ops, dialed } = fakeOps();
+    const built = buildWiring();
+    const lines: string[] = [];
+    const transfer = transferWith(ops, built.wiring, recordingAlerts().alerts, { log: (l) => void lines.push(l) });
+    const handoff = transfer.handoffFor("no-ivr", META);
+
+    urgent();
+    const first = handoff();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    transfer.handleStatus(signed(TRANSFER_STATUS_PATH, { CallSid: "CAoffice", CallStatus: "no-answer" }));
+    await expect(first).rejects.toThrow(/handoff_failed:NO_ANSWER/);
+    await vi.waitFor(() => expect(built.handed).toHaveLength(1));
+
+    built.store.getEscalationByCall = async () => {
+      throw new Error("hub unreachable");
+    };
+    urgent();
+    const second = handoff();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    expect(dialed[1].to).toBe(ENV.HUMAN_AGENT_NUMBER);
+    expect(built.texts).toHaveLength(1);
+    expect(lines.some((l) => l.includes("could not read this call's escalation"))).toBe(true);
+    transfer.handleAccept(signed(TRANSFER_ACCEPT_PATH, { CallSid: "CAoffice", Digits: "1" }));
+    await second;
+    expect(built.handed).toHaveLength(1);
+  });
+
+  it("hands the chain to the runner as failed when the dial throws after the provider was texted", async () => {
+    const { ops, dialed } = fakeOps();
+    const built = buildWiring();
+    const alerts: UrgentTransferAlerts = {
+      smsBeforeDial: () => {
+        throw new Error("alert sender broke");
+      },
+      fallbackTicket: () => undefined,
+    };
+    const transfer = transferWith(ops, built.wiring, alerts);
+    urgent();
+    await expect(transfer.handoffFor("no-ivr", META)()).rejects.toThrow(/alert sender broke/);
+    expect(dialed).toHaveLength(0);
+    expect(built.texts).toHaveLength(1);
+    await vi.waitFor(() => expect(built.handed).toHaveLength(1));
+    expect(built.handed[0].warm.outcome).toBe("failed");
+    expect(built.handed[0].warm.providerCallSid).toBeNull();
+  });
+});
+
+describe("which dials the rotation may take", () => {
+  it("rings the rotation's level 0 when HUMAN_AGENT_NUMBER is not set", async () => {
+    const { ops, dialed } = fakeOps();
+    const built = buildWiring();
+    const rec = recordingAlerts();
+    const transfer = transferWith(ops, built.wiring, rec.alerts, { env: { HUMAN_AGENT_NUMBER: "" } });
+    urgent();
+    const outcome = transfer.handoffFor("no-ivr", META)();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    expect(dialed[0].to).toBe(TEST_PHONES[0]);
+    expect(dialed[0].from).toBe(ROTATION_CALLER_ID);
+    expect(rec.beforeDial).toHaveLength(1);
+    transfer.handleAccept(signed(TRANSFER_ACCEPT_PATH, { CallSid: "CAoffice", Digits: "1" }));
+    await outcome;
+    await vi.waitFor(() => expect(built.handed).toHaveLength(1));
+  });
+
+  it("dials nobody when HUMAN_AGENT_NUMBER is not set and the rotation is off, as today", async () => {
+    const { ops, dialed } = fakeOps();
+    const built = buildWiring({ env: { ON_CALL_ROTATION_MODE: "off" } });
+    const rec = recordingAlerts();
+    const transfer = transferWith(ops, built.wiring, rec.alerts, { env: { HUMAN_AGENT_NUMBER: "" } });
+    urgent();
+    await expect(transfer.handoffFor("no-ivr", META)()).rejects.toThrow(/handoff_failed:UNAVAILABLE/);
+    expect(dialed).toHaveLength(0);
+    expect(rec.beforeDial).toHaveLength(0);
+    expect(built.texts).toHaveLength(0);
+  });
+
+  it("leaves a caller type the policy does not transfer refused, without reading the rotation", async () => {
+    const { ops, dialed } = fakeOps();
+    const built = buildWiring();
+    const get = vi.fn(built.wiring.rotation.get);
+    const transfer = transferWith(ops, { ...built.wiring, rotation: { get } });
+    escalationDetailsMap.set("CAcaller", { agentSlug: "no-ivr", callerType: "general_inquiry", reason: "Office hours" });
+    await expect(transfer.handoffFor("no-ivr", META)()).rejects.toThrow(/handoff_failed:UNAVAILABLE/);
+    expect(dialed).toHaveLength(0);
+    expect(get).not.toHaveBeenCalled();
+    expect(built.texts).toHaveLength(0);
   });
 });
 

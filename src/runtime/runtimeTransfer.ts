@@ -186,7 +186,7 @@ export interface RuntimeTransferOptions {
 export interface OnCallTransferWiring {
   runner: Pick<OnCallRunner, "afterInCallTransfer">;
   config: OnCallConfig;
-  store: Pick<OnCallStore, "available" | "loadRotation">;
+  store: Pick<OnCallStore, "available" | "loadRotation" | "getEscalationByCall">;
   rotation: { get(): Promise<RotationData> };
   /** The Console query, or null when the Console is not configured. */
   consoleQuery: Query | null;
@@ -214,12 +214,41 @@ export const PRE_DIAL_SMS_RECORD_MS = 10_000;
 
 const E164 = /^\+\d{10,15}$/;
 
-/** The warm transfer's outcome, in the runner's words. */
+/**
+ * The warm transfer's outcome, in the runner's words. One case per status, so
+ * a status added to TransferOutcome fails the build here instead of reading as
+ * "failed" unseen.
+ *
+ * A BUSY office leg reads as `no_answer`: `performWarmTransfer` folds every
+ * leg that dies without a key press (no-answer, busy, failed, a hang-up on
+ * the briefing) into NO_ANSWER unless the provider pressed decline, so the
+ * runner cannot tell busy from unanswered and retries both the same way.
+ * UNAVAILABLE (nothing was dialled) reads as `failed`, which the runner also
+ * retries: on a rotation route the provider has already been texted.
+ */
 export function warmOutcomeFor(outcome: TransferOutcome): WarmOutcome {
   if (outcome.ok) return "accepted";
-  if (outcome.status === "NO_ANSWER") return "no_answer";
-  if (outcome.status === "DECLINED") return "declined";
-  return "failed";
+  switch (outcome.status) {
+    case "NO_ANSWER":
+      return "no_answer";
+    case "DECLINED":
+      return "declined";
+    case "FAILED":
+    case "UNAVAILABLE":
+      return "failed";
+  }
+}
+
+/**
+ * Whether the handoff policy's answer is a clinical dial the rotation may take
+ * over. A dial the policy allowed is one; so is a clinical caller refused only
+ * because `HUMAN_AGENT_NUMBER` is not set, because with the rotation on the
+ * number to ring comes from the rotation, not from that variable. Every other
+ * refusal (a caller type the policy does not transfer, PCP's rules) stands.
+ */
+export function rotationMayTakeTheDial(policy: ReturnType<typeof resolveHandoffDestination>): boolean {
+  if (policy.allowed) return policy.policy !== "pcp";
+  return policy.reason === "clinical_destination_not_configured";
 }
 
 /**
@@ -695,13 +724,54 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
       let dialStartedAt = Date.now();
       let attemptId: TransferAttemptId = newTransferAttemptId();
       const mode = transferModeFor(slug, env);
-      /** The on-call chain this call's dial started, read by settle(). */
-      let onCallRun: OnCallRun | null = null;
-      /** One chain per call: a second escalation never starts another. */
-      let chainStarted = false;
-      const attempt = async (): Promise<TransferOutcome> => {
+      /**
+       * ONE CHAIN PER CALL. `none`: no chain yet, or the last route attempt
+       * came to nothing, so an escalation may start one. `pending`: a route is
+       * being decided or its dial is under way, so a second escalation is
+       * refused. `handed`: the dial is over and its hand-off to the runner has
+       * finished (whether or not it opened a row), so the store decides: an
+       * active escalation refuses, a finished one takes today's path, none at
+       * all may start a chain.
+       */
+      let chainState: "none" | "pending" | "handed" = "none";
+      /**
+       * Claim the chain for this escalation, or say why not. The claim is
+       * taken BEFORE the first await: two escalations on one call can arrive
+       * in the same tick, and a check that awaited before claiming let both
+       * through (found by the "still being routed" test). `route` leaves the
+       * claim held and answers what it replaced, so a route that comes to
+       * nothing can give it back; `refuse` and `today` leave the state as it
+       * was.
+       */
+      const claimChain = async (): Promise<
+        { kind: "route"; before: "none" | "handed" } | { kind: "refuse" } | { kind: "today" }
+      > => {
+        if (chainState === "pending") return { kind: "refuse" };
+        const before = chainState;
+        chainState = "pending";
+        if (before === "none" || !onCall) return { kind: "route", before };
+        try {
+          const row = await onCall.store.getEscalationByCall(metadata.callSid);
+          if (!row) return { kind: "route", before };
+          chainState = before;
+          return row.status === "active" ? { kind: "refuse" } : { kind: "today" };
+        } catch (e) {
+          chainState = before;
+          // Ring a person rather than tell an urgent caller a chain is paging
+          // when we cannot see whether one is.
+          log(
+            `[ON-CALL] ${metadata.callSid}: could not read this call's escalation; today's path: ${(e as Error)?.message ?? e}`,
+          );
+          return { kind: "today" };
+        }
+      };
+      /**
+       * The attempt writes the run it started into `holder`, a fresh object
+       * per invocation, so two escalations on one call can never read each
+       * other's run.
+       */
+      const attempt = async (holder: { run: OnCallRun | null }): Promise<TransferOutcome> => {
         attemptId = newTransferAttemptId();
-        onCallRun = null;
         try {
           // Before anything dials: the whole attempt — dial, briefing,
           // keypress — is bounded by the accept window, and the bridge's
@@ -743,22 +813,33 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
             onCall !== undefined &&
             onCall.config.mode !== "off" &&
             ON_CALL_LANES.has(slug) &&
-            policy.allowed &&
-            policy.policy !== "pcp" &&
+            rotationMayTakeTheDial(policy) &&
             mode !== "blind";
-          if (onCallEligible && chainStarted) {
-            log(`[ON-CALL] ${metadata.callSid}: a chain is already running for this call; not dialling again`);
-            return { ok: false, status: "UNAVAILABLE", reason: ON_CALL_CHAIN_RUNNING };
-          }
           if (onCallEligible && onCall) {
-            onCallRun = await startOnCallRoute(
-              onCall,
-              { callSid: metadata.callSid, callerPhone: metadata.callerPhone, details },
-              log,
-            );
-            if (onCallRun) chainStarted = true;
-            // The ring is timed from the dial, not from the routing read.
-            dialStartedAt = Date.now();
+            const claim = await claimChain();
+            if (claim.kind === "refuse") {
+              log(`[ON-CALL] ${metadata.callSid}: a chain is already running for this call; not dialling again`);
+              return { ok: false, status: "UNAVAILABLE", reason: ON_CALL_CHAIN_RUNNING };
+            }
+            if (claim.kind === "today") {
+              log(`[ON-CALL] ${metadata.callSid}: this call's chain has finished; today's path`);
+            } else {
+              // The claim is held through the routing read, so an escalation
+              // arriving while it runs is refused rather than starting a second
+              // chain. A route that comes to nothing gives the claim back as it
+              // was, so a finished chain's row is still read next time.
+              try {
+                holder.run = await startOnCallRoute(
+                  onCall,
+                  { callSid: metadata.callSid, callerPhone: metadata.callerPhone, details },
+                  log,
+                );
+              } finally {
+                if (!holder.run) chainState = claim.before;
+              }
+              // The ring is timed from the dial, not from the routing read.
+              dialStartedAt = Date.now();
+            }
           }
           /**
            * THE HEADS-UP TEXT, BEFORE THE PHONE RINGS — the old core's
@@ -774,7 +855,9 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
            * call centre that has its own briefing. Fire-and-forget: a text that
            * fails must never delay the dial.
            */
-          if (policy.allowed && policy.policy !== "pcp") {
+          // With the rotation ringing, the dial happens even when the policy
+          // had no number of its own (clinical_destination_not_configured).
+          if ((policy.allowed && policy.policy !== "pcp") || holder.run) {
             urgentAlerts.smsBeforeDial({ callerNumber: metadata.callerPhone, escalationDetails: details });
           }
           if (mode === "blind") {
@@ -827,7 +910,7 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
             }
             return blindOutcome;
           }
-          const run = onCallRun as OnCallRun | null;
+          const run = holder.run;
           const warmDestination = run ? run.plan.levels[0].phone : policy.allowed ? policy.destination : null;
           // Never the operator line: the rotation's caller ID is validated E.164
           // (config.ts), and today's path keeps today's number.
@@ -925,7 +1008,7 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
          */
         const briefed = escalationDetailsMap.get(metadata.callId);
         const briefing = { gaps: briefed?.briefingGaps, asked: briefed?.askedBeforeDial };
-        const outcome = await attempt();
+        const holder: { run: OnCallRun | null } = { run: null };
         /**
          * HAND THE CHAIN TO THE RUNNER (v268). The in-call dial was level 0's
          * first attempt; the runner records it and, when nobody took the
@@ -933,10 +1016,13 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
          * escalates (spec c to f). Not awaited: the caller is waiting on the
          * agent's next words, and the runner's Hub writes must never sit in
          * front of them. A pickup closes the chain (spec d).
+         *
+         * Every run is handed over, whatever the dial did: level 0 was texted
+         * before it rang, so even a dial that threw or never started is the
+         * first attempt of a chain the runner must carry on.
          */
-        const run = onCallRun as OnCallRun | null;
-        if (run && onCall) {
-          const handed = run;
+        const handOff = (handed: OnCallRun, outcome: TransferOutcome): void => {
+          if (!onCall) return;
           const now = onCall.now ?? (() => new Date());
           void (async () => {
             const preDialSms = await settleWithin(handed.preDialSms, PRE_DIAL_SMS_RECORD_MS);
@@ -956,10 +1042,24 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
                 providerCallSid: outcome.ok ? (outcome.officeCallSid ?? null) : null,
               },
             });
-          })().catch((e) =>
-            log(`[ON-CALL] ${metadata.callSid}: could not hand the chain to the runner: ${(e as Error)?.message ?? e}`),
-          );
+          })()
+            .catch((e) =>
+              log(
+                `[ON-CALL] ${metadata.callSid}: could not hand the chain to the runner: ${(e as Error)?.message ?? e}`,
+              ),
+            )
+            .finally(() => {
+              chainState = "handed";
+            });
+        };
+        let outcome: TransferOutcome;
+        try {
+          outcome = await attempt(holder);
+        } catch (e) {
+          if (holder.run) handOff(holder.run, { ok: false, status: "FAILED", reason: "transfer_threw" });
+          throw e;
         }
+        if (holder.run) handOff(holder.run, outcome);
         try {
           /**
            * A POLICY REFUSAL IS NOT A DIAL. Codex P2, PR #273.
