@@ -1099,6 +1099,24 @@ describe("test mode", () => {
     expect(h.urgentModes).toEqual(["live"]);
   });
 
+  it("sends a test chain's stop, after a switch to live, with the chain's own plan", async () => {
+    const h = harness({ config: LIVE });
+    const plan = syntheticTestPlan(TEST);
+    const esc = await h.runner.afterInCallTransfer(inCall(plan, "no_answer", { mode: "test" }));
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    expect(h.calls).toHaveLength(0);
+    expect(h.texts).toHaveLength(0);
+    expect(h.escalation()?.status).toBe("cancelled");
+    expect(h.urgent).toHaveLength(1);
+    expect(h.urgent[0]).toContain("[TEST MODE] THE ON-CALL ESCALATION STOPPED");
+    expect(h.urgentModes).toEqual(["test"]);
+    // The wiring sends a test chain's text to a number its own plan rang once
+    // the test list is gone (review of #514, round 6), so the plan must come
+    // with it.
+    expect(h.urgentPlans[0]?.levels.map((l) => l.phone)).toEqual(plan.levels.map((l) => l.phone));
+  });
+
   it("says nothing more when another process closed the row first", async () => {
     const h = harness({ config: TEST });
     const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer", { mode: "test" }));
@@ -1136,6 +1154,10 @@ describe("a level that is not in the plan", () => {
     expect(h.urgent).toHaveLength(1);
     expect(h.urgent[0]).toContain("[TEST MODE] THE ON-CALL ESCALATION STOPPED — its next level could not be read");
     expect(h.urgentModes).toEqual(["test"]);
+    // The chain's own plan goes with the text, so a test chain still open
+    // after a switch to live can send it to a number that plan rang
+    // (review of #514, round 6).
+    expect(h.urgentPlans[0]?.levels.map((l) => l.phone)).toEqual(syntheticTestPlan(TEST).levels.map((l) => l.phone));
   });
 });
 
