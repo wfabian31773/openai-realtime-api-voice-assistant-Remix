@@ -1029,6 +1029,176 @@ describe("what keeps the chain moving when something goes wrong", () => {
     expect(h.calls.length).toBe(before + 1);
     expect(h.lastCallAttempt()).toMatchObject({ levelIndex: 2, attemptNo: 1 });
   });
+
+  // Review of #514, round 9: a throw before the call is placed left the row
+  // "ringing" for RING_GUARD_MS (6.5 minutes) with nobody being called.
+  const linesOf = (h: ReturnType<typeof harness>) => h.log.mock.calls.map((c) => String(c[0])).join("\n");
+
+  it("moves on at once when the call's attempt row cannot be written, and places no call", async () => {
+    const h = harness();
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    const realLog = h.store.logAttempt.bind(h.store);
+    h.store.logAttempt = async (a: any) => {
+      if (a.kind === "call" && a.outcome === undefined) {
+        h.store.logAttempt = realLog;
+        throw new Error("hub blip");
+      }
+      return realLog(a);
+    };
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    expect(h.calls).toHaveLength(0);
+    // Level 0's second try was its last, so the chain is at the next level, due now.
+    expect(h.escalation()).toMatchObject({ status: "active", levelIndex: 1, attemptNo: 1, phase: "due" });
+    expect(h.escalation().nextAt!.getTime()).toBeLessThanOrEqual(h.now().getTime());
+    expect(linesOf(h)).toMatch(/ringing level 0 failed before its call was placed: hub blip; moving on/);
+    await h.runner.tick();
+    expect(h.calls).toHaveLength(1);
+    expect(h.calls[0].to).toBe(phoneOf(IE_DIRECTOR));
+  });
+
+  it("retries the level when its first try cannot write the text's row", async () => {
+    const h = harness();
+    const plan = wedPlan();
+    const esc = await h.runner.afterInCallTransfer(inCall(plan, "no_answer"));
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    await h.runner.onProviderStatus(h.lastCallAttempt().id, "no-answer");
+    expect(h.escalation()).toMatchObject({ levelIndex: 1, attemptNo: 1, phase: "due" });
+    const realLog = h.store.logAttempt.bind(h.store);
+    h.store.logAttempt = async (a: any) => {
+      if (a.kind === "sms") {
+        h.store.logAttempt = realLog;
+        throw new Error("hub blip");
+      }
+      return realLog(a);
+    };
+    const before = h.calls.length;
+    await h.runner.tick();
+    expect(h.calls.length).toBe(before);
+    // The first try failed before its call, so the level gets its second try
+    // at the usual gap rather than at the guard.
+    const e = h.escalation();
+    expect(e).toMatchObject({ status: "active", levelIndex: 1, attemptNo: 2, phase: "due" });
+    expect(e.nextAt!.getTime() - h.now().getTime()).toBeLessThanOrEqual(RETRY_GAP_MS);
+    h.at(e.nextAt!);
+    await h.runner.tick();
+    expect(h.calls.length).toBe(before + 1);
+    expect(h.lastCallAttempt()).toMatchObject({ levelIndex: 1, attemptNo: 2, outcome: "in_progress" });
+  });
+
+  it("ends the logged call attempt as failed when the read before the call throws", async () => {
+    const h = harness();
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    const realLog = h.store.logAttempt.bind(h.store);
+    const realGet = h.store.getEscalation.bind(h.store);
+    let armed = false;
+    h.store.logAttempt = async (a: any) => {
+      const row = await realLog(a);
+      if (a.kind === "call" && a.outcome === undefined) armed = true;
+      return row;
+    };
+    h.store.getEscalation = async (id: number) => {
+      if (armed) {
+        armed = false;
+        throw new Error("hub blip");
+      }
+      return realGet(id);
+    };
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    expect(h.calls).toHaveLength(0);
+    expect(h.lastCallAttempt()).toMatchObject({ levelIndex: 0, attemptNo: 2, outcome: "failed" });
+    expect(h.escalation()).toMatchObject({ status: "active", levelIndex: 1, attemptNo: 1, phase: "due" });
+  });
+
+  it("does not move the chain when a step after the placed call throws", async () => {
+    const h = harness();
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    h.log.mockImplementation((line: string) => {
+      if (/calling level 0/.test(String(line))) throw new Error("log sink down");
+    });
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    expect(h.calls).toHaveLength(1);
+    expect(h.lastCallAttempt()).toMatchObject({ levelIndex: 0, attemptNo: 2, outcome: "in_progress" });
+    // The call is ringing: its status callback moves the chain, nothing here.
+    expect(h.escalation()).toMatchObject({ status: "active", levelIndex: 0, attemptNo: 2, phase: "ringing" });
+  });
+
+  it("does not move a chain that moved on, even when its unplaced call cannot be ended", async () => {
+    const h = harness();
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    const realLog = h.store.logAttempt.bind(h.store);
+    h.store.logAttempt = async (a: any) => {
+      const row = await realLog(a);
+      if (a.kind === "call" && a.outcome === undefined) {
+        // Something else touched the row while the text was being sent.
+        const e = h.store.escalations.get(a.escalationId)!;
+        h.store.escalations.set(e.id, { ...e, version: e.version + 1 });
+      }
+      return row;
+    };
+    h.store.endAttempt = async () => {
+      throw new Error("hub blip");
+    };
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    expect(h.calls).toHaveLength(0);
+    expect(h.escalation()).toMatchObject({ status: "active", levelIndex: 0, attemptNo: 2, phase: "ringing" });
+    const lines = linesOf(h);
+    expect(lines).toMatch(/could not end level 0's unplaced call: hub blip/);
+    expect(lines).not.toMatch(/failed before its call was placed/);
+  });
+
+  it("goes straight to the next level when a level with no number cannot move on the first time", async () => {
+    const h = harness();
+    const plan = wedPlan();
+    plan.levels[1] = { ...plan.levels[1], phone: "" };
+    const esc = await h.runner.afterInCallTransfer(inCall(plan, "no_answer"));
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    await h.runner.onProviderStatus(h.lastCallAttempt().id, "no-answer");
+    expect(h.escalation()).toMatchObject({ levelIndex: 1, attemptNo: 1, phase: "due" });
+    const realLog = h.store.logAttempt.bind(h.store);
+    const realGet = h.store.getEscalation.bind(h.store);
+    let armed = false;
+    h.store.logAttempt = async (a: any) => {
+      const row = await realLog(a);
+      if (a.kind === "call" && a.dialedTo === null) armed = true;
+      return row;
+    };
+    h.store.getEscalation = async (id: number) => {
+      if (armed) {
+        armed = false;
+        throw new Error("hub blip");
+      }
+      return realGet(id);
+    };
+    await h.runner.tick();
+    expect(h.escalation()).toMatchObject({ status: "active", levelIndex: 2, attemptNo: 1, phase: "due" });
+  });
+
+  it("stays bounded when every call attempt row fails: each level is texted at most twice, then the urgent number", async () => {
+    const h = harness();
+    const plan = wedPlan();
+    const esc = await h.runner.afterInCallTransfer(inCall(plan, "no_answer"));
+    const realLog = h.store.logAttempt.bind(h.store);
+    h.store.logAttempt = async (a: any) => {
+      if (a.kind === "call" && a.outcome === undefined) throw new Error("hub down for calls");
+      return realLog(a);
+    };
+    h.at(esc!.nextAt!);
+    for (let i = 0; i < 40 && h.escalation().status === "active"; i++) {
+      await h.runner.tick();
+      h.advance(RETRY_GAP_MS);
+    }
+    expect(h.escalation().status).toBe("exhausted");
+    expect(h.calls).toHaveLength(0);
+    // Level 0's first text went before the in-call transfer; every other try texts once.
+    expect(h.texts.length).toBe(plan.levels.length * ATTEMPTS_PER_LEVEL - 1);
+    expect(h.urgent).toHaveLength(1);
+  });
 });
 
 describe("test mode", () => {

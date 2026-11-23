@@ -792,6 +792,47 @@ describe("one chain per call, read from the chain's own row", () => {
     await third;
   });
 
+  it("takes today's path when the chain's row read never answers, and leaves the call unclaimed", async () => {
+    const { ops, dialed } = fakeOps();
+    const built = buildWiring();
+    built.wiring.chainReadWaitMs = 10;
+    const lines: string[] = [];
+    const transfer = transferWith(ops, built.wiring, recordingAlerts().alerts, { log: (l) => void lines.push(l) });
+    const handoff = transfer.handoffFor("no-ivr", META);
+
+    urgent();
+    const first = handoff();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    transfer.handleStatus(signed(TRANSFER_STATUS_PATH, { CallSid: "CAoffice", CallStatus: "no-answer" }));
+    await expect(first).rejects.toThrow(/^handoff_failed:CHAIN_STARTED$/);
+    await vi.waitFor(() => expect(built.handed).toHaveLength(1));
+
+    // A Hub read that never answers (the pools carry no statement timeout).
+    const realGet = built.store.getEscalationByCall.bind(built.store);
+    built.store.getEscalationByCall = () => new Promise(() => {});
+    urgent();
+    const second = handoff();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    expect(dialed[1].to).toBe(ENV.HUMAN_AGENT_NUMBER);
+    expect(lines.some((l) => l.includes("could not be read within 10 ms"))).toBe(true);
+    transfer.handleAccept(signed(TRANSFER_ACCEPT_PATH, { CallSid: "CAoffice", Digits: "1" }));
+    await second;
+
+    // The hung read gave the claim back: with the record readable again and the
+    // chain over, a third escalation takes today's path, not "still being handed over".
+    built.store.getEscalationByCall = realGet;
+    const row = [...built.store.escalations.values()][0];
+    row.status = "exhausted";
+    urgent();
+    const third = handoff();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    expect(dialed).toHaveLength(3);
+    expect(dialed[2].to).toBe(ENV.HUMAN_AGENT_NUMBER);
+    transfer.handleAccept(signed(TRANSFER_ACCEPT_PATH, { CallSid: "CAoffice", Digits: "1" }));
+    await third;
+    expect(built.handed).toHaveLength(1);
+  });
+
   it("releases the call's claim when the hand-off never answers, and a late answer does not undo a later claim", async () => {
     const { ops, dialed } = fakeOps();
     const built = buildWiring();

@@ -195,9 +195,10 @@ export interface OnCallTransferWiring {
   personIdFor?: (callSid: string) => string | undefined;
   sendSms(input: { to: string; from: string; body: string }): Promise<{ sid: string }>;
   now?: () => Date;
-  /** Tests only: `HANDOFF_RESULT_WAIT_MS` and `HANDOFF_SETTLE_MS` by default. */
+  /** Tests only: `HANDOFF_RESULT_WAIT_MS`, `HANDOFF_SETTLE_MS` and `CHAIN_READ_WAIT_MS` by default. */
   handoffResultWaitMs?: number;
   handoffSettleMs?: number;
+  chainReadWaitMs?: number;
 }
 
 /**
@@ -251,6 +252,15 @@ export const HANDOFF_RESULT_WAIT_MS = 2_000;
  * later escalation on the call as "already paging" for the rest of the call.
  */
 export const HANDOFF_SETTLE_MS = 20_000;
+/**
+ * How long a second escalation on a call waits to read whether the call's
+ * earlier chain is still running. The read holds this call's chain claim, and
+ * the Hub pools carry no statement timeout, so an unbounded read would refuse
+ * every later escalation on the call as "still being handed over" for as long
+ * as it hung (review of #514, round 9). Past it the read counts as failed:
+ * today's path, a person rung, as for a read that throws.
+ */
+export const CHAIN_READ_WAIT_MS = 2_000;
 
 const E164 = /^\+\d{10,15}$/;
 
@@ -829,7 +839,19 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
         chainState = "pending";
         if (before === "none" || !onCall) return { kind: "route", before };
         try {
-          const row = await onCall.store.getEscalationByCall(metadata.callSid);
+          const waitMs = onCall.chainReadWaitMs ?? CHAIN_READ_WAIT_MS;
+          const read = await settleWithin(
+            onCall.store.getEscalationByCall(metadata.callSid).then((row) => ({ row })),
+            waitMs,
+          );
+          if (read === null) {
+            chainState = before;
+            log(
+              `[ON-CALL] ${metadata.callSid}: this call's escalation could not be read within ${waitMs} ms; today's path`,
+            );
+            return { kind: "today" };
+          }
+          const { row } = read;
           if (!row) return { kind: "route", before };
           chainState = before;
           return row.status === "active" ? { kind: "refuse", why: "active" } : { kind: "today" };

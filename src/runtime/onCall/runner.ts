@@ -110,6 +110,12 @@ export interface InCallTransferResult {
   preDialSms?: { ok: boolean; sid: string | null; at: Date } | null;
 }
 
+/** What a throw inside `ringLevel` left behind: the call's attempt, and whether Twilio has the call. */
+interface RingState {
+  call: AttemptRow | null;
+  placed: boolean;
+}
+
 export interface OnCallRunnerDeps {
   store: OnCallStore;
   config: OnCallConfig;
@@ -439,6 +445,53 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
     });
     if (!ringing) return;
 
+    // Everything from here to the placed call reads and writes the store, and
+    // any of it can throw. A throw before the call is placed must not leave the
+    // row "ringing" until the guard (6.5 minutes, with nobody being called):
+    // the chain moves on as it would after a call that failed (review of #514,
+    // round 9). Once Twilio has the call, nothing here moves the chain; its
+    // status callback does.
+    const state: RingState = { call: null, placed: false };
+    try {
+      await ringLevel(row, level, ringing.version, t, state);
+    } catch (err) {
+      if (state.placed) {
+        log(`[ON-CALL] ${row.callSid}: level ${row.levelIndex} is ringing; a later step failed: ${(err as Error)?.message ?? err}`);
+        return;
+      }
+      log(
+        `[ON-CALL] ${row.callSid}: ringing level ${row.levelIndex} failed before its call was placed: ${(err as Error)?.message ?? err}; moving on`,
+      );
+      if (state.call) {
+        try {
+          await store.endAttempt(state.call.id, "failed", now());
+        } catch {
+          // The guard ends it as "no_status" if this cannot.
+        }
+      }
+      try {
+        // A level with no number is not retried, as ringLevel itself decides.
+        await advance(row.id, row.levelIndex, row.attemptNo, { retryThisLevel: isPhone(level.phone) });
+      } catch (e2) {
+        log(
+          `[ON-CALL] ${row.callSid}: could not move on from level ${row.levelIndex}; the ringing guard moves it in ${Math.round(RING_GUARD_MS / 1000)} s: ${(e2 as Error)?.message ?? e2}`,
+        );
+      }
+    }
+  }
+
+  /**
+   * The text and the call for one level of a row that is now "ringing". Writes
+   * the call's attempt into `state` once it is logged and marks `state.placed`
+   * once Twilio has the call, so `ring` knows what a throw left behind.
+   */
+  async function ringLevel(
+    row: EscalationRow,
+    level: ChainLevel,
+    ringingVersion: number,
+    t: Date,
+    state: RingState,
+  ): Promise<void> {
     const base = {
       escalationId: row.id,
       callSid: row.callSid,
@@ -476,7 +529,8 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
       endedAt: now(),
     });
 
-    const call = await store.logAttempt({ ...base, kind: "call", dialedTo: level.phone });
+    const logged = await store.logAttempt({ ...base, kind: "call", dialedTo: level.phone });
+    state.call = logged;
     // The text and the two writes above can each take a while (Twilio's own
     // request timeout is 30 s, and the Hub pool has none), and a ringing row
     // is due again at the ringing guard. If the chain moved on meanwhile, a
@@ -484,8 +538,14 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
     // read once more first: anything that touched it since the "ringing"
     // write bumped its version (review of #514, round 4).
     const current = await store.getEscalation(row.id);
-    if (!current || current.status !== "active" || current.version !== ringing.version) {
-      await store.endAttempt(call.id, "failed", now());
+    if (!current || current.status !== "active" || current.version !== ringingVersion) {
+      // The chain moved on, so nothing here moves it again, even if this
+      // write fails (an attempt left open here rang nobody).
+      try {
+        await store.endAttempt(logged.id, "failed", now());
+      } catch (err) {
+        log(`[ON-CALL] ${row.callSid}: could not end level ${row.levelIndex}'s unplaced call: ${(err as Error)?.message ?? err}`);
+      }
       log(
         `[ON-CALL] ${row.callSid}: the chain moved on while level ${row.levelIndex}'s text was being sent; that level is not called`,
       );
@@ -496,23 +556,24 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
       placed = await deps.placeCall({
         to: level.phone,
         from: config.callerId,
-        twiml: providerCallTwiml(url(ON_CALL_ACK_PATH, call.id)),
-        statusCallback: url(ON_CALL_STATUS_PATH, call.id),
+        twiml: providerCallTwiml(url(ON_CALL_ACK_PATH, logged.id)),
+        statusCallback: url(ON_CALL_STATUS_PATH, logged.id),
         timeout: PROVIDER_RING_SECONDS,
         timeLimit: PROVIDER_CALL_LIMIT_SECONDS,
       });
     } catch (err) {
       log(`[ON-CALL] ${row.callSid}: the call to level ${row.levelIndex} could not be placed: ${(err as Error)?.message ?? err}`);
-      await endAndAdvance(call, "failed");
+      await endAndAdvance(logged, "failed");
       return;
     }
+    state.placed = true;
     // Twilio has the call and the phone is ringing. A failed write of its sid
     // must not read as a call that was never placed: the attempt stays open,
     // and the ack and status webhooks find it by the attempt id in their URLs.
     // Without the sid it cannot be hung up if another call takes the patient;
     // it rings out on its own after PROVIDER_RING_SECONDS.
     try {
-      await store.setAttemptCallSid(call.id, placed.sid);
+      await store.setAttemptCallSid(logged.id, placed.sid);
     } catch (err) {
       log(
         `[ON-CALL] ${row.callSid}: the call to level ${row.levelIndex} is ringing but its call sid could not be saved: ${(err as Error)?.message ?? err}`,
