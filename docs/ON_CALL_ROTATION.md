@@ -156,6 +156,15 @@ A call has at most one escalation chain running at a time.
   anything new goes on the ticket. The chain is claimed the moment the first
   request reaches the transfer, before anything is read, so two requests in
   the same instant cannot both start one.
+- If the first request's record was still being written after 20 seconds,
+  its claim is released and a second request can ring this week's provider
+  again. That hand-off opens no second chain: its text and its call are
+  logged on the call's one chain, a provider who takes the patient on it
+  closes that chain (and any call of ours still ringing for it is hung up),
+  a chain somebody already took is closed rather than kept paging, and the
+  agent says the team is being paged only while that chain is still calling.
+  If its text or call cannot be logged, no "could not start" text is sent,
+  because the chain is running.
 - If the caller asks again after their chain has finished (someone took the
   patient, every level was tried, or it was stopped), the second request
   takes today's path: the fixed on-call number, rung as before the rotation.
