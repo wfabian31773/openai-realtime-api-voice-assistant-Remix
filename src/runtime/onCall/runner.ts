@@ -33,7 +33,7 @@ import { preferredCallbackNumber } from "../../services/handoffPolicy";
 import { buildUrgentTransferSms, urgentAlertTime } from "../../services/urgentTransferAlert";
 import { NO_TEXT_PARAM, ON_CALL_ACK_PATH, ON_CALL_STATUS_PATH, providerCallTwiml, type AckReply } from "./providerCall";
 import type { OnCallConfig } from "./config";
-import { noNumberNote, type ChainLevel, type ChainPlan } from "./rotation";
+import { levelLabel, noNumberNote, type ChainLevel, type ChainPlan } from "./rotation";
 import type {
   AttemptOutcome,
   AttemptRow,
@@ -249,6 +249,19 @@ export function stoppedNote(e: Pick<EscalationRow, "mode">, why: string): string
   return e.mode === "test" ? `[TEST MODE] ${note}` : note;
 }
 
+/**
+ * What the urgent number is told when a provider presses a key on one of our
+ * calls after the chain ended with nobody taking the patient. Plain text: the
+ * ended row's patient details are cleared, so it names the conversation, not
+ * the patient.
+ */
+export function lateKeyNote(e: Pick<EscalationRow, "mode" | "callSid">, who: string, time: string): string {
+  const note =
+    `UPDATE ${time}: ${who} pressed a key on our call after this patient's on-call escalation had ended. ` +
+    `They were asked to call the patient back if they can. Conversation ${e.callSid}.`;
+  return e.mode === "test" ? `[TEST MODE] ${note}` : note;
+}
+
 export function exhaustedNote(e: Pick<EscalationRow, "plan" | "mode">): string {
   const n = e.plan.levels.length;
   const note =
@@ -306,6 +319,37 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
     const callbackNumber =
       preferredCallbackNumber({ collected: details?.callbackNumber, callerId: e.callerNumber }) ?? null;
     return { result: "accepted", noText: true, callbackNumber };
+  }
+
+  // Attempts whose late key press has already told the urgent number, so a
+  // press that reaches us twice sends one update. Bounded, oldest first.
+  const lateKeyNotified = new Set<number>();
+
+  /**
+   * The reply to a key press on a chain that ended with nobody taking the
+   * patient (exhausted, failed or cancelled). The urgent number was already
+   * told to call the patient back, so the provider is told that, and asked to
+   * call too if they can, and the urgent number is told a provider pressed a
+   * key (review of #514, round 13). Nothing is recorded as taken: the chain
+   * is over and its details are cleared. A read of the texts that fails says
+   * the line that points at no text.
+   */
+  async function tooLate(row: EscalationRow, a: AttemptRow): Promise<AckReply> {
+    log(`[ON-CALL] ${a.callSid}: a key press at level ${a.levelIndex} (${a.role}) after the chain ended ${row.status}; told nobody was reached in time`);
+    if (!lateKeyNotified.has(a.id)) {
+      lateKeyNotified.add(a.id);
+      if (lateKeyNotified.size > 500) lateKeyNotified.delete(lateKeyNotified.values().next().value as number);
+      const level = row.plan.levels[a.levelIndex];
+      const who = level ? levelLabel(level) : `The level ${a.levelIndex} provider`;
+      await notifyQuietly(lateKeyNote(row, who, urgentAlertTime(now())), a.callSid, row.mode, row.plan);
+    }
+    let reached = false;
+    try {
+      reached = await detailsTextReached(row.id, a.callSid, a.dialedTo);
+    } catch (err) {
+      log(`[ON-CALL] ${a.callSid}: could not read whether the details text was sent: ${(err as Error)?.message ?? err}`);
+    }
+    return reached ? "too_late" : { result: "too_late", noText: true };
   }
 
   const textFor = (e: EscalationRow, note: string) =>
@@ -949,7 +993,7 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
       const e = await store.getEscalation(a.escalationId);
       if (!e) return "closed";
       if (e.status !== "active") {
-        if (e.status !== "accepted") return "closed";
+        if (e.status !== "accepted") return digits ? await tooLate(e, a) : "closed";
         // The same call's key press arriving twice is still the call that took
         // it. Its row's details are cleared by now, so a number cannot be read
         // again; the first reply read it.
@@ -986,7 +1030,9 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
           if (after?.outcome !== "accepted") {
             // The chain ended between the read above and this press: another
             // call took the patient, or nobody did.
-            return (await store.getEscalation(e.id))?.status === "accepted" ? "already_taken" : "closed";
+            const ended = await store.getEscalation(e.id);
+            if (ended?.status === "accepted") return "already_taken";
+            return ended && ended.status !== "active" ? await tooLate(ended, a) : "closed";
           }
           by = after;
         }
@@ -1008,7 +1054,7 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
           log(`[ON-CALL] ${a.callSid}: could not bring the taken chain due: ${(err as Error)?.message ?? err}`);
         }
       }
-      if (row && row.status !== "accepted") return "closed";
+      if (row && row.status !== "accepted") return await tooLate(row, a);
       if (row && !byThis && row.acceptedAttemptId !== by.id) {
         // Closed by someone else: by another call's key press, or by a move
         // that found theirs. The escalation row names the call that took the

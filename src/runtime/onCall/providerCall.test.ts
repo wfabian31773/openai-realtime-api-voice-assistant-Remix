@@ -12,6 +12,8 @@ import {
   PROVIDER_CALL_OPENING,
   PROVIDER_CALL_OPENING_NO_TEXT,
   PROVIDER_CLOSED_LINE,
+  PROVIDER_TOO_LATE_LINE,
+  PROVIDER_TOO_LATE_NO_TEXT_LINE,
   PROVIDER_DECLINED_LINE,
   acceptedWithNumberLine,
   ackReplyTwiml,
@@ -107,6 +109,7 @@ describe("the call we place to a provider", () => {
       ["declined", PROVIDER_DECLINED_LINE],
       ["already_taken", PROVIDER_ALREADY_TAKEN_LINE],
       ["closed", PROVIDER_CLOSED_LINE],
+      ["too_late", PROVIDER_TOO_LATE_LINE],
     ];
     for (const [result, line] of lines) {
       const out = ackReplyTwiml(result);
@@ -312,5 +315,26 @@ describe("the call-status webhook", () => {
     const out = await handleOnCallStatus(req(ON_CALL_STATUS_PATH, "?attempt=9", { CallStatus: "busy" }), d);
     expect(out.status).toBe(200);
     expect(log).toHaveBeenCalled();
+  });
+});
+
+describe("a key press after the chain ended (review of #514, round 13)", () => {
+  it("tells the provider nobody was reached in time, and asks them to call if they can", () => {
+    const out = ackReplyTwiml("too_late");
+    expect(out.body).toContain(PROVIDER_TOO_LATE_LINE);
+    expect(out.body).toContain("call the patient from the number in the text message");
+    expect(out.body).not.toContain(PROVIDER_CLOSED_LINE);
+    expect(out.body).toMatch(/<Hangup\/>/);
+  });
+
+  it("points at no text when none reached that number", () => {
+    const out = ackReplyTwiml({ result: "too_late", noText: true });
+    expect(out.body).toContain(PROVIDER_TOO_LATE_NO_TEXT_LINE);
+    expect(out.body).not.toContain("text message");
+    expect(out.body).toMatch(/<Hangup\/>/);
+  });
+
+  it("reads as too_late to anything that counts results", () => {
+    expect(ackResultOf({ result: "too_late", noText: true })).toBe("too_late");
   });
 });

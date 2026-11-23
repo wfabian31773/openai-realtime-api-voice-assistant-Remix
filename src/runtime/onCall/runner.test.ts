@@ -753,7 +753,9 @@ describe("a key press on a call we had marked over (review of #514, round 10)", 
     }
   });
 
-  it("tells them it is closed once the chain has ended, and changes nothing", async () => {
+  it("tells them nobody was reached in time once the chain has ended, and records nothing taken", async () => {
+    // Round 13 of the review of #514: "closed" read as handled while the
+    // urgent number had been told nobody took the patient.
     const h = harness();
     const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
     h.at(esc!.nextAt!);
@@ -762,12 +764,12 @@ describe("a key press on a call we had marked over (review of #514, round 10)", 
     await h.store.endAttempt(id, "no_answer", h.now());
     const cur = h.escalation();
     await h.store.closeEscalation(cur.id, cur.version, { status: "exhausted", nextAt: null });
-    expect(await h.runner.onProviderAck(id, "1")).toBe("closed");
+    expect(await h.runner.onProviderAck(id, "1")).toBe("too_late");
     expect(h.store.attempts.get(id)?.outcome).toBe("no_answer");
     expect(h.escalation()).toMatchObject({ status: "exhausted", acceptedAttemptId: null });
   });
 
-  it("is told closed, not taken, when the chain ends between the read and the press", async () => {
+  it("is told nobody was reached in time, not taken, when the chain ends between the read and the press", async () => {
     const h = harness();
     const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
     h.at(esc!.nextAt!);
@@ -780,7 +782,7 @@ describe("a key press on a call we had marked over (review of #514, round 10)", 
       await h.store.closeEscalation(cur.id, cur.version, { status: "exhausted", nextAt: null });
       return real(attemptId, at);
     };
-    expect(await h.runner.onProviderAck(id, "1")).toBe("closed");
+    expect(await h.runner.onProviderAck(id, "1")).toBe("too_late");
     expect(h.store.attempts.get(id)?.outcome).toBe("no_answer");
   });
 
@@ -2139,5 +2141,126 @@ describe("a provider call whose text did not send (review of #514, round 12)", (
     // can name no number, and must not claim a text either.
     const again = await h.runner.onProviderAck(call.id, "1");
     expect(again).toMatchObject({ result: "accepted", noText: true });
+  });
+});
+
+describe("a key press after the chain ended with nobody taking the patient (review of #514, round 13)", () => {
+  /** Walk to level 0's callback, mark it no-answer and close the chain as `status`. */
+  async function endedChain(status: "exhausted" | "failed" | "cancelled", sendSms?: any) {
+    const h = harness(sendSms ? { sendSms } : {});
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    const call = h.lastCallAttempt();
+    await h.store.endAttempt(call.id, "no_answer", h.now());
+    const cur = h.escalation();
+    await h.store.closeEscalation(cur.id, cur.version, { status, nextAt: null });
+    return { h, call };
+  }
+
+  it("answers too_late for every way a chain ends without a taker", async () => {
+    for (const status of ["exhausted", "failed", "cancelled"] as const) {
+      const { h, call } = await endedChain(status);
+      expect(await h.runner.onProviderAck(call.id, "1")).toBe("too_late");
+      expect(h.escalation()).toMatchObject({ status, acceptedAttemptId: null });
+    }
+  });
+
+  it("tells the urgent number once, naming the level and the conversation, not the patient", async () => {
+    const { h, call } = await endedChain("exhausted");
+    const before = h.urgent.length;
+    await h.runner.onProviderAck(call.id, "1");
+    await h.runner.onProviderAck(call.id, "1");
+    expect(h.urgent.length - before).toBe(1);
+    const update = h.urgent[h.urgent.length - 1];
+    expect(update).toContain("pressed a key on our call after this patient's on-call escalation had ended");
+    expect(update).toContain(levelLabel(h.escalation().plan.levels[call.levelIndex]));
+    expect(update).toContain(call.callSid);
+    expect(update).not.toContain(DETAILS.patientFirstName);
+    expect(update).not.toContain(DETAILS.reason);
+    expect(update).not.toMatch(/5550199999/);
+  });
+
+  it("marks a test-mode chain's update as a test", async () => {
+    const h = harness({ config: TEST });
+    const esc = await h.runner.afterInCallTransfer(inCall(syntheticTestPlan(TEST), "no_answer", { mode: "test" }));
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    const call = h.lastCallAttempt();
+    await h.store.endAttempt(call.id, "no_answer", h.now());
+    const cur = h.escalation();
+    await h.store.closeEscalation(cur.id, cur.version, { status: "exhausted", nextAt: null });
+    expect(await h.runner.onProviderAck(call.id, "1")).toBe("too_late");
+    expect(h.urgent[h.urgent.length - 1]).toMatch(/^\[TEST MODE\] UPDATE /);
+  });
+
+  it("points at no text when no details text reached that number", async () => {
+    // The director's texts fail; walk to the director's call, then end the chain.
+    const sendSms = vi.fn(async (m: { to: string }) => {
+      if (m.to === phoneOf(IE_DIRECTOR)) throw new Error("sms down");
+      return { sid: "SMX1" };
+    });
+    const h = harness({ sendSms });
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    await h.runner.onProviderStatus(h.lastCallAttempt().id, "no-answer");
+    await h.runner.tick();
+    const call = h.lastCallAttempt();
+    expect(call.dialedTo).toBe(phoneOf(IE_DIRECTOR));
+    await h.store.endAttempt(call.id, "no_answer", h.now());
+    const cur = h.escalation();
+    await h.store.closeEscalation(cur.id, cur.version, { status: "exhausted", nextAt: null });
+    expect(await h.runner.onProviderAck(call.id, "1")).toEqual({ result: "too_late", noText: true });
+  });
+
+  it("points at no text when the texts cannot be read", async () => {
+    const { h, call } = await endedChain("exhausted");
+    h.store.attemptsFor = async () => {
+      throw new Error("db down");
+    };
+    expect(await h.runner.onProviderAck(call.id, "1")).toEqual({ result: "too_late", noText: true });
+  });
+
+  it("still says closed, and tells nobody, when no key was pressed", async () => {
+    const { h, call } = await endedChain("exhausted");
+    const before = h.urgent.length;
+    expect(await h.runner.onProviderAck(call.id, "")).toBe("closed");
+    expect(h.urgent.length).toBe(before);
+  });
+
+  it("still says already taken to a call that did not take an accepted chain", async () => {
+    const h = harness();
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    const call = h.lastCallAttempt();
+    await h.store.endAttempt(call.id, "no_answer", h.now());
+    const cur = h.escalation();
+    await h.store.closeEscalation(cur.id, cur.version, {
+      status: "accepted",
+      acceptedBy: IE_DIRECTOR,
+      acceptedAt: h.now(),
+      acceptedAttemptId: null,
+      nextAt: null,
+    });
+    const before = h.urgent.length;
+    expect(await h.runner.onProviderAck(call.id, "1")).toBe("already_taken");
+    expect(h.urgent.length).toBe(before);
+  });
+
+  it("does not let a failed update text stop the reply", async () => {
+    const notifyUrgent = vi.fn(async () => {
+      throw new Error("twilio down");
+    });
+    const h = harness({ notifyUrgent });
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    const call = h.lastCallAttempt();
+    await h.store.endAttempt(call.id, "no_answer", h.now());
+    const cur = h.escalation();
+    await h.store.closeEscalation(cur.id, cur.version, { status: "exhausted", nextAt: null });
+    expect(await h.runner.onProviderAck(call.id, "1")).toBe("too_late");
   });
 });

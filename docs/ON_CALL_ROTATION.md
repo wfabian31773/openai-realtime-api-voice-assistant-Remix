@@ -140,10 +140,25 @@ running, that press still takes the patient: the attempt is rewritten to
 `accepted`, the provider hears that the patient is theirs, and any call of
 ours ringing in its place is hung up. The next level may already have had its
 text by then, so a director can receive a text about a patient someone else
-has taken; the chain stops before calling them. Once the chain has ended
-(someone else took the patient, every level was tried, or it was stopped), a
-late press hears "This urgent call has already been closed." and the chain is
-not reopened.
+has taken; the chain stops before calling them. Once the chain has ended the
+chain is never reopened, and what the late press hears depends on how it
+ended:
+
+- **Someone else took the patient:** "This patient has already been taken.
+  Thank you. Goodbye."
+- **Nobody took the patient** (every level was tried, or the chain was
+  stopped): "Thank you. We could not reach a provider in time, so our team has
+  been asked to call this patient back. If you can, please call the patient
+  from the number in the text message. Goodbye." When no text with the
+  patient's details reached that number, the line ends after "call this patient
+  back" and points at no text. `URGENT_NOTIFICATION_NUMBER` gets one update
+  naming who pressed the key, the time and the conversation ID, and no patient
+  detail (`[TEST MODE]` first on a test chain). Nothing is recorded as taken:
+  the attempt keeps the outcome it had and the chain stays exhausted, because
+  the urgent number has already been told nobody took the patient, and the
+  update is what tells it someone may now be calling (review of #514, round
+  13). A press with no key, or a press when the rotation is switched off, still
+  hears "This urgent call has already been closed."
 
 ### When the first call is not taken
 

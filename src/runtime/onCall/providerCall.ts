@@ -90,6 +90,19 @@ export function acceptedWithNumberLine(callbackNumber: string): string | null {
 export const PROVIDER_DECLINED_LINE = "Understood. Goodbye.";
 export const PROVIDER_ALREADY_TAKEN_LINE = "This patient has already been taken. Thank you. Goodbye.";
 export const PROVIDER_CLOSED_LINE = "This urgent call has already been closed. Thank you. Goodbye.";
+/**
+ * A key press on a chain that ended with nobody taking the patient (every
+ * level tried, or stopped before one). The urgent number has already been
+ * texted to call the patient back, so the provider is told that, and asked to
+ * call too if they can (review of #514, round 13): "closed" would read as
+ * handled.
+ */
+export const PROVIDER_TOO_LATE_LINE =
+  "Thank you. We could not reach a provider in time, so our team has been asked to call this patient back. " +
+  "If you can, please call the patient from the number in the text message. Goodbye.";
+/** The same, when no text with the patient's details reached this number. */
+export const PROVIDER_TOO_LATE_NO_TEXT_LINE =
+  "Thank you. We could not reach a provider in time, so our team has been asked to call this patient back. Goodbye.";
 
 function say(line: string): string {
   return `<Say voice="${VOICE}">${xmlEscape(line)}</Say>`;
@@ -115,14 +128,17 @@ export function providerCallTwiml(ackUrl: string, opts: { textSent: boolean }): 
   );
 }
 
-export type AckResult = "accepted" | "declined" | "already_taken" | "closed";
+export type AckResult = "accepted" | "declined" | "already_taken" | "closed" | "too_late";
 
 /**
  * What the ack webhook answers. A key press that takes the patient on a call
  * whose details text never reached that number carries the callback number to
  * read instead of the line that points at the text (review of #514, round 12).
  */
-export type AckReply = AckResult | { result: "accepted"; noText: true; callbackNumber: string | null };
+export type AckReply =
+  | AckResult
+  | { result: "accepted"; noText: true; callbackNumber: string | null }
+  | { result: "too_late"; noText: true };
 
 export function ackResultOf(reply: AckReply): AckResult {
   return typeof reply === "string" ? reply : reply.result;
@@ -131,7 +147,10 @@ export function ackResultOf(reply: AckReply): AckResult {
 export function ackReplyTwiml(reply: AckReply): WebhookResponse {
   if (typeof reply !== "string") {
     const line =
-      (reply.callbackNumber ? acceptedWithNumberLine(reply.callbackNumber) : null) ?? PROVIDER_ACCEPTED_NO_NUMBER_LINE;
+      reply.result === "too_late"
+        ? PROVIDER_TOO_LATE_NO_TEXT_LINE
+        : ((reply.callbackNumber ? acceptedWithNumberLine(reply.callbackNumber) : null) ??
+          PROVIDER_ACCEPTED_NO_NUMBER_LINE);
     return twimlResponse(200, `${say(line)}<Hangup/>`);
   }
   const result = reply;
@@ -142,7 +161,9 @@ export function ackReplyTwiml(reply: AckReply): WebhookResponse {
         ? PROVIDER_DECLINED_LINE
         : result === "already_taken"
           ? PROVIDER_ALREADY_TAKEN_LINE
-          : PROVIDER_CLOSED_LINE;
+          : result === "too_late"
+            ? PROVIDER_TOO_LATE_LINE
+            : PROVIDER_CLOSED_LINE;
   return twimlResponse(200, `${say(line)}<Hangup/>`);
 }
 
