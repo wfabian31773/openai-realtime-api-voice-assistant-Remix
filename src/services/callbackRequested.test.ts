@@ -4,7 +4,7 @@
  * words only.
  */
 import { describe, it, expect } from 'vitest';
-import { callbackNeeded, callerAskedToBeContacted, callerDeclinedContact } from './callbackRequested';
+import { callbackNeeded, callerAskedToBeContacted, callerDeclinedContact, declinedChannels } from './callbackRequested';
 
 const WORDS_70202 = 'call, please. could they call me when they get into the office?';
 
@@ -119,6 +119,52 @@ describe('callbackNeeded', () => {
         callerWords,
       ).toEqual({ required: false, overridden: false });
     }
+  });
+
+  it("#517 review: a decline covers only the channel it names, so a choice of another channel is a follow-up", () => {
+    for (const [preferredContact, callerWords] of [
+      ['text', "Don't call me. Text."],
+      ['email', "Don't call me, email is fine."],
+      ['text', "I'll call back if I can. Actually, text me later... no, just text."],
+      ['text', 'No me llamen. Texto.'],
+      ['phone', "Don't text me. Phone."],
+      ['call', "Don't email me. Call."],
+    ] as const) {
+      expect(
+        callbackNeeded({ modelSays: false, categoryDefault: true, preferredContact, callerWords }).required,
+        `${preferredContact}: ${callerWords}`,
+      ).toBe(true);
+    }
+  });
+
+  it('#517 review: a decline of the chosen channel, of contact, or with no channel chosen still stands', () => {
+    for (const [preferredContact, callerWords] of [
+      ['phone', "You don't need to call back."],
+      ['phone', "I'll call back."],
+      ['text', "Don't text me."],
+      ['email', 'No need to email.'],
+      ['text', "Please don't contact me."],
+      ['email', 'Do not contact me, thanks.'],
+      [undefined, "Don't call me."],
+      ['fax', "Don't call me."],
+    ] as const) {
+      expect(
+        callbackNeeded({ modelSays: false, categoryDefault: true, preferredContact, callerWords }),
+        `${preferredContact}: ${callerWords}`,
+      ).toEqual({ required: false, overridden: false });
+    }
+  });
+
+  it('declinedChannels names the channel each decline covers', () => {
+    expect([...declinedChannels("Don't call me.")]).toEqual(['call']);
+    expect([...declinedChannels('No need to text.')]).toEqual(['text']);
+    expect([...declinedChannels("Don't email me.")]).toEqual(['email']);
+    expect([...declinedChannels("Don't contact me.")].sort()).toEqual(['call', 'email', 'text']);
+    expect([...declinedChannels("I'll call back.")]).toEqual(['call']);
+    expect([...declinedChannels('No me llamen.')]).toEqual(['call']);
+    expect([...declinedChannels("Don't text me, and don't email me either.")].sort()).toEqual(['email', 'text']);
+    expect(declinedChannels('Text.').size).toBe(0);
+    expect(declinedChannels(undefined).size).toBe(0);
   });
 
   it('a decline never turns a callback off by itself: it only lets the model\'s FALSE stand', () => {

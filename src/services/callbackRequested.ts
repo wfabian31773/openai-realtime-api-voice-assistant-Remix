@@ -85,11 +85,34 @@ export function callerAskedToBeContacted(callerWords: string | undefined): boole
  * `requires_callback: false` stand over a chosen contact method; it never
  * turns a callback off by itself. Deliberately literal: a miss leaves the
  * chosen method a callback, the direction a request must err in.
+ *
+ * SCOPED TO THE CHANNEL IT NAMES (github-actions P2 on #517): "Don't call
+ * me." declines a phone call, not a text, so a caller who then answers the
+ * method question with "Text." has chosen a follow-up the decline does not
+ * cover. "Contact" covers every channel; a decline of calling back covers the
+ * phone.
  */
-const DECLINED_CONTACT = new RegExp(
+export type ContactChannel = 'call' | 'text' | 'email';
+
+const ALL_CHANNELS: readonly ContactChannel[] = ['call', 'text', 'email'];
+
+/** A verb the caller declined, as the channel it names. */
+function channelsOf(verb: string): ContactChannel[] {
+  const v = verb.toLowerCase();
+  if (v === 'text') return ['text'];
+  if (v === 'email') return ['email'];
+  if (v === 'contact') return [...ALL_CHANNELS];
+  return ['call'];
+}
+
+const DECLINED_BY_VERB = [
+  /\b(?:don'?t|do not|never)\s+(call|text|email|contact)\b/gi,
+  /\b(?:(?:don'?t|do not) (?:need|have) to|no need to|no reason to|not necessary to)\s+(call|text|email|contact)\b/gi,
+];
+
+/** Declines that are about a phone call whatever their wording. */
+const DECLINED_A_CALL = new RegExp(
   [
-    String.raw`\b(?:don'?t|do not|never)\s+(?:call|text|email|contact)\b`,
-    String.raw`\b(?:(?:don'?t|do not) (?:need|have) to|no need to|no reason to|not necessary to)\s+(?:call|text|email|contact)\b`,
     String.raw`\bi(?:'ll| will) (?:just |try to |try and )?call (?:you(?: guys| all)?(?: back)?|back|again|later|tomorrow|in the morning|myself)\b`,
     String.raw`\bno (?:callback|call back|call-back|calls)\b`,
     String.raw`\bno (?:me )?(?:llamen|llame|llames)\b`,
@@ -100,9 +123,29 @@ const DECLINED_CONTACT = new RegExp(
   'i',
 );
 
+/** The channels the caller declined in their own words; empty when none. */
+export function declinedChannels(callerWords: string | undefined): Set<ContactChannel> {
+  const declined = new Set<ContactChannel>();
+  if (!callerWords) return declined;
+  const words = callerWords.replace(/[’‘]/g, "'");
+  for (const pattern of DECLINED_BY_VERB) {
+    for (const match of words.matchAll(pattern)) for (const c of channelsOf(match[1])) declined.add(c);
+  }
+  if (DECLINED_A_CALL.test(words)) declined.add('call');
+  return declined;
+}
+
 export function callerDeclinedContact(callerWords: string | undefined): boolean {
-  if (!callerWords) return false;
-  return DECLINED_CONTACT.test(callerWords.replace(/[’‘]/g, "'"));
+  return declinedChannels(callerWords).size > 0;
+}
+
+/** `preferred_contact`'s values (`phone`, `text`, `email`) as a channel. */
+function channelOfPreference(preferredContact: string): ContactChannel | undefined {
+  const p = preferredContact.trim().toLowerCase();
+  if (p === 'phone' || p === 'call') return 'call';
+  if (p === 'text' || p === 'sms') return 'text';
+  if (p === 'email') return 'email';
+  return undefined;
 }
 
 /**
@@ -111,8 +154,10 @@ export function callerDeclinedContact(callerWords: string | undefined): boolean 
  *
  * - The caller asked out loud to be contacted: TRUE.
  * - Otherwise the model's explicit FALSE, when the caller declined in their
- *   own words: FALSE. A `preferred_contact` the prompt asks on every call is
- *   not the caller asking (v269), and a bare method answer is not a decline.
+ *   own words the channel they chose, or chose none: FALSE. A
+ *   `preferred_contact` the prompt asks on every call is not the caller
+ *   asking (v269), a bare method answer is not a decline, and a decline of
+ *   one channel does not cover another the caller chose (#517 review).
  * - Otherwise a chosen contact method: TRUE.
  * - Otherwise the model's explicit answer, else the category default.
  */
@@ -132,7 +177,16 @@ export function callbackNeeded(input: {
 }): { required: boolean; overridden: boolean } {
   const fromModel = input.modelSays !== undefined ? input.modelSays : input.categoryDefault;
   if (callerAskedToBeContacted(input.callerWords)) return { required: true, overridden: fromModel === false };
-  if (input.modelSays === false && callerDeclinedContact(input.callerWords)) return { required: false, overridden: false };
+  if (input.modelSays === false) {
+    const declined = declinedChannels(input.callerWords);
+    const preferred = input.preferredContact ? channelOfPreference(input.preferredContact) : undefined;
+    // The decline stands when it covers the chosen channel, or when no channel
+    // the reader knows was chosen. A choice of a channel the caller did not
+    // decline is still a follow-up.
+    if (declined.size > 0 && (preferred === undefined || declined.has(preferred))) {
+      return { required: false, overridden: false };
+    }
+  }
   const choseAMethod = Boolean(input.preferredContact && input.preferredContact.trim()) && input.fullyAnswered !== true;
   if (choseAMethod) return { required: true, overridden: fromModel === false };
   return { required: fromModel, overridden: false };
