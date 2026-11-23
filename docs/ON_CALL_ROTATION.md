@@ -120,7 +120,16 @@ medical director and the final director, so a staffer working it knows the
 patient may already be getting a call back from one of them. Its transfer
 line names who was rung and in what role ("<name> (this week's on-call
 provider)"), never the number, because on a rotation run the number is a
-provider's own phone. Off the rotation it names the fixed number, as before.
+provider's own phone. In test mode the phone that rang was a test number, so
+the line says so ("[TEST MODE] a test number, standing in for <name> (this
+week's on-call provider)") rather than reading as if the provider had been
+paged. Off the rotation it names the fixed number, as before.
+
+The urgent text to `URGENT_NOTIFICATION_NUMBER`, which every urgent call still
+sends, carries one more line when the rotation took the dial: who it is
+ringing ("The on-call rotation is ringing <name> (this week's on-call
+provider).") in live mode, or, in test mode, "[TEST MODE] The on-call rotation
+is ringing test numbers, not the provider."
 
 The agent and the ticket say the team is being paged only when the chain's
 record confirmed, within 2 seconds of the ring-out, that the chain is open and
@@ -195,8 +204,10 @@ to call a test caller back. A chain that started live keeps sending it to
 `URGENT_NOTIFICATION_NUMBER`, even if the rotation is switched to test while it
 runs, because a real patient is waiting. A chain that started in test mode and
 is still open when the rotation is switched to live rings nobody else, and its
-closing text is not sent (the log says so), because the test numbers are gone
-with test mode; such a chain only ever holds a test caller.
+closing text goes to the first test number its own chain rang, still marked
+`[TEST MODE]`: such a chain only ever holds a test caller, and the person
+watching the test is the one who needs to know it stopped. If that chain
+holds no number at all (the log says so), the text is not sent.
 
 Each of our callback calls rings for 30 seconds (the in-call warm transfer
 rings as it does today). A call whose status never comes back is hung up and
@@ -219,13 +230,13 @@ sets them.
 | variable | values | what it does |
 |---|---|---|
 | `ON_CALL_ROTATION_MODE` | `off` (default), `test`, `live` | `off`: today's behaviour. `test`: the whole chain runs, but every call and text goes to a test number. `live`: the rotation's own numbers. |
-| `ON_CALL_TEST_PHONES` | comma list of phone numbers | Test mode only, and required there. Level 1 rings the first number, level 2 the second, level 3 the third; a shorter list reuses its last number. |
-| `ON_CALL_CALLER_ID` | a phone number | The number provider calls and texts come from. Defaults to `TWILIO_PHONE_NUMBER`. **Refused if it is the Wayne Operator Line** (`OPERATOR_LINE_FROM_NUMBER`). |
+| `ON_CALL_TEST_PHONES` | comma list of phone numbers | Test mode only, and required there. The levels that will ring take the numbers in order: the first level rung rings the first number, the next the second, the next the third; a shorter list reuses its last number. A level with no number of its own is skipped, as it would be live, and takes no test number. |
+| `ON_CALL_CALLER_ID` | a phone number | The number provider calls and texts come from. Defaults to `TWILIO_PHONE_NUMBER` when unset or blank. **Refused if it is the Wayne Operator Line** (`OPERATOR_LINE_FROM_NUMBER`), and refused if it is set but is not a phone number. |
 | `ON_CALL_POST_OP_REQUIRE_KEPT` | `1` or unset | Unset: a booked surgery in the last 7 days goes to the surgeon even if NextGen has not marked it kept yet (the note on the text says so). `1`: only a surgery marked kept goes to the surgeon. See section 8. |
 
-If any setting cannot be honoured (an unknown mode, no caller ID, the operator
-line as caller ID, test mode with no test numbers, a test number that is not a
-phone number), the whole rotation turns **off** and says why. It never rings a
+If any setting cannot be honoured (an unknown mode, no caller ID, a caller ID
+that is not a phone number, the operator line as caller ID, test mode with no
+test numbers, a test number that is not a phone number), the whole rotation turns **off** and says why. It never rings a
 number nobody chose.
 
 ### How to tell it is running
@@ -420,6 +431,12 @@ seen; every provider call and text goes to the test numbers.
    - then the second test phone (the region director's level), text, call,
      second call, reminder.
    - then the third (Dr. Logan's level).
+
+   The test phones go to the levels that ring, in order. A level with no
+   number of its own (a director not yet entered) is skipped, as it would be
+   live, so its test phone goes to the next level that rings; a San Diego or
+   Coachella call, which has no region level, rings the first test phone and
+   then the second (Dr. Logan's level).
 4. Run it again and press a key on any of those calls: nothing rings after it,
    and the escalation reads `accepted`.
 
