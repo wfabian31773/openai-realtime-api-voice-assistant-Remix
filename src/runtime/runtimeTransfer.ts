@@ -195,6 +195,13 @@ export interface OnCallTransferWiring {
   personIdFor?: (callSid: string) => string | undefined;
   sendSms(input: { to: string; from: string; body: string }): Promise<{ sid: string }>;
   now?: () => Date;
+  /**
+   * Where a held second escalation is recorded (`on_call_second_request_held`,
+   * a PHI-free `call_events` row). Default: the call event log, which the
+   * caller-audio row at teardown flushes with the rest of the call's events.
+   * A seam so a test can see the event (review of #514, round 11).
+   */
+  noteHeldRequest?: (callSid: string, data: { why: "pending" | "active"; slug: string }) => void;
   /** Tests only: `HANDOFF_RESULT_WAIT_MS`, `HANDOFF_SETTLE_MS` and `CHAIN_READ_WAIT_MS` by default. */
   handoffResultWaitMs?: number;
   handoffSettleMs?: number;
@@ -233,6 +240,25 @@ export const ON_CALL_CHAIN_PENDING = "on_call_chain_still_being_handed_over";
  * on-call team is being paged, not only that nobody could be reached.
  */
 export const HANDOFF_CHAIN_STARTED = "handoff_failed:CHAIN_STARTED";
+
+/** The `call_events` message for a second escalation the chain held back. */
+export const ON_CALL_SECOND_REQUEST_HELD = "on_call_second_request_held";
+
+/**
+ * Records a held second escalation in the call's event log. Lazy, like every
+ * database-touching import on the runtime (callEventLog pulls in server/db),
+ * and it never throws: losing the event must never affect the call.
+ */
+function defaultNoteHeldRequest(callSid: string, data: { why: "pending" | "active"; slug: string }): void {
+  void import("../services/callEventLog")
+    .then(({ emitCallEvent }) =>
+      emitCallEvent(callSid, "warn", "handoff", ON_CALL_SECOND_REQUEST_HELD, { why: data.why }, {
+        callSid,
+        agentSlug: data.slug,
+      }),
+    )
+    .catch(() => undefined);
+}
 
 /** How long the dial waits for the full-details text to be accepted before it rings. */
 export const PRE_DIAL_SMS_WAIT_MS = 2_000;
@@ -934,6 +960,10 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
           if (onCallEligible && onCall) {
             const claim = await claimChain();
             if (claim.kind === "refuse") {
+              // The refusal writes no transfer outcome (the call's first
+              // escalation owns that), so the event is the one trace that a
+              // second request was made and held (review of #514, round 11).
+              (onCall.noteHeldRequest ?? defaultNoteHeldRequest)(metadata.callSid, { why: claim.why, slug });
               if (claim.why === "pending") {
                 log(
                   `[ON-CALL] ${metadata.callSid}: this call's first escalation is still handing its chain over; not dialling again`,

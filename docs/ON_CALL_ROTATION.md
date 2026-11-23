@@ -174,6 +174,11 @@ A call has at most one escalation chain running at a time.
   anything new goes on the ticket. The chain is claimed the moment the first
   request reaches the transfer, before anything is read, so two requests in
   the same instant cannot both start one.
+- A second request held either way writes no transfer outcome (the first
+  request's outcome stands) and no attempt row. It is recorded as one
+  `call_events` row, `on_call_second_request_held`, with only the reason:
+  `active` (a chain was running) or `pending` (it was still being handed
+  over). Section 5, "Reading the log", has the query.
 - If the first request's record was still being written after 20 seconds,
   its claim is released and a second request can ring this week's provider
   again. That hand-off opens no second chain: its text and its call are
@@ -529,6 +534,17 @@ instead of reading as something else. A call logged `no_answer`, `declined`,
 press (section 1, "What the provider hears"): its `ended_at` is the moment of
 the press. The patient details and the caller's number are kept on the
 escalation only while someone is being paged, and are erased when it closes.
+
+A second request for the on-call team on the same call, held because the
+call's chain was running or still being handed over (section 1, "One chain
+per call"), dials nobody and logs no attempt. It is in the call's event log:
+
+```sql
+SELECT at, data->>'why' AS why
+FROM call_events
+WHERE call_sid = '<CallSid>' AND message = 'on_call_second_request_held'
+ORDER BY at;
+```
 
 ---
 

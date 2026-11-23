@@ -11,6 +11,7 @@ import twilio from "twilio";
 import {
   createRuntimeTransfer,
   ON_CALL_LANES,
+  ON_CALL_SECOND_REQUEST_HELD,
   rotationMayTakeTheDial,
   TRANSFER_ACCEPT_PATH,
   TRANSFER_STATUS_PATH,
@@ -48,6 +49,15 @@ vi.mock("./warmTransfer", async (importOriginal) => {
     }) as typeof real.performWarmTransfer,
   };
 });
+
+/**
+ * The call event log, so the default held-request sink can be seen writing
+ * its row without a database (the real module pulls in server/db).
+ */
+const events = vi.hoisted(() => ({ emitted: [] as unknown[][] }));
+vi.mock("../services/callEventLog", () => ({
+  emitCallEvent: (...args: unknown[]) => void events.emitted.push(args),
+}));
 
 const AUTH_TOKEN = "test-auth-token";
 const DOMAIN = "runtime.example.test";
@@ -105,6 +115,7 @@ interface Built {
   texts: Array<{ to: string; from: string; body: string; at: number }>;
   handed: InCallTransferResult[];
   order: string[];
+  held: Array<{ callSid: string; why: string; slug: string }>;
 }
 
 function buildWiring(over: {
@@ -120,6 +131,7 @@ function buildWiring(over: {
   const texts: Built["texts"] = [];
   const handed: InCallTransferResult[] = [];
   const order: string[] = [];
+  const held: Built["held"] = [];
   const wiring: OnCallTransferWiring = {
     runner: {
       // Opens the chain's row the way the real runner does, and closes it on a
@@ -160,8 +172,9 @@ function buildWiring(over: {
       return { sid: `SM${texts.length}` };
     },
     now: () => at,
+    noteHeldRequest: (callSid, data) => void held.push({ callSid, ...data }),
   };
-  return { wiring, store, texts, handed, order };
+  return { wiring, store, texts, handed, order, held };
 }
 
 function recordingAlerts(): { alerts: UrgentTransferAlerts; beforeDial: unknown[]; tickets: unknown[] } {
@@ -621,6 +634,9 @@ describe("an urgent after-hours call with the rotation on", () => {
     expect(dialed).toHaveLength(1);
     expect(built.texts).toHaveLength(1);
     await vi.waitFor(() => expect(built.handed).toHaveLength(1));
+    // The held request leaves one trace, since it writes no transfer outcome
+    // (review of #514, round 11): the reason and the lane, nothing about the patient.
+    expect(built.held).toEqual([{ callSid: "CAcaller", why: "active", slug: "no-ivr" }]);
   });
 
   it("covers the after-hours line only: the v2 agents do not know CHAIN_RUNNING", () => {
@@ -661,6 +677,8 @@ describe("one chain per call, read from the chain's own row", () => {
     // whether the chain is paging (review of #514).
     await expect(handoff()).rejects.toThrow(/^handoff_failed:CHAIN_PENDING$/);
     expect(dialed).toHaveLength(0);
+    expect(built.held).toEqual([{ callSid: "CAcaller", why: "pending", slug: "no-ivr" }]);
+    expect(events.emitted).toEqual([]);
 
     release();
     await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
@@ -668,6 +686,41 @@ describe("one chain per call, read from the chain's own row", () => {
     transfer.handleAccept(signed(TRANSFER_ACCEPT_PATH, { CallSid: "CAoffice", Digits: "1" }));
     await first;
     await vi.waitFor(() => expect(built.handed).toHaveLength(1));
+  });
+
+  it("writes the held request to the call's event log by default, with the reason and nothing about the patient", async () => {
+    const { ops, dialed } = fakeOps();
+    const built = buildWiring();
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => (release = resolve));
+    const realGet = built.wiring.rotation.get;
+    const { noteHeldRequest: _injected, ...rest } = built.wiring;
+    const wiring: OnCallTransferWiring = { ...rest, rotation: { get: async () => (await gate, realGet()) } };
+    const transfer = transferWith(ops, wiring);
+    const handoff = transfer.handoffFor("no-ivr", META);
+    events.emitted.length = 0;
+
+    urgent();
+    const first = handoff();
+    urgent();
+    await expect(handoff()).rejects.toThrow(/^handoff_failed:CHAIN_PENDING$/);
+    await vi.waitFor(() => expect(events.emitted).toHaveLength(1));
+    expect(events.emitted[0]).toEqual([
+      "CAcaller",
+      "warn",
+      "handoff",
+      ON_CALL_SECOND_REQUEST_HELD,
+      { why: "pending" },
+      { callSid: "CAcaller", agentSlug: "no-ivr" },
+    ]);
+
+    release();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    expect(dialed).toHaveLength(1);
+    transfer.handleAccept(signed(TRANSFER_ACCEPT_PATH, { CallSid: "CAoffice", Digits: "1" }));
+    await first;
+    // The first escalation's own path writes no held-request event.
+    expect(events.emitted).toHaveLength(1);
   });
 
   it("takes today's path for an escalation after this call's chain has finished", async () => {

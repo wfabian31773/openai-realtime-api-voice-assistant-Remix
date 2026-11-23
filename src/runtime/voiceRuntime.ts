@@ -692,6 +692,9 @@ export function publicTransferDomain(
   return resolved.source === "fallback" ? undefined : resolved.domain;
 }
 
+/** The on-call runner the latest mount started (see `mountVoiceRuntime`). */
+let liveOnCallRunner: { stop(): void } | null = null;
+
 export function mountVoiceRuntime(
   app: Express,
   server: HttpServer,
@@ -847,7 +850,16 @@ export function mountVoiceRuntime(
       ? `[voice-runtime] on-call rotation ${onCall.config.mode.toUpperCase()}: urgent after-hours calls ring the week's on-call provider, then retry and escalate`
       : `[voice-runtime] on-call rotation off${onCall.health.disabledBecause ? ` (${onCall.health.disabledBecause})` : onCall.health.blockedBy ? ` (${onCall.health.blockedBy})` : ""} — urgent transfers ring the fixed on-call number as before`,
   );
+  // One runner per process. A second mount (a test, a re-mount) stops the
+  // first mount's runner instead of ticking beside it, and closing the server
+  // stops this one, so nothing polls the escalation tables after shutdown.
+  liveOnCallRunner?.stop();
+  liveOnCallRunner = onCall.runner ?? null;
   onCall.runner?.start();
+  server.once("close", () => {
+    onCall.runner?.stop();
+    if (liveOnCallRunner === onCall.runner) liveOnCallRunner = null;
+  });
   console.log(
     transfer.unavailableReason
       ? `[voice-runtime] ${transfer.unavailableReason} — transfer-capable lanes stay refused`

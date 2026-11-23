@@ -3423,11 +3423,13 @@ describe("the after-hours on-call chain at the runtime (src/runtime/onCall/)", (
     acks: Array<[number, string]>;
     statuses: Array<[number, string]>;
     started: number;
+    stopped: number;
   } {
     const r = {
       acks: [] as Array<[number, string]>,
       statuses: [] as Array<[number, string]>,
       started: 0,
+      stopped: 0,
       afterInCallTransfer: async () => null,
       tick: async () => {},
       onProviderAck: async (attempt: number, digits: string) => {
@@ -3440,7 +3442,9 @@ describe("the after-hours on-call chain at the runtime (src/runtime/onCall/)", (
       start: () => {
         r.started += 1;
       },
-      stop: () => {},
+      stop: () => {
+        r.stopped += 1;
+      },
     };
     return r;
   }
@@ -3487,6 +3491,35 @@ describe("the after-hours on-call chain at the runtime (src/runtime/onCall/)", (
     expect(onCall).toEqual({ mode: "test", testPhones: 2, requireKept: false, running: true });
     expect(JSON.stringify(onCall)).not.toMatch(/\d{7}/);
     expect(runner.started).toBe(1);
+  });
+
+  it("runs one runner per process: a second mount stops the first's, and closing the server stops its own", async () => {
+    const wiring = (): OnCallWiring =>
+      buildOnCallWiring(
+        {
+          ON_CALL_ROTATION_MODE: "test",
+          ON_CALL_CALLER_ID: "+15550001111",
+          ON_CALL_TEST_PHONES: "+15550002222",
+        },
+        ON_CALL_HOST,
+        {
+          store: createFakeOnCallStore(syntheticRotation(), () => new Date("2026-12-03T06:30:00Z")),
+          twilio: async () => {
+            throw new Error("no Twilio in this test");
+          },
+          consoleQuery: null,
+          log: () => {},
+        },
+      );
+    const first = recordingRunner();
+    const second = recordingRunner();
+    await harness({ onCall: { ...wiring(), runner: first } });
+    expect([first.started, first.stopped]).toEqual([1, 0]);
+    const h2 = await harness({ onCall: { ...wiring(), runner: second } });
+    expect(first.stopped).toBe(1);
+    expect([second.started, second.stopped]).toEqual([1, 0]);
+    await h2.close();
+    expect(second.stopped).toBe(1);
   });
 
   it("answers a provider's key press with the closed line when the chain is off", async () => {
