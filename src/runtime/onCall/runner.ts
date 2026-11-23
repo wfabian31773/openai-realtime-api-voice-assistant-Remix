@@ -672,7 +672,8 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
             `[ON-CALL] ${r.callSid}: this call's chain was already open (escalation ${existing.id}); this hand-off opened nothing and its attempts are logged on that chain`,
           );
           warm = await logHandOff(existing.id);
-          if (existing.status !== "active") return existing;
+          // A chain that has finished is answered as it is: both helpers below
+          // stop on a row that is no longer active and hand back its fresh read.
           if (accepted) return await settleAccepted(existing.id, warm, takenBy);
           const taken = await acceptedAttempt(existing);
           if (taken) {

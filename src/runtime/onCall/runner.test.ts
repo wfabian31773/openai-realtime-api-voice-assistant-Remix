@@ -1455,6 +1455,25 @@ describe("a second hand-off on a call whose chain is already open (review of #51
     expect(h.hungUp).toEqual([ringing.providerCallSid]);
   });
 
+  it("brings the open chain due when this hand-off's call was taken and the close cannot land, so the next tick closes it", async () => {
+    const h = harness();
+    const plan = wedPlan();
+    const first = await h.runner.afterInCallTransfer(inCall(plan, "no_answer"));
+    expect(first!.nextAt!.getTime()).toBeGreaterThan(h.now().getTime());
+    const realClose = h.store.closeEscalation.bind(h.store);
+    h.store.closeEscalation = async () => null; // every close loses its race
+    await h.runner.afterInCallTransfer(inCall(plan, "accepted"));
+    const warm = [...h.store.attempts.values()].filter((a) => a.kind === "warm_transfer").pop()!;
+    expect(warm.outcome).toBe("accepted");
+    expect(h.escalation()).toMatchObject({ status: "active" });
+    expect(h.escalation().nextAt!.getTime()).toBeLessThanOrEqual(h.now().getTime());
+    h.store.closeEscalation = realClose;
+    const callsBefore = h.calls.length;
+    await h.runner.tick();
+    expect(h.calls).toHaveLength(callsBefore);
+    expect(h.escalation()).toMatchObject({ status: "accepted", acceptedAttemptId: warm.id });
+  });
+
   it("answers a finished chain as it is, still logging this hand-off's attempts on it", async () => {
     const h = harness();
     const plan = wedPlan();
