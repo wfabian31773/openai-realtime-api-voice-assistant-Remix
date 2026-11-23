@@ -13,6 +13,7 @@ import { createSqlFleetReader } from "./fleetReader";
 import { flushDueOutbox } from "./messageOutbox";
 import { reapStaleSending } from "./approvals";
 import { mountPluginApi } from "./routes";
+import { mountVoiceFleetMcp } from "./mcpRoute";
 import { createSqlPluginStore, type SqlExec } from "./sqlStore";
 import type { PluginStore } from "./store";
 
@@ -65,6 +66,7 @@ export async function mountProductionPluginApi(app: Express): Promise<void> {
 
   startPluginSweeps(store);
 
+  mountVoiceFleetMcp(app, { store });
   mountPluginApi(app, {
     store,
     agents: agentRegistry,

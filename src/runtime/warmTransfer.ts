@@ -80,6 +80,9 @@ export type TransferOutcome =
        * leaves it absent, which is what `method` defaulting to warm means at
        * every reader. */
       method?: "warm" | "blind";
+      /** The office leg that was dialled and not taken, when one was created,
+       * so a failed attempt can still be matched to Twilio's call log. */
+      officeCallSid?: string;
     };
 
 /** The Twilio operations this needs, narrowed to exactly four. */
@@ -267,6 +270,7 @@ export async function performWarmTransfer(
       status: reason === "declined" ? "DECLINED" : "NO_ANSWER",
       reason: reason === "declined" ? "office_declined" : "office_no_answer",
       destination,
+      officeCallSid,
     };
   }
 
@@ -297,6 +301,7 @@ export async function performWarmTransfer(
       status: "FAILED",
       reason: "caller_redirect_failed",
       destination,
+      officeCallSid,
     };
   }
 

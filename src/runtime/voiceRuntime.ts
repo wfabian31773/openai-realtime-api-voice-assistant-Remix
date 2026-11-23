@@ -44,6 +44,14 @@ import {
   type VoiceCallRecord,
 } from "./mediaStreamBridge";
 import { urgentAlertStatus } from "./urgentTransferAlerts";
+import { buildOnCallWiring, type OnCallWiring } from "./onCall/wiring";
+import {
+  ON_CALL_ACK_PATH,
+  ON_CALL_STATUS_PATH,
+  handleOnCallAck,
+  handleOnCallStatus,
+  type ProviderCallWebhookDeps,
+} from "./onCall/providerCall";
 import { CallSessionRegistry, type CallEntry } from "./sessionRegistry";
 import {
   GrokVoiceSession,
@@ -616,6 +624,13 @@ export interface VoiceRuntimeOptions {
    * lanes exactly as before, with the reason logged once at mount.
    */
   transferOps?: TransferTwilioOps;
+  /**
+   * The after-hours on-call chain (src/runtime/onCall/). Injected for tests;
+   * when omitted it is built from the environment, and with
+   * ON_CALL_ROTATION_MODE unset (the default) it is off and the urgent
+   * transfer runs exactly as before.
+   */
+  onCall?: OnCallWiring;
 }
 
 /** A transport the runtime can open. WebSocketGrokTransport satisfies it. */
@@ -682,6 +697,21 @@ export function publicTransferDomain(
   });
   return resolved.source === "fallback" ? undefined : resolved.domain;
 }
+
+/** The on-call runner the latest mount started (see `mountVoiceRuntime`). */
+let liveOnCallRunner: { stop(): void } | null = null;
+
+/**
+ * What an app's on-call webhooks answer with. The two routes are registered
+ * once per app and read this slot, so a second mount of the same app moves
+ * them to its runner; registering them again would leave Express answering
+ * with the first mount's, already stopped (review of #514, round 15).
+ */
+const onCallWebhookSlots = new WeakMap<object, ProviderCallWebhookDeps>();
+const CLOSED_ON_CALL_RUNNER: ProviderCallWebhookDeps["runner"] = {
+  onProviderAck: async () => "closed",
+  onProviderStatus: async () => {},
+};
 
 export function mountVoiceRuntime(
   app: Express,
@@ -823,10 +853,30 @@ export function mountVoiceRuntime(
   // for its callback URLs, called with raw env so this module never pulls
   // in the full config (which requires DATABASE_URL at import).
   const transferDomain = publicTransferDomain(env);
+  // The after-hours on-call chain. Off unless ON_CALL_ROTATION_MODE is test
+  // or live and the deployment has a public host for the provider-call
+  // webhooks; off, `onCall.transfer` is null and the transfer is unchanged.
+  const onCall = options.onCall ?? buildOnCallWiring(env, transferDomain ?? undefined);
   const transfer = createRuntimeTransfer({
     env,
     ops: options.transferOps,
     domain: transferDomain,
+    onCall: onCall.transfer ?? undefined,
+  });
+  console.log(
+    onCall.transfer
+      ? `[voice-runtime] on-call rotation ${onCall.config.mode.toUpperCase()}: urgent after-hours calls ring the week's on-call provider, then retry and escalate`
+      : `[voice-runtime] on-call rotation off${onCall.health.disabledBecause ? ` (${onCall.health.disabledBecause})` : onCall.health.blockedBy ? ` (${onCall.health.blockedBy})` : ""} — urgent transfers ring the fixed on-call number as before`,
+  );
+  // One runner per process. A second mount (a test, a re-mount) stops the
+  // first mount's runner instead of ticking beside it, and closing the server
+  // stops this one, so nothing polls the escalation tables after shutdown.
+  liveOnCallRunner?.stop();
+  liveOnCallRunner = onCall.runner ?? null;
+  onCall.runner?.start();
+  server.once("close", () => {
+    onCall.runner?.stop();
+    if (liveOnCallRunner === onCall.runner) liveOnCallRunner = null;
   });
   console.log(
     transfer.unavailableReason
@@ -869,6 +919,27 @@ export function mountVoiceRuntime(
   app.post(TRANSFER_DIAL_RESULT_PATH, (req: Request, res: Response) => {
     send(res, transfer.handleDialResult(toWebhookRequest(req)));
   });
+
+  // The calls the on-call chain places to providers: the key press and the
+  // call status. Mounted whether or not the chain is on: switched off, the
+  // wiring's draining runner still takes a key press and ends a ringing call's
+  // attempt on a chain that was open before (review of #514, round 15); only
+  // a wiring with no runner at all answers that the call is closed.
+  const onCallSlot: ProviderCallWebhookDeps = { env, runner: onCall.runner ?? CLOSED_ON_CALL_RUNNER };
+  const mountedSlot = onCallWebhookSlots.get(app);
+  if (mountedSlot) {
+    mountedSlot.env = onCallSlot.env;
+    mountedSlot.runner = onCallSlot.runner;
+  } else {
+    onCallWebhookSlots.set(app, onCallSlot);
+    // The slot is read at each request, so a later mount's runner answers.
+    app.post(ON_CALL_ACK_PATH, async (req: Request, res: Response) => {
+      send(res, await handleOnCallAck(toWebhookRequest(req), onCallSlot));
+    });
+    app.post(ON_CALL_STATUS_PATH, async (req: Request, res: Response) => {
+      send(res, await handleOnCallStatus(toWebhookRequest(req), onCallSlot));
+    });
+  }
 
   app.get("/voice/health", async (_req: Request, res: Response) => {
     const readiness = computeRuntimeReadiness(env);
@@ -925,6 +996,9 @@ export function mountVoiceRuntime(
       // its own so a missing number shows here instead of failing silently.
       // Names only, never the numbers.
       urgentAlert: urgentAlertStatus(env),
+      // The after-hours on-call chain: off, test or live, and why it is off.
+      // A count of test numbers, never a number.
+      onCall: onCall.health,
       // Per lane: can this deployment answer a call on it, and if not, the
       // sentence why. `transferWarning` is the second gate — a lane that IS
       // served but whose transfer has nowhere to dial, which reads as

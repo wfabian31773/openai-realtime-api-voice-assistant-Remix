@@ -147,6 +147,9 @@ const SAFE_ARG_KEYS = new Set([
    * because it only checked the source mentioned the field.
    */
   'schedulableHere',
+  // v267: record_answered_question's own yes or no on whether anything is
+  // still owed to the caller (afterHoursAnsweredQuestion.ts). A boolean.
+  'follow_up_owed',
 ]);
 
 /** Booleans derived from arguments we must NOT store verbatim. "Did the agent

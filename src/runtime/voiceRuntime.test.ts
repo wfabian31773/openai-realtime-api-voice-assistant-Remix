@@ -49,6 +49,18 @@ import type { LaneConfig, LaneSource } from "./laneRegistry";
 import { registerCallHandoff, registeredHandoffCount } from "../tools/handoffBroker";
 import { runSetupFailureFloor, type SetupFailureContext } from "./setupFailureFloor";
 import type { VoiceCallRecord } from "./mediaStreamBridge";
+import { buildOnCallWiring, type OnCallWiring } from "./onCall/wiring";
+import { createFakeOnCallStore } from "./onCall/store.fake";
+import type { OnCallStore } from "./onCall/store";
+import { syntheticRotation } from "./onCall/testRotation";
+import {
+  ON_CALL_ACK_PATH,
+  ON_CALL_STATUS_PATH,
+  PROVIDER_ACCEPTED_LINE,
+  PROVIDER_ACK_FAILED_STOPPED_LINE,
+  PROVIDER_CLOSED_LINE,
+} from "./onCall/providerCall";
+import type { OnCallRunner } from "./onCall/runner";
 
 // v77: resolveLane binds the PIPELINE's own tools (set_spoken_language) through
 // the tool library, whose telemetry module validates the environment at import.
@@ -292,10 +304,14 @@ async function harness(
     /** The outbound layer's store (src/runtime/outbound/). */
     outboundStore?: OutboundStore;
     liveCalls?: LiveCallRegistry;
+    /** The after-hours on-call chain (src/runtime/onCall/). */
+    onCall?: OnCallWiring;
+    /** Mount on an app another harness already mounted on (a second mount, round 15). */
+    app?: express.Express;
   } = {},
 ): Promise<Harness> {
-  const app = express();
-  app.use(express.urlencoded({ extended: true }));
+  const app = over.app ?? express();
+  if (!over.app) app.use(express.urlencoded({ extended: true }));
   const server = http.createServer(app);
   const registry = new CallSessionRegistry();
   const transports: FakeGrokTransport[] = [];
@@ -347,6 +363,7 @@ async function harness(
     resolveGreeting: over.resolveGreeting,
     outboundStore: over.outboundStore,
     liveCalls: over.liveCalls,
+    onCall: over.onCall,
     openCallRow:
       over.openCallRow ??
       (async (row) => {
@@ -3404,5 +3421,213 @@ describe("the mid-call reconnect (v263)", () => {
     await waitFor(() => h.persisted.some((r) => r.callSid === "CA-reconnect11"), "the call to persist");
     expect(h.persisted.find((r) => r.callSid === "CA-reconnect11")!.transcript as string).not.toContain("Can you tell me the order");
     await h.close();
+  });
+});
+
+describe("the after-hours on-call chain at the runtime (src/runtime/onCall/)", () => {
+  const ON_CALL_HOST = "voice.example.test";
+
+  /** A runner whose every hook is recorded, for the webhook routes. */
+  function recordingRunner(answer: "accepted" | "declined" = "accepted"): OnCallRunner & {
+    acks: Array<[number, string]>;
+    statuses: Array<[number, string]>;
+    started: number;
+    stopped: number;
+  } {
+    const r = {
+      acks: [] as Array<[number, string]>,
+      statuses: [] as Array<[number, string]>,
+      started: 0,
+      stopped: 0,
+      afterInCallTransfer: async () => null,
+      tick: async () => {},
+      onProviderAck: async (attempt: number, digits: string) => {
+        r.acks.push([attempt, digits]);
+        return answer;
+      },
+      onProviderStatus: async (attempt: number, status: string) => {
+        r.statuses.push([attempt, status]);
+      },
+      start: () => {
+        r.started += 1;
+      },
+      stop: () => {
+        r.stopped += 1;
+      },
+    };
+    return r;
+  }
+
+  async function health(h: Harness): Promise<Record<string, unknown>> {
+    const body = (await (await fetch(`${h.base}/voice/health`)).json()) as { onCall: Record<string, unknown> };
+    return body.onCall;
+  }
+
+  it("is off by default and says so on /voice/health", async () => {
+    const h = await harness();
+    expect(await health(h)).toEqual({ mode: "off", testPhones: 0, requireKept: false, running: false });
+  });
+
+  it("builds the wiring from the runtime's own env, and reports why it is off", async () => {
+    // Test mode with no test numbers is forced off. That this reaches
+    // /voice/health proves the runtime built the wiring from its env.
+    const h = await harness({ env: { ...ENV, ON_CALL_ROTATION_MODE: "test", ON_CALL_CALLER_ID: "+15550001111" } });
+    const onCall = await health(h);
+    expect(onCall.running).toBe(false);
+    expect(onCall.disabledBecause).toBe("test mode needs ON_CALL_TEST_PHONES");
+  });
+
+  it("reports a running chain with counts only, never a phone number, and starts its runner", async () => {
+    const wiring = buildOnCallWiring(
+      {
+        ON_CALL_ROTATION_MODE: "test",
+        ON_CALL_CALLER_ID: "+15550001111",
+        ON_CALL_TEST_PHONES: "+15550002222,+15550003333",
+      },
+      ON_CALL_HOST,
+      {
+        store: createFakeOnCallStore(syntheticRotation(), () => new Date("2026-12-03T06:30:00Z")),
+        twilio: async () => {
+          throw new Error("no Twilio in this test");
+        },
+        consoleQuery: null,
+        log: () => {},
+      },
+    );
+    const runner = recordingRunner();
+    const h = await harness({ onCall: { ...wiring, runner } });
+    const onCall = await health(h);
+    expect(onCall).toEqual({ mode: "test", testPhones: 2, requireKept: false, running: true });
+    expect(JSON.stringify(onCall)).not.toMatch(/\d{7}/);
+    expect(runner.started).toBe(1);
+  });
+
+  it("runs one runner per process: a second mount stops the first's, and closing the server stops its own", async () => {
+    const wiring = (): OnCallWiring =>
+      buildOnCallWiring(
+        {
+          ON_CALL_ROTATION_MODE: "test",
+          ON_CALL_CALLER_ID: "+15550001111",
+          ON_CALL_TEST_PHONES: "+15550002222",
+        },
+        ON_CALL_HOST,
+        {
+          store: createFakeOnCallStore(syntheticRotation(), () => new Date("2026-12-03T06:30:00Z")),
+          twilio: async () => {
+            throw new Error("no Twilio in this test");
+          },
+          consoleQuery: null,
+          log: () => {},
+        },
+      );
+    const first = recordingRunner();
+    const second = recordingRunner();
+    await harness({ onCall: { ...wiring(), runner: first } });
+    expect([first.started, first.stopped]).toEqual([1, 0]);
+    const h2 = await harness({ onCall: { ...wiring(), runner: second } });
+    expect(first.stopped).toBe(1);
+    expect([second.started, second.stopped]).toEqual([1, 0]);
+    await h2.close();
+    expect(second.stopped).toBe(1);
+  });
+
+  /** The wiring a switched-off deployment builds, on a store this test holds. */
+  function offWiring(store: OnCallStore = createFakeOnCallStore(syntheticRotation(), () => new Date("2026-12-03T06:30:00Z"))) {
+    return buildOnCallWiring({}, ON_CALL_HOST, {
+      store,
+      twilio: async () => {
+        throw new Error("no Twilio in this test");
+      },
+      consoleQuery: null,
+      log: () => {},
+    });
+  }
+
+  it("answers a provider's key press on a call it has no record of with the closed line when the chain is off", async () => {
+    const wiring = offWiring();
+    expect(wiring.runner!.draining).toBe(true);
+    const h = await harness({ onCall: wiring });
+    const out = await post(h, `${ON_CALL_ACK_PATH}?attempt=1`, { Digits: "1" });
+    expect(out.status).toBe(200);
+    expect(out.text).toContain(PROVIDER_CLOSED_LINE);
+  });
+
+  it("never tells a provider it will keep trying when the chain is off and their key press cannot be recorded", async () => {
+    const store = createFakeOnCallStore(syntheticRotation(), () => new Date("2026-12-03T06:30:00Z"));
+    store.getAttempt = async () => {
+      throw new Error("the Hub is not answering");
+    };
+    const h = await harness({ onCall: offWiring(store) });
+    const out = await post(h, `${ON_CALL_ACK_PATH}?attempt=1`, { Digits: "1" });
+    expect(out.status).toBe(200);
+    expect(out.text).toContain(PROVIDER_ACK_FAILED_STOPPED_LINE);
+    expect(out.text).not.toMatch(/keep trying/);
+  });
+
+  it("answers a second mount's key presses with the second mount's runner, on the same app", async () => {
+    const app = express();
+    app.use(express.urlencoded({ extended: true }));
+    const first = recordingRunner("declined");
+    const second = recordingRunner("accepted");
+    const h1 = await harness({ app, onCall: { ...offWiring(), runner: first } });
+    const h2 = await harness({ app, onCall: { ...offWiring(), runner: second } });
+    const out = await post(h2, `${ON_CALL_ACK_PATH}?attempt=7`, { Digits: "1" });
+    expect(out.text).toContain(PROVIDER_ACCEPTED_LINE);
+    expect(second.acks).toEqual([[7, "1"]]);
+    expect(first.acks).toEqual([]);
+    // The route is registered once: the first server, on the same app, reads the same slot.
+    await post(h1, `${ON_CALL_ACK_PATH}?attempt=8`, { Digits: "1" });
+    expect(second.acks).toEqual([[7, "1"], [8, "1"]]);
+    expect(first.acks).toEqual([]);
+  });
+
+  it("refuses a forged key press", async () => {
+    const h = await harness();
+    const res = await fetch(`${h.base}${ON_CALL_ACK_PATH}?attempt=1`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/x-www-form-urlencoded",
+        "x-twilio-signature": "not-a-real-signature",
+        "x-forwarded-proto": "http",
+      },
+      body: new URLSearchParams({ Digits: "1" }).toString(),
+    });
+    expect(res.status).toBe(403);
+  });
+
+  it("answers the provider call's status callback with 200 when the chain is off", async () => {
+    const h = await harness({ onCall: offWiring() });
+    const out = await post(h, `${ON_CALL_STATUS_PATH}?attempt=1`, { CallStatus: "completed" });
+    expect(out.status).toBe(200);
+  });
+
+  it("hands the chain's transfer wiring to the runtime transfer", () => {
+    // The transfer is built inside mountVoiceRuntime from the same wiring the
+    // health and the webhooks read; a call through a harness cannot reach a
+    // sanctioned after-hours dial, so the hand-over is pinned from the source
+    // (the device ticketRequirements.test.ts uses). Its behaviour is in
+    // onCallTransfer.test.ts, on the real createRuntimeTransfer.
+    const src = readFileSync(new URL("./voiceRuntime.ts", import.meta.url), "utf8");
+    expect(src).toMatch(/const onCall = options\.onCall \?\? buildOnCallWiring\(env, transferDomain \?\? undefined\)/);
+    expect(src).toMatch(/createRuntimeTransfer\(\{[\s\S]{0,400}onCall: onCall\.transfer \?\? undefined/);
+  });
+
+  it("hands the key press and the status to the running chain's runner", async () => {
+    const runner = recordingRunner("accepted");
+    const off = buildOnCallWiring({}, undefined);
+    const h = await harness({
+      onCall: {
+        ...off,
+        health: { ...off.health, running: true },
+        runner,
+      },
+    });
+    const ack = await post(h, `${ON_CALL_ACK_PATH}?attempt=7`, { Digits: "1" });
+    expect(ack.status).toBe(200);
+    expect(ack.text).toContain(PROVIDER_ACCEPTED_LINE);
+    expect(runner.acks).toEqual([[7, "1"]]);
+    const status = await post(h, `${ON_CALL_STATUS_PATH}?attempt=7`, { CallStatus: "No-Answer" });
+    expect(status.status).toBe(200);
+    expect(runner.statuses).toEqual([[7, "no-answer"]]);
   });
 });

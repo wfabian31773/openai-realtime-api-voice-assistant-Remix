@@ -385,11 +385,18 @@ describe('caller-requested callback handling — VA-76095 / 74600 / VA-71404', (
     expect(h.submitSimplifiedTicket).not.toHaveBeenCalled();
   });
 
-  // v166 (ticket 70202): a caller who chose how to be contacted asked for a
+  // v166 (ticket 70202): a caller who asked how to be contacted wants a
   // follow-up. This used to assert `[NO CALLBACK NEEDED]` on a caller who
-  // chose a text — the tag told staff not to contact somebody who asked to be.
+  // asked for a text — the tag told staff not to contact somebody who asked
+  // to be. v269: the ask is the caller's words, not the routine
+  // `preferred_contact` field, so the caller's line is in the ledger here.
   it('keeps a staff action and follows up on the channel the caller chose', async () => {
-    const { agent } = await agentFor();
+    const { noteCallerTranscript, releaseCallerSpeech } = await import('../services/symptomCorroboration');
+    const { agent, callSid } = await agentFor();
+    noteCallerTranscript(`call-${callSid}`, [
+      'AGENT: Would you prefer we call, text, or email you back?',
+      'CALLER: Could you text me instead?',
+    ]);
     const result = await call(agent, 'create_ticket', {
       ...TICKET,
       request_category: 'cancel_appointment',
@@ -398,6 +405,7 @@ describe('caller-requested callback handling — VA-76095 / 74600 / VA-71404', (
       requires_callback: false,
     });
 
+    releaseCallerSpeech(`call-${callSid}`);
     expect(result).toMatchObject({ success: true, ticketCreated: true, callbackRequired: true });
     expect(lastSubmit().reasonForCalling).not.toContain('[NO CALLBACK NEEDED]');
     expect(lastSubmit().preferredContactMethod).toBe('sms');

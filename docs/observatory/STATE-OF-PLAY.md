@@ -1773,3 +1773,59 @@ No migration, no index (602 live contacts and 864 attempts are read in one
 pass), no voice-runtime change, no marker. Tests:
 `server/observatory/npxOutreach.logic.test.ts`,
 `server/observatory/npxOutreach.test.ts`, `client/src/lib/npxOutreachView.test.ts`.
+
+## 21. The after-hours on-call rotation — v268, built 2026-11-23 for 2026-12-01
+
+**Operator, 2026-11-23:** a new after-hours process from December 1, built now.
+Each week runs Tuesday 5:00 PM to the next Tuesday 8:00 AM Pacific, seeded from
+the 49-week schedule and the 49-provider pool. The rotation lives in tables, so
+swaps and new providers can be entered without code, and holidays rotate like
+any other day. Every urgent call goes to the on-call provider, with no OD/MD
+split. The exception is a patient with surgery in the past 7 days, who goes to
+their surgeon, read from the Console and nowhere else. After that come the
+retry and nudge text, then the region's medical director, then Dr. Logan, with
+every attempt logged.
+
+**Before:** a sanctioned urgent after-hours transfer rang `HUMAN_AGENT_NUMBER`
+once. A ring-out filed the urgent After Hours ticket, and nobody else was tried.
+
+**Built:** `src/runtime/onCall/` (rotation, routing, post-op, the runner, the
+provider callback, the store), the wiring in `runtimeTransfer.ts` and
+`voiceRuntime.ts`, `migrations/add_on_call_rotation.sql` (six tables, RLS on,
+**not applied**), `scripts/on-call-seed.ts` and `scripts/on-call-change.ts`
+(both print SQL for the operator to run), and the operator guide
+`docs/ON_CALL_ROTATION.md`. It is dark until `ON_CALL_ROTATION_MODE` is `test`
+or `live`. Test mode rings only `ON_CALL_TEST_PHONES`, and the caller ID is
+refused if it is the Wayne Operator Line.
+
+**Unchanged:** the 12 urgent triggers, the triage flow and the escalation gate.
+The text to `URGENT_NOTIFICATION_NUMBER` and the urgent ring-out ticket still
+go out. Weekday daytime, PCP and the old core still ring the fixed number.
+
+**Verified offline only.** On a local PostgreSQL 16 the migration, seed and
+change SQL ran, and these all held:
+- the rotation boundaries at Tuesday 4:59 PM, 5:00 PM, 7:59 AM and 8:00 AM
+  Pacific;
+- a holiday week;
+- the chain shapes: San Diego and Coachella go provider then Logan, the Inland
+  Empire goes provider then director then Logan;
+- the runner's walk: retry and reminder inside 5 minutes, the director levels,
+  a key press stopping the chain, and the details nulled at the end.
+
+**Open, and Wayne's to settle** (the full list is in the guide's §8):
+- whether a post-op surgery must be marked kept (`ON_CALL_POST_OP_REQUIRE_KEPT`);
+- which number weekday daytime should ring (`HUMAN_AGENT_NUMBER` against
+  `NO_IVR_HUMAN_AGENT_NUMBER`);
+- whether `URGENT_NOTIFICATION_NUMBER` should keep receiving its text once the
+  rotation is live;
+- what happens above Dr. Logan;
+- and the test numbers for the test calls.
+
+**The number:** after-hours urgent transfers that end with nobody taking the
+patient (today every ring-out); the target is what is left after the director
+levels (`on_call_escalations.status = 'exhausted'`).
+
+**The guards:**
+- an urgent after-hours call that rings no one stays 0;
+- a provider call from the operator line stays 0;
+- a call routed to a surgeon for a surgery more than 7 days old stays 0.
