@@ -4,6 +4,7 @@ import {
   NO_IDENTITY_NOTE,
   POST_OP_SQL,
   SURGERY_EVENTS,
+  beginMinuteOf,
   daysBetween,
   decidePostOp,
   matchSurgeon,
@@ -31,6 +32,7 @@ function surgery(over: Partial<SurgeryFact> = {}): SurgeryFact {
     rescheduled: false,
     providerNpi: "1000000010",
     providerName: "Ada Quill, MD",
+    beginMinute: 480,
     ...over,
   };
 }
@@ -218,6 +220,80 @@ describe("name keys", () => {
   });
 });
 
+describe("a surgery dated today", () => {
+  const NINE_AM = 9 * 60;
+  const today = (over: Partial<SurgeryFact> = {}) => surgery({ date: TODAY, kept: false, ...over });
+
+  it("counts once its begin time has passed, as not yet kept", () => {
+    const d = decidePostOp([today({ beginMinute: 8 * 60 })], TODAY, POOL, { nowMinute: NINE_AM });
+    expect(d).toMatchObject({ route: "surgeon", daysAgo: 0, kept: false });
+  });
+
+  it("counts at its begin minute", () => {
+    expect(decidePostOp([today({ beginMinute: NINE_AM })], TODAY, POOL, { nowMinute: NINE_AM })).toMatchObject({ route: "surgeon" });
+  });
+
+  it("does not count before it begins, and says it is booked for later today", () => {
+    const d = decidePostOp([today({ beginMinute: 14 * 60 })], TODAY, POOL, { nowMinute: NINE_AM });
+    expect(d).toEqual({
+      route: "on_call",
+      reason: "surgery_not_started",
+      surgeryDate: TODAY,
+      note: "Post-op check: the surgery today with Ada Quill, MD is booked for 2:00 PM and has not started, so this went to the on-call provider.",
+    });
+  });
+
+  it("reads a morning start and noon on the clock the way staff say them", () => {
+    expect(decidePostOp([today({ beginMinute: 10 })], TODAY, POOL, { nowMinute: 5 })).toMatchObject({ note: expect.stringContaining("booked for 12:10 AM") });
+    expect(decidePostOp([today({ beginMinute: 12 * 60 })], TODAY, POOL, { nowMinute: NINE_AM })).toMatchObject({ note: expect.stringContaining("booked for 12:00 PM") });
+  });
+
+  it("does not count with no start time on file, and says so", () => {
+    const d = decidePostOp([today({ beginMinute: null })], TODAY, POOL, { nowMinute: NINE_AM });
+    expect(d).toMatchObject({ route: "on_call", reason: "surgery_not_started" });
+    expect(d.note).toContain("has no start time on file and is not marked kept");
+  });
+
+  it("does not count without a clock to check it against", () => {
+    expect(decidePostOp([today({ beginMinute: 8 * 60 })], TODAY, POOL)).toMatchObject({ route: "on_call", reason: "surgery_not_started" });
+  });
+
+  it("counts when NextGen marks it kept, whatever its start time", () => {
+    expect(decidePostOp([today({ kept: true, beginMinute: 14 * 60 })], TODAY, POOL, { nowMinute: NINE_AM })).toMatchObject({ route: "surgeon", kept: true });
+  });
+
+  it("leaves an earlier surgery in the window to route to its surgeon", () => {
+    const d = decidePostOp(
+      [today({ beginMinute: 14 * 60, providerNpi: "1000000011", providerName: "Ben Quarry, MD" }), surgery({ date: "2026-12-07" })],
+      TODAY,
+      POOL,
+      { nowMinute: NINE_AM },
+    );
+    expect(d).toMatchObject({ route: "surgeon", provider: { id: 10 }, surgeryDate: "2026-12-07", daysAgo: 3 });
+  });
+
+  it("never holds back a surgery from an earlier day, whatever its start time", () => {
+    expect(decidePostOp([surgery({ date: "2026-12-09", kept: false, beginMinute: 23 * 60 })], TODAY, POOL, { nowMinute: NINE_AM })).toMatchObject({ route: "surgeon", daysAgo: 1 });
+  });
+});
+
+describe("the Console's begin time", () => {
+  it("reads HHMM as minutes after midnight", () => {
+    expect(beginMinuteOf("0800")).toBe(480);
+    expect(beginMinuteOf("1430")).toBe(870);
+    expect(beginMinuteOf("0010")).toBe(10);
+    expect(beginMinuteOf("800")).toBe(480);
+    expect(beginMinuteOf("08:00")).toBe(480);
+    expect(beginMinuteOf(" 2359 ")).toBe(1439);
+  });
+
+  it("reads nothing it cannot be sure of", () => {
+    for (const v of ["2400", "1260", "", "0", "12345", "8am", "ab:cd", null, undefined]) {
+      expect(beginMinuteOf(v)).toBeNull();
+    }
+  });
+});
+
 describe("reading the Console", () => {
   it("binds the person, the window and the events, every one typed", async () => {
     const query = vi.fn(async () => ({ rows: [] }));
@@ -228,20 +304,22 @@ describe("reading the Console", () => {
     expect(POST_OP_SQL).toContain("$3::date");
     expect(POST_OP_SQL).toContain("$4::text[]");
     expect(POST_OP_SQL).toContain("to_char(f.appointment_date, 'YYYY-MM-DD')");
+    expect(POST_OP_SQL).toContain("f.begin_time");
   });
 
   it("maps rows, keeping an unknown kept flag unknown", async () => {
     const query = async () => ({
       rows: [
-        { date: "2026-12-05", event_name: "Surgery", is_kept: null, is_cancelled: false, is_rescheduled: false, npi: "1000000010", nextgen_name: "Ada Quill, MD" },
+        { date: "2026-12-05", begin_time: "0800", event_name: "Surgery", is_kept: null, is_cancelled: false, is_rescheduled: false, npi: "1000000010", nextgen_name: "Ada Quill, MD" },
+        { date: "2026-12-05", begin_time: "noon", event_name: "Surgery", is_kept: true, is_cancelled: false, is_rescheduled: false, npi: "1000000010", nextgen_name: "Ada Quill, MD" },
       ],
     });
-    expect(await readSurgeryFacts(query, "p", TODAY)).toEqual([surgery({ kept: null })]);
+    expect(await readSurgeryFacts(query, "p", TODAY)).toEqual([surgery({ kept: null }), surgery({ beginMinute: null })]);
   });
 });
 
 describe("the whole check", () => {
-  const base = { today: TODAY, providers: POOL, budgetMs: 200 };
+  const base = { today: TODAY, providers: POOL, budgetMs: 200, nowMinute: 9 * 60 };
 
   it("with no confirmed patient, goes to on-call and says why", async () => {
     const query = vi.fn();
@@ -293,5 +371,13 @@ describe("the whole check", () => {
     });
     expect(await postOpRouteFor({ ...base, personId: "p", query, requireKept: true })).toMatchObject({ reason: "surgery_not_kept" });
     expect(await postOpRouteFor({ ...base, personId: "p", query })).toMatchObject({ route: "surgeon" });
+  });
+
+  it("passes the clock through to a surgery dated today", async () => {
+    const query = async () => ({
+      rows: [{ date: TODAY, begin_time: "1400", event_name: "Surgery", is_kept: false, is_cancelled: false, is_rescheduled: false, npi: "1000000010", nextgen_name: "Ada Quill, MD" }],
+    });
+    expect(await postOpRouteFor({ ...base, personId: "p", query, nowMinute: 13 * 60 + 59 })).toMatchObject({ reason: "surgery_not_started" });
+    expect(await postOpRouteFor({ ...base, personId: "p", query, nowMinute: 14 * 60 })).toMatchObject({ route: "surgeon", daysAgo: 0 });
   });
 });

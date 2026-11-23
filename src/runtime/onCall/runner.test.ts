@@ -830,6 +830,44 @@ describe("what keeps the chain moving when something goes wrong", () => {
     expect(h.urgent).toHaveLength(0);
   });
 
+  it("brings the row due when every advance loses its race, and the next tick moves on in seconds, not at the ring guard", async () => {
+    const h = harness();
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    expect(h.calls).toHaveLength(1);
+    expect(h.escalation()).toMatchObject({ levelIndex: 0, attemptNo: 2, phase: "ringing" });
+
+    // Every move to the next level loses its race; bringing the row due does not.
+    const realUpdate = h.store.updateEscalation.bind(h.store);
+    let losing = true;
+    let lost = 0;
+    h.store.updateEscalation = async (id, version, patch) => {
+      if (losing && patch.levelIndex !== undefined) {
+        lost++;
+        return null;
+      }
+      return realUpdate(id, version, patch);
+    };
+    const statusAt = h.now();
+    await h.runner.onProviderStatus(h.lastCallAttempt().id, "no-answer");
+    expect(lost).toBe(3);
+    expect(h.log.mock.calls.map((c) => String(c[0])).join("\n")).toMatch(/could not advance after three tries; bringing it due/);
+    const due = h.escalation();
+    expect(due).toMatchObject({ status: "active", levelIndex: 0, attemptNo: 2, phase: "ringing" });
+    expect(due.nextAt!.getTime()).toBeLessThanOrEqual(statusAt.getTime());
+
+    // The next tick reads the ringing row past its time and moves the chain on.
+    losing = false;
+    h.advance(5_000);
+    await h.runner.tick();
+    expect(h.escalation()).toMatchObject({ status: "active", levelIndex: 1, attemptNo: 1 });
+    await h.runner.tick();
+    expect(h.calls).toHaveLength(2);
+    expect(h.calls[1].to).toBe(phoneOf(IE_DIRECTOR));
+    expect(h.calls[1].at.getTime() - statusAt.getTime()).toBeLessThan(RING_GUARD_MS);
+  });
+
   it("closes a taken transfer whose attempt could not be logged, and rings nobody", async () => {
     const h = harness();
     const realLog = h.store.logAttempt.bind(h.store);

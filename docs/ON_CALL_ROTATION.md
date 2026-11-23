@@ -25,6 +25,10 @@ second transfer request and would read it as a failed transfer.
    decide those calls: the old fixed number stands. Holidays rotate like any
    other day. On a day the practice is closed, the daytime hours are on call
    too (`holiday_daytime` in the log), because nobody is in the office.
+   When that closed day is a Tuesday, its daytime hours (8:00 AM to 4:59 PM)
+   belong to the **outgoing** week's provider, because the week does not turn
+   over until 5:00 PM. Enter an override if the incoming provider should take
+   that day instead.
 2. **Who gets the call.** The on-call provider, for every urgent call:
    patients, hospitals and other providers alike. There is no OD/MD split.
 3. **The one exception: a recent surgery.** If the caller's identity is
@@ -33,7 +37,12 @@ second transfer request and would read it as a failed transfer.
    to the surgeon; 8 days ago goes to on-call. The surgery date and the
    surgeon come from the Eye Care Patient Console (`si_appointment_facts`
    joined to `si_providers`) and nowhere else. A cancelled surgery, or one
-   moved and not kept, does not count. If the Console cannot say for certain
+   moved and not kept, does not count. A surgery dated today counts only once
+   it has started: when the Console marks it kept, or when its start time
+   (`begin_time`) has passed by the Pacific clock. Before then, the call goes
+   to on-call and the text says the surgery is booked for later today and has
+   not started (`surgery_not_started`); a day-of surgery with no start time
+   and not marked kept is treated the same way. If the Console cannot say for certain
    (two surgeons on the latest surgery date, a surgeon not in the provider
    pool or marked inactive, a lookup that fails or runs past 1.5 seconds, or
    no confirmed identity), the call goes to on-call and the text says why.
@@ -451,8 +460,10 @@ hears that the urgent call has been closed.
    more after it happens: measured on the Console, 0 of 76 surgeries on the
    day itself were marked kept, 71 of 142 three to six days later, and 67 of
    72 at seven days. Today a booked surgery in the window goes to the surgeon
-   (and the text says it is not yet marked kept). `ON_CALL_POST_OP_REQUIRE_KEPT=1`
-   sends those calls to on-call instead.
+   (and the text says it is not yet marked kept) once its day has passed or
+   its start time has; one booked for later today goes to on-call.
+   `ON_CALL_POST_OP_REQUIRE_KEPT=1` sends every not-yet-kept surgery to
+   on-call instead.
 2. **The surgeon's region director.** On a post-op call the next level is the
    surgeon's own region director, not the on-call provider's.
 3. **A surgeon who is not in the pool** routes to on-call, and the text says
@@ -465,3 +476,6 @@ hears that the urgent call has been closed.
 6. **Voicemail.** A provider's voicemail that answers our call and plays over
    the key-press prompt can read as `declined`; the chain carries on either
    way.
+7. **A closed holiday on a Tuesday.** Its daytime hours go to the outgoing
+   week's provider, because the week turns over at 5:00 PM. If the incoming
+   provider should take those hours, that is an override for the day.

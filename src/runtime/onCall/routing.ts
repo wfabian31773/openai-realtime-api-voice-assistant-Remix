@@ -199,14 +199,15 @@ export async function decideRoute(input: RouteInput): Promise<RouteDecision> {
       };
     }
 
-    const today = pacificMinute(at).date;
+    const clock = pacificMinute(at);
     const postOp = await postOpRouteFor({
       personId: input.personId,
-      today,
+      today: clock.date,
       providers: data.providers,
       query: input.consoleQuery,
       budgetMs: Math.min(POST_OP_BUDGET_MS, left()),
       requireKept: config.requireKept,
+      nowMinute: clock.minute,
     });
 
     const notes: string[] = [];

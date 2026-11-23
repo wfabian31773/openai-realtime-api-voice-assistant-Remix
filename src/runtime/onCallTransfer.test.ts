@@ -262,7 +262,8 @@ describe("an urgent after-hours call with the rotation on", () => {
     await expect(outcome).rejects.toThrow(/^handoff_failed:CHAIN_STARTED$/);
     await vi.waitFor(() => expect(built.handed).toHaveLength(1));
     expect(built.handed[0].warm.outcome).toBe("declined");
-    expect(built.handed[0].warm.providerCallSid).toBeNull();
+    // The office leg was dialled, so its call sid is logged even though it was not taken.
+    expect(built.handed[0].warm.providerCallSid).toBe("CAoffice");
   });
 
   it("hands a ring-out to the runner as no answer, not as a failure (spec b)", async () => {
@@ -276,6 +277,7 @@ describe("an urgent after-hours call with the rotation on", () => {
     await expect(outcome).rejects.toThrow(/^handoff_failed:CHAIN_STARTED$/);
     await vi.waitFor(() => expect(built.handed).toHaveLength(1));
     expect(built.handed[0].warm.outcome).toBe("no_answer");
+    expect(built.handed[0].warm.providerCallSid).toBe("CAoffice");
   });
 
   it("files the ring-out ticket saying the rotation is still calling", async () => {

@@ -337,7 +337,15 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
         }
       }
     }
-    log(`[ON-CALL] escalation ${escalationId}: could not advance after three tries`);
+    // Every try lost a race. Bring the row due instead of leaving it for the
+    // ringing guard: the next tick reads it as a ringing row past its time and
+    // runs this move again, seconds from now rather than minutes.
+    log(`[ON-CALL] escalation ${escalationId}: could not advance after three tries; bringing it due`);
+    try {
+      await dueNow(escalationId);
+    } catch (err) {
+      log(`[ON-CALL] escalation ${escalationId}: could not bring it due: ${(err as Error)?.message ?? err}`);
+    }
   }
 
   async function endAndAdvance(a: AttemptRow, outcome: Exclude<AttemptOutcome, "in_progress">) {

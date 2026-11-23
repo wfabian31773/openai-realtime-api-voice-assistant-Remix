@@ -221,6 +221,30 @@ describe("the post-op exception", () => {
     expect(consoleQuery).toHaveBeenCalledTimes(1);
   });
 
+  it("holds a surgery later today off the surgeon route by the Pacific clock", async () => {
+    // WED_NIGHT is 22:30 Pacific on 2026-12-02 (06:30 UTC on 12-03).
+    const today = (begin: string) =>
+      vi.fn(async () => ({
+        rows: [
+          {
+            date: "2026-12-02",
+            begin_time: begin,
+            event_name: "Surgery",
+            is_kept: false,
+            is_cancelled: false,
+            is_rescheduled: false,
+            npi: provider(2, "x").npi!,
+            nextgen_name: "Surgeon, MD",
+          },
+        ],
+      }));
+    const begun = await decideRoute(input({ personId: PERSON, consoleQuery: today("2230") }));
+    expect(ids(begun)?.[0]).toEqual(["surgeon", 2]);
+    const later = await decideRoute(input({ personId: PERSON, consoleQuery: today("2245") }));
+    expect(ids(later)?.[0]).toEqual(["on_call", 1]);
+    expect(later.kind === "rotation" && later.alertNote).toContain("is booked for 10:45 PM and has not started");
+  });
+
   it("routes a 7-day post-op to the surgeon and an 8-day one to on-call", async () => {
     const seven = await decideRoute(
       input({ personId: PERSON, consoleQuery: consoleWithSurgery(provider(2, "x").npi!, "2026-11-25") }),

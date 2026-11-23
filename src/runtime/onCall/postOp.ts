@@ -17,6 +17,8 @@
  * WHAT "CONFIDENCE" MEANS HERE, rule by rule (each a test):
  *   - the surgery is one of SURGERY_EVENTS, dated today or up to 7 days ago in
  *     Pacific time (7 days ago routes to the surgeon, 8 to on-call);
+ *   - one dated today has happened: it is marked kept, or its begin time has
+ *     passed (a surgery later today is not yet a post-op patient);
  *   - it is not cancelled, and not moved unless it was kept (a kept row wins
  *     over its reschedule flag, NextGen Bible §2.1);
  *   - the most recent such date names exactly one surgeon;
@@ -61,6 +63,12 @@ export interface SurgeryFact {
   rescheduled: boolean;
   providerNpi: string | null;
   providerName: string | null;
+  /**
+   * Minutes after midnight (Pacific) the appointment begins, from the
+   * Console's "HHMM" begin time; null when it does not read. Decides whether a
+   * surgery dated today has happened yet.
+   */
+  beginMinute?: number | null;
 }
 
 export type PostOpReason =
@@ -70,7 +78,8 @@ export type PostOpReason =
   | "surgeon_unclear"
   | "surgeon_not_in_pool"
   | "surgeon_inactive"
-  | "surgery_not_kept";
+  | "surgery_not_kept"
+  | "surgery_not_started";
 
 export type PostOpDecision =
   | {
@@ -173,6 +182,41 @@ function label(name: string | null): string {
 export interface PostOpOptions {
   /** Route a booked surgery not yet marked kept to on-call (default false). */
   requireKept?: boolean;
+  /**
+   * Minutes after midnight, Pacific, at the moment of the call. A surgery dated
+   * today that is not marked kept counts only once its begin time has passed;
+   * without this clock it does not count (the call goes to on-call).
+   */
+  nowMinute?: number;
+}
+
+/** "HHMM" (the Console's begin time) as minutes after midnight, or null. */
+export function beginMinuteOf(value: unknown): number | null {
+  const m = /^(\d{1,2}):?(\d{2})$/.exec(String(value ?? "").trim());
+  if (!m) return null;
+  const hour = Number(m[1]);
+  const minute = Number(m[2]);
+  if (hour > 23 || minute > 59) return null;
+  return hour * 60 + minute;
+}
+
+/** 480 -> "8:00 AM". */
+function clockLabel(minute: number): string {
+  const h = Math.floor(minute / 60);
+  const m = minute % 60;
+  return `${h % 12 === 0 ? 12 : h % 12}:${String(m).padStart(2, "0")} ${h < 12 ? "AM" : "PM"}`;
+}
+
+/**
+ * Whether a surgery in the window has happened. One dated before today has;
+ * one dated today has when NextGen marks it kept, or once its begin time has
+ * passed. A surgery later today has not, so it is no post-op patient yet.
+ */
+function hasHappened(f: SurgeryFact, ago: number, nowMinute: number | undefined): boolean {
+  if (ago > 0) return true;
+  if (f.kept === true) return true;
+  const begin = f.beginMinute ?? null;
+  return nowMinute !== undefined && begin !== null && begin <= nowMinute;
 }
 
 /**
@@ -185,12 +229,24 @@ export function decidePostOp(
   providers: readonly OnCallProvider[],
   options: PostOpOptions = {},
 ): PostOpDecision {
-  const inWindow = facts.filter((f) => {
+  const booked = facts.filter((f) => {
     if (!counts(f)) return false;
     const ago = daysBetween(f.date, today);
     return ago >= 0 && ago <= POST_OP_WINDOW_DAYS;
   });
-  if (inWindow.length === 0) return { route: "on_call", reason: "no_recent_surgery" };
+  const inWindow = booked.filter((f) => hasHappened(f, daysBetween(f.date, today), options.nowMinute));
+  if (inWindow.length === 0) {
+    const later = booked[0];
+    if (!later) return { route: "on_call", reason: "no_recent_surgery" };
+    const begin = later.beginMinute ?? null;
+    const when = begin === null ? "has no start time on file and is not marked kept" : `is booked for ${clockLabel(begin)} and has not started`;
+    return {
+      route: "on_call",
+      reason: "surgery_not_started",
+      surgeryDate: later.date,
+      note: `Post-op check: the surgery today with ${label(later.providerName)} ${when}, so this went to the on-call provider.`,
+    };
+  }
 
   const latest = inWindow.reduce((d, f) => (f.date > d ? f.date : d), inWindow[0].date);
   const onLatest = inWindow.filter((f) => f.date === latest);
@@ -256,7 +312,7 @@ type Query = (text: string, params?: unknown[]) => Promise<{ rows: any[] }>;
 
 /** The Console read, one patient, the window ending today. 0.7 ms on the Console (2026-11-23). */
 export const POST_OP_SQL = `
-  select to_char(f.appointment_date, 'YYYY-MM-DD') as date,
+  select to_char(f.appointment_date, 'YYYY-MM-DD') as date, f.begin_time,
          f.event_name, f.is_kept, f.is_cancelled, f.is_rescheduled,
          p.npi, p.nextgen_name
     from public.si_appointment_facts f
@@ -281,6 +337,7 @@ export async function readSurgeryFacts(
     rescheduled: Boolean(r.is_rescheduled),
     providerNpi: r.npi ?? null,
     providerName: r.nextgen_name ?? null,
+    beginMinute: beginMinuteOf(r.begin_time),
   }));
 }
 
@@ -295,6 +352,8 @@ export async function postOpRouteFor(input: {
   query: Query | null;
   budgetMs: number;
   requireKept?: boolean;
+  /** Minutes after midnight, Pacific, at the moment of the call. */
+  nowMinute: number;
 }): Promise<PostOpDecision> {
   if (!input.personId) return { route: "on_call", reason: "no_identity", note: NO_IDENTITY_NOTE };
   if (!input.query) return { route: "on_call", reason: "console_unavailable", note: CONSOLE_UNAVAILABLE_NOTE };
@@ -309,7 +368,10 @@ export async function postOpRouteFor(input: {
       }),
     ]);
     if (facts === null) return { route: "on_call", reason: "console_unavailable", note: CONSOLE_UNAVAILABLE_NOTE };
-    return decidePostOp(facts, input.today, input.providers, { requireKept: input.requireKept });
+    return decidePostOp(facts, input.today, input.providers, {
+      requireKept: input.requireKept,
+      nowMinute: input.nowMinute,
+    });
   } catch {
     return { route: "on_call", reason: "console_unavailable", note: CONSOLE_UNAVAILABLE_NOTE };
   } finally {

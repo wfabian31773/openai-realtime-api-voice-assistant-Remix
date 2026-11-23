@@ -1100,7 +1100,7 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
                 outcome: warmOutcomeFor(outcome),
                 dialedTo: handed.plan.levels[0].phone,
                 endedAt,
-                providerCallSid: outcome.ok ? (outcome.officeCallSid ?? null) : null,
+                providerCallSid: outcome.officeCallSid ?? null,
               },
             });
             return row?.status === "active";
