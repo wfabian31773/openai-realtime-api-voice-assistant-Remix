@@ -48,7 +48,7 @@ const { runLaneTeardownFloor } = await import('../runtime/pcpFloor');
 const { noteSpokenDob } = await import('../tools/spokenDob');
 const { rememberConfirmedClinic } = await import('../tools/verifiedIdentity');
 const { AFTER_HOURS_CATCHALL, AFTER_HOURS_REASON_IDS } = await import('../tools/afterHoursTaxonomy');
-const { HANDOFF_CHAIN_RUNNING_DIRECTIVE, HANDOFF_CHAIN_STARTED_DIRECTIVE, HANDOFF_ERROR_DIRECTIVE, HANDOFF_FAILED_DIRECTIVE, HANDOFF_NOT_PLACED_DIRECTIVE, createNoIvrAgent } = await import('./noIvrAgent');
+const { HANDOFF_CHAIN_PENDING_DIRECTIVE, HANDOFF_CHAIN_RUNNING_DIRECTIVE, HANDOFF_CHAIN_STARTED_DIRECTIVE, HANDOFF_ERROR_DIRECTIVE, HANDOFF_FAILED_DIRECTIVE, HANDOFF_NOT_PLACED_DIRECTIVE, createNoIvrAgent } = await import('./noIvrAgent');
 const { isoDobToUs, dobTheCallerGave } = await import('../services/afterHoursCallFacts');
 const { __resetDirectory } = await import('../services/consoleDirectory');
 
@@ -836,6 +836,21 @@ describe('a failed on-call transfer (the 70166 shape)', () => {
     expect(HANDOFF_CHAIN_RUNNING_DIRECTIVE).toMatch(/NOT connected/);
     expect(HANDOFF_CHAIN_RUNNING_DIRECTIVE).toMatch(/Do not call escalate_to_human again/);
     expect(HANDOFF_CHAIN_RUNNING_DIRECTIVE).not.toMatch(/could not be placed/);
+  });
+
+  it('says the request is being passed on while the first chain is still being handed over, and claims no paging and no transfer', async () => {
+    const c = await call(NURSE, vi.fn(async () => { throw new Error('handoff_failed:CHAIN_PENDING'); }));
+    const r = await invoke(c.agent, 'escalate_to_human', PROVIDER);
+    expect(r).toMatchObject({ success: false, handoffFailed: true, message: HANDOFF_CHAIN_PENDING_DIRECTIVE });
+    expect(HANDOFF_CHAIN_PENDING_DIRECTIVE).toMatch(/already being passed to the on-call team/);
+    expect(HANDOFF_CHAIN_PENDING_DIRECTIVE).toMatch(/NOT connected/);
+    expect(HANDOFF_CHAIN_PENDING_DIRECTIVE).toMatch(/Do not call escalate_to_human again/);
+    expect(HANDOFF_CHAIN_PENDING_DIRECTIVE).toMatch(/call create_ticket/);
+    // Whether the chain opened is not known yet, so it must not say a page
+    // is going out (review of #514).
+    expect(HANDOFF_CHAIN_PENDING_DIRECTIVE).not.toMatch(/being paged/);
+    expect(HANDOFF_CHAIN_PENDING_DIRECTIVE).not.toMatch(/could not be placed/);
+    expect(HANDOFF_CHAIN_PENDING_DIRECTIVE).not.toBe(HANDOFF_CHAIN_RUNNING_DIRECTIVE);
   });
 
   it('says the on-call team is being paged when the rotation took the ring-out, and that the caller was not connected', async () => {

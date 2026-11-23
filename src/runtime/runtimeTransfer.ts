@@ -217,6 +217,15 @@ export const ON_CALL_LANES: ReadonlySet<string> = new Set(["no-ivr"]);
 export const ON_CALL_CHAIN_RUNNING = "on_call_chain_already_running";
 
 /**
+ * The refusal reason for a second escalation while this call's first one is
+ * still handing its chain to the runner: the in-call dial is over, but whether
+ * the chain's row opened is not known yet. The handoff throws
+ * `handoff_failed:CHAIN_PENDING`, whose directive claims neither that the team
+ * is being paged nor that it is not (review of #514).
+ */
+export const ON_CALL_CHAIN_PENDING = "on_call_chain_still_being_handed_over";
+
+/**
  * The slug the after-hours agent hears when its own escalation started the
  * on-call chain and the in-call transfer was not taken: the chain carries on
  * calling the provider and then the directors, so the caller is told the
@@ -775,9 +784,11 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
        * was.
        */
       const claimChain = async (): Promise<
-        { kind: "route"; before: "none" | "handed" } | { kind: "refuse" } | { kind: "today" }
+        | { kind: "route"; before: "none" | "handed" }
+        | { kind: "refuse"; why: "pending" | "active" }
+        | { kind: "today" }
       > => {
-        if (chainState === "pending") return { kind: "refuse" };
+        if (chainState === "pending") return { kind: "refuse", why: "pending" };
         const before = chainState;
         chainState = "pending";
         if (before === "none" || !onCall) return { kind: "route", before };
@@ -785,7 +796,7 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
           const row = await onCall.store.getEscalationByCall(metadata.callSid);
           if (!row) return { kind: "route", before };
           chainState = before;
-          return row.status === "active" ? { kind: "refuse" } : { kind: "today" };
+          return row.status === "active" ? { kind: "refuse", why: "active" } : { kind: "today" };
         } catch (e) {
           chainState = before;
           // Ring a person rather than tell an urgent caller a chain is paging
@@ -849,6 +860,12 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
           if (onCallEligible && onCall) {
             const claim = await claimChain();
             if (claim.kind === "refuse") {
+              if (claim.why === "pending") {
+                log(
+                  `[ON-CALL] ${metadata.callSid}: this call's first escalation is still handing its chain over; not dialling again`,
+                );
+                return { ok: false, status: "UNAVAILABLE", reason: ON_CALL_CHAIN_PENDING };
+              }
               log(`[ON-CALL] ${metadata.callSid}: a chain is already running for this call; not dialling again`);
               return { ok: false, status: "UNAVAILABLE", reason: ON_CALL_CHAIN_RUNNING };
             }
@@ -1157,7 +1174,10 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
            * "no transfer was attempted". Reporting would count configuration
            * refusals as dials.
            */
-          if (!outcome.ok && outcome.status === "UNAVAILABLE") return { outcome, chainCarriesOn };
+          // A dial the rotation took over was texted first, so it is not a
+          // refusal that rang nobody even if the dial itself answered
+          // UNAVAILABLE: it carries on to the ticket (review of #514).
+          if (!outcome.ok && outcome.status === "UNAVAILABLE" && !holder.run) return { outcome, chainCarriesOn };
           const ringSeconds = Math.round((Date.now() - dialStartedAt) / 1000);
           /**
            * THE URGENT SAFETY NET — the old core's `fileUrgentHandoffFallbackTicket`.
@@ -1186,11 +1206,12 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
                   : `Transfer dial failed: ${outcome.reason}`,
               // A rotation run rang a provider's own phone: the ticket names
               // who was called, never the number (review of #514).
-              dialTarget: holder.run ? levelLabel(holder.run.plan.levels[0]) : outcome.destination,
+              dialTarget: holder.run?.plan.levels[0] ? levelLabel(holder.run.plan.levels[0]) : outcome.destination,
               agentUsed: slug,
               // v163: the failure itself, structured, so the ticket says the
               // caller was never connected and how long the phone rang (70166).
-              // UNAVAILABLE returned above; the ternary only narrows the type.
+              // UNAVAILABLE reaches here only on a rotation run (the provider
+              // was texted); the ticket reads it as a failed dial.
               handoff: { status: outcome.status === "UNAVAILABLE" ? "FAILED" : outcome.status, ringSeconds },
               // v268: the chain this dial started is still calling, so the
               // ticket says so beside its call-back line, only when the runner
@@ -1247,7 +1268,9 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
           throw new Error(
             outcome.reason === ON_CALL_CHAIN_RUNNING
               ? "handoff_failed:CHAIN_RUNNING"
-              : chainCarriesOn
+              : outcome.reason === ON_CALL_CHAIN_PENDING
+                ? "handoff_failed:CHAIN_PENDING"
+                : chainCarriesOn
                 ? HANDOFF_CHAIN_STARTED
                 : `handoff_failed:${outcome.status}`,
           );

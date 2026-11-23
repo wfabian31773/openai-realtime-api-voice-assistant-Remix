@@ -316,6 +316,13 @@ describe("reading the Console", () => {
     expect(POST_OP_SQL).toContain("f.begin_time");
   });
 
+  it("leaves cancelled and moved surgeries out in the read, before the row limit, so they cannot push a real one out", () => {
+    const where = POST_OP_SQL.slice(POST_OP_SQL.indexOf("where"), POST_OP_SQL.indexOf("order by"));
+    expect(where).toContain("f.is_cancelled is not true");
+    expect(where).toContain("(f.is_rescheduled is not true or f.is_kept is true)");
+    expect(POST_OP_SQL.indexOf("limit 20")).toBeGreaterThan(POST_OP_SQL.indexOf("order by"));
+  });
+
   it("maps rows, keeping an unknown kept flag unknown", async () => {
     const query = async () => ({
       rows: [

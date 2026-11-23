@@ -613,6 +613,20 @@ export const HANDOFF_CHAIN_RUNNING_DIRECTIVE =
   'that a new transfer was placed, or that their request was submitted before create_ticket returns success.';
 
 /**
+ * A second escalation while the first one's chain is still being handed over
+ * (v268): nothing new was dialled, and whether the chain opened is not known
+ * yet. It claims neither that the provider is being called nor that nobody
+ * will be; the first escalation's urgent text and ring-out ticket go out
+ * whichever way the hand-off ends.
+ */
+export const HANDOFF_CHAIN_PENDING_DIRECTIVE =
+  'This call\'s urgent request is already being passed to the on-call team. Nothing new was dialled and the ' +
+  'caller was NOT connected. Do not call escalate_to_human again. Tell the caller their urgent request is being ' +
+  'passed on and the team will call them back; confirm the callback number once; then call create_ticket with ' +
+  'anything new. Never say they were connected, that a new transfer was placed, that the on-call provider is ' +
+  'being called, or that their request was submitted before create_ticket returns success.';
+
+/**
  * This escalation started the on-call chain and the in-call transfer was not
  * taken (v268): the system is calling the on-call provider again on its own and
  * then the directors, and the URGENT callback record is being filed. No claim
@@ -3362,6 +3376,8 @@ PREREQUISITE: one quick ask for name and DOB; transfer even if unavailable. Clin
           ? HANDOFF_FAILED_DIRECTIVE
           : failure === 'handoff_failed:CHAIN_RUNNING'
             ? HANDOFF_CHAIN_RUNNING_DIRECTIVE
+            : failure === 'handoff_failed:CHAIN_PENDING'
+              ? HANDOFF_CHAIN_PENDING_DIRECTIVE
             : failure === 'handoff_failed:CHAIN_STARTED'
               ? HANDOFF_CHAIN_STARTED_DIRECTIVE
             : failure === 'handoff_failed:UNAVAILABLE'

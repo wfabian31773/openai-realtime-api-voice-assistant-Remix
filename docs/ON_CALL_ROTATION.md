@@ -139,10 +139,14 @@ A call has at most one escalation chain running at a time.
 - If the caller asks for the on-call team again while a chain is running for
   their call, nothing new is dialled: the agent is told the team is already
   being paged, tells the caller so, and files anything new on the ticket.
-  This includes a second request that arrives while the first is still
-  being routed. The chain is claimed the moment the first request reaches
-  the transfer, before anything is read, so two requests in the same instant
-  cannot both start one.
+- If the second request arrives while the first is still being routed or
+  handed over (its chain not yet confirmed open), nothing new is dialled
+  either, but the agent is told only that the urgent request is already being
+  passed to the on-call team, never that anyone is being paged: the hand-off
+  may yet open no chain. The caller is told the team will call them back, and
+  anything new goes on the ticket. The chain is claimed the moment the first
+  request reaches the transfer, before anything is read, so two requests in
+  the same instant cannot both start one.
 - If the caller asks again after their chain has finished (someone took the
   patient, every level was tried, or it was stopped), the second request
   takes today's path: the fixed on-call number, rung as before the rotation.

@@ -26,6 +26,24 @@ import { provider, syntheticRotation, IE_DIRECTOR } from "./onCall/testRotation"
 import { levelLabel, type RotationData } from "./onCall/rotation";
 import type { InCallTransferResult } from "./onCall/runner";
 
+/**
+ * A switch on the REAL `performWarmTransfer`: off, every test runs it as it
+ * is; on, the dial answers UNAVAILABLE (nothing dialled) the way it does for
+ * an empty destination. Only the test of a rotation dial that answers
+ * UNAVAILABLE turns it on (review of #514).
+ */
+const warm = vi.hoisted(() => ({ unavailable: false }));
+vi.mock("./warmTransfer", async (importOriginal) => {
+  const real = await importOriginal<typeof import("./warmTransfer")>();
+  return {
+    ...real,
+    performWarmTransfer: (async (...args: Parameters<typeof real.performWarmTransfer>) =>
+      warm.unavailable
+        ? { ok: false, status: "UNAVAILABLE", reason: "transfer_destination_not_configured" }
+        : real.performWarmTransfer(...args)) as typeof real.performWarmTransfer,
+  };
+});
+
 const AUTH_TOKEN = "test-auth-token";
 const DOMAIN = "runtime.example.test";
 const ENV = {
@@ -44,7 +62,10 @@ const AFTER_HOURS = new Date("2026-12-02T02:00:00Z");
 /** Wednesday 2026-12-02, 10:00 AM Pacific: weekday daytime, not on call. */
 const WEEKDAY_DAYTIME = new Date("2026-12-02T18:00:00Z");
 
-afterEach(() => escalationDetailsMap.clear());
+afterEach(() => {
+  escalationDetailsMap.clear();
+  warm.unavailable = false;
+});
 
 function fakeOps() {
   const dialed: Array<{ to: string; from: string; twiml: string }> = [];
@@ -301,6 +322,36 @@ describe("an urgent after-hours call with the rotation on", () => {
     expect(dialTarget).not.toMatch(/\d{7}/);
   });
 
+  it("files the urgent ticket when a dial the rotation took over answers UNAVAILABLE, because the provider was texted", async () => {
+    warm.unavailable = true;
+    const { ops, dialed } = fakeOps();
+    const built = buildWiring();
+    const rec = recordingAlerts();
+    const transfer = transferWith(ops, built.wiring, rec.alerts);
+    urgent();
+    await expect(transfer.handoffFor("no-ivr", META)()).rejects.toThrow(/^handoff_failed:CHAIN_STARTED$/);
+    // Nothing was dialled, but the provider was texted and the chain is open,
+    // so this is not a refusal that rang nobody: the ticket goes out.
+    expect(dialed).toHaveLength(0);
+    expect(built.texts).toHaveLength(1);
+    expect(built.handed[0].warm.outcome).toBe("failed");
+    expect(rec.tickets).toHaveLength(1);
+    expect(rec.tickets[0]).toMatchObject({ onCallChain: true, handoff: { status: "FAILED" } });
+    expect((rec.tickets[0] as { dialTarget?: unknown }).dialTarget).toBe(levelLabel(built.handed[0].plan.levels[0]));
+  });
+
+  it("still files nothing for an UNAVAILABLE dial the rotation did not take", async () => {
+    warm.unavailable = true;
+    const { ops } = fakeOps();
+    const built = buildWiring({ at: WEEKDAY_DAYTIME });
+    const rec = recordingAlerts();
+    const transfer = transferWith(ops, built.wiring, rec.alerts);
+    urgent();
+    await expect(transfer.handoffFor("no-ivr", META)()).rejects.toThrow(/^handoff_failed:UNAVAILABLE$/);
+    expect(built.handed).toHaveLength(0);
+    expect(rec.tickets).toHaveLength(0);
+  });
+
   it("does not say the team is being paged when the runner opened no chain", async () => {
     const { ops } = fakeOps();
     const built = buildWiring();
@@ -478,7 +529,9 @@ describe("one chain per call, read from the chain's own row", () => {
     urgent();
     const first = handoff();
     urgent();
-    await expect(handoff()).rejects.toThrow(/^handoff_failed:CHAIN_RUNNING$/);
+    // The first is still being routed: its own slug, which claims neither way
+    // whether the chain is paging (review of #514).
+    await expect(handoff()).rejects.toThrow(/^handoff_failed:CHAIN_PENDING$/);
     expect(dialed).toHaveLength(0);
 
     release();
@@ -571,7 +624,7 @@ describe("one chain per call, read from the chain's own row", () => {
     urgent();
     const second = handoff();
     urgent();
-    await expect(handoff()).rejects.toThrow(/^handoff_failed:CHAIN_RUNNING$/);
+    await expect(handoff()).rejects.toThrow(/^handoff_failed:CHAIN_PENDING$/);
     await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
     expect(dialed).toHaveLength(2);
     transfer.handleAccept(signed(TRANSFER_ACCEPT_PATH, { CallSid: "CAoffice", Digits: "1" }));
@@ -674,9 +727,11 @@ describe("one chain per call, read from the chain's own row", () => {
     transfer.handleStatus(signed(TRANSFER_STATUS_PATH, { CallSid: "CAoffice", CallStatus: "no-answer" }));
     await expect(first).rejects.toThrow(/^handoff_failed:NO_ANSWER$/);
 
-    // While the first hand-off is stuck, a second escalation is refused.
+    // While the first hand-off is stuck, a second escalation is refused, and
+    // told the hand-off is still under way, not that the chain is paging: the
+    // runner may yet open nothing (review of #514).
     urgent();
-    await expect(handoff()).rejects.toThrow(/^handoff_failed:CHAIN_RUNNING$/);
+    await expect(handoff()).rejects.toThrow(/^handoff_failed:CHAIN_PENDING$/);
 
     // Past the bound the claim is released, so the next escalation routes again.
     await vi.waitFor(() => expect(lines.some((l) => l.includes("releasing this call's chain claim"))).toBe(true), {
@@ -693,7 +748,7 @@ describe("one chain per call, read from the chain's own row", () => {
     finishFirst();
     await new Promise((ok) => setTimeout(ok, 5));
     urgent();
-    await expect(handoff()).rejects.toThrow(/^handoff_failed:CHAIN_RUNNING$/);
+    await expect(handoff()).rejects.toThrow(/^handoff_failed:CHAIN_PENDING$/);
     expect(dialed).toHaveLength(2);
     finishSecond();
   });

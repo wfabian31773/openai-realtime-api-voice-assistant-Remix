@@ -324,7 +324,13 @@ export const CONSOLE_UNAVAILABLE_NOTE =
 
 type Query = (text: string, params?: unknown[]) => Promise<{ rows: any[] }>;
 
-/** The Console read, one patient, the window ending today. 0.7 ms on the Console (2026-11-23). */
+/**
+ * The Console read, one patient, the window ending today. 0.7 ms on the Console (2026-11-23).
+ * A cancelled surgery, and a moved one never marked kept, are left out here as
+ * well as in `counts`, so the row limit is spent only on surgeries that count:
+ * a patient with many cancelled or moved rows in the week cannot push a real
+ * one out of the read (review of #514).
+ */
 export const POST_OP_SQL = `
   select to_char(f.appointment_date, 'YYYY-MM-DD') as date, f.begin_time,
          f.event_name, f.is_kept, f.is_cancelled, f.is_rescheduled,
@@ -334,6 +340,8 @@ export const POST_OP_SQL = `
    where f.person_id = $1::uuid
      and f.appointment_date between $2::date and $3::date
      and f.event_name = any($4::text[])
+     and f.is_cancelled is not true
+     and (f.is_rescheduled is not true or f.is_kept is true)
    order by f.appointment_date desc
    limit 20`;
 
