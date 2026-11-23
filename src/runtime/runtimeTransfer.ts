@@ -1207,8 +1207,17 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
         try {
           outcome = await attempt(holder);
         } catch (e) {
-          if (holder.run) void handOff(holder.run, { ok: false, status: "FAILED", reason: "transfer_threw" });
-          throw e;
+          // Without a rotation run this is today's path: the throw reaches the
+          // agent as it always has. With one, level 0 was already texted, so a
+          // dial that threw is a failed first call of a chain the runner carries
+          // on: it is handed over, the urgent ticket is filed, and the agent is
+          // told what the chain is doing, not the raw error (review of #514,
+          // round 9).
+          if (!holder.run) throw e;
+          log(
+            `[ON-CALL] ${metadata.callSid}: the in-call dial threw after the rotation took it (${(e as Error)?.message ?? e}); handled as a failed first call`,
+          );
+          outcome = { ok: false, status: "FAILED", reason: "transfer_threw" };
         }
         const handed = holder.run ? handOff(holder.run, outcome) : null;
         // The ring is read here, before the hand-off wait below, so the

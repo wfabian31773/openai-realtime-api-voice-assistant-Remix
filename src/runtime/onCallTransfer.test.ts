@@ -35,15 +35,17 @@ import type { InCallTransferResult } from "./onCall/runner";
  * an empty destination. Only the test of a rotation dial that answers
  * UNAVAILABLE turns it on (review of #514).
  */
-const warm = vi.hoisted(() => ({ unavailable: false }));
+const warm = vi.hoisted(() => ({ unavailable: false, throws: false }));
 vi.mock("./warmTransfer", async (importOriginal) => {
   const real = await importOriginal<typeof import("./warmTransfer")>();
   return {
     ...real,
-    performWarmTransfer: (async (...args: Parameters<typeof real.performWarmTransfer>) =>
-      warm.unavailable
+    performWarmTransfer: (async (...args: Parameters<typeof real.performWarmTransfer>) => {
+      if (warm.throws) throw new Error("twilio blew up");
+      return warm.unavailable
         ? { ok: false, status: "UNAVAILABLE", reason: "transfer_destination_not_configured" }
-        : real.performWarmTransfer(...args)) as typeof real.performWarmTransfer,
+        : real.performWarmTransfer(...args);
+    }) as typeof real.performWarmTransfer,
   };
 });
 
@@ -68,6 +70,7 @@ const WEEKDAY_DAYTIME = new Date("2026-12-02T18:00:00Z");
 afterEach(() => {
   escalationDetailsMap.clear();
   warm.unavailable = false;
+  warm.throws = false;
 });
 
 function fakeOps() {
@@ -273,6 +276,35 @@ describe("an urgent after-hours call with the rotation on", () => {
     await vi.waitFor(() => expect(built.handed).toHaveLength(1));
     expect(built.handed[0].warm.endedAt.getTime()).toBe(answered.getTime());
     expect(built.handed[0].preDialSms?.ok).toBe(true);
+  });
+
+  // Review of #514, round 9: a dial that threw after the rotation took it
+  // reached the agent as the raw error, and no urgent ticket was filed.
+  it("treats a dial that throws after the rotation took it as a failed first call", async () => {
+    warm.throws = true;
+    const { ops } = fakeOps();
+    const built = buildWiring();
+    const rec = recordingAlerts();
+    const lines: string[] = [];
+    const transfer = transferWith(ops, built.wiring, rec.alerts, { log: (l) => void lines.push(l) });
+    urgent();
+    await expect(transfer.handoffFor("no-ivr", META)()).rejects.toThrow(/^handoff_failed:CHAIN_STARTED$/);
+    expect(built.handed).toHaveLength(1);
+    expect(built.handed[0].warm.outcome).toBe("failed");
+    expect(built.handed[0].warm.providerCallSid).toBeNull();
+    expect(rec.tickets).toHaveLength(1);
+    expect(rec.tickets[0]).toMatchObject({ why: "Transfer dial failed: transfer_threw", onCallChain: true });
+    expect(lines.join("\n")).toMatch(/the in-call dial threw after the rotation took it \(twilio blew up\)/);
+  });
+
+  it("lets a dial that throws with no rotation run reach the agent as it always has", async () => {
+    warm.throws = true;
+    const { ops } = fakeOps();
+    const rec = recordingAlerts();
+    const transfer = transferWith(ops, undefined, rec.alerts);
+    urgent();
+    await expect(transfer.handoffFor("no-ivr", META)()).rejects.toThrow("twilio blew up");
+    expect(rec.tickets).toHaveLength(0);
   });
 
   it("hands a declined transfer to the runner as declined, and still tells the agent it failed", async () => {
@@ -901,7 +933,9 @@ describe("one chain per call, read from the chain's own row", () => {
     };
     const transfer = transferWith(ops, built.wiring, alerts);
     urgent();
-    await expect(transfer.handoffFor("no-ivr", META)()).rejects.toThrow(/alert sender broke/);
+    // Since round 9 of the review the agent hears what the chain is doing, not
+    // the raw error: the provider was texted, so the runner carries on.
+    await expect(transfer.handoffFor("no-ivr", META)()).rejects.toThrow(/^handoff_failed:CHAIN_STARTED$/);
     expect(dialed).toHaveLength(0);
     expect(built.texts).toHaveLength(1);
     await vi.waitFor(() => expect(built.handed).toHaveLength(1));
