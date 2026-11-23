@@ -262,7 +262,10 @@ function defaultNoteHeldRequest(callSid: string, data: { why: "pending" | "activ
 
 /** How long the dial waits for the full-details text to be accepted before it rings. */
 export const PRE_DIAL_SMS_WAIT_MS = 2_000;
-/** How long the runner hand-off waits for that text's answer before recording it as unknown. */
+/**
+ * How long the runner hand-off waits for that text's answer before recording
+ * it as unknown, counted from the hand-off, not from the send.
+ */
 export const PRE_DIAL_SMS_RECORD_MS = 10_000;
 /**
  * How long a not-taken dial waits for the hand-off to say whether the chain's
@@ -861,6 +864,14 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
        */
       let chainState: "none" | "pending" | "handed" = "none";
       /**
+       * Hand-offs still running. A hand-off that outlives `HANDOFF_SETTLE_MS`
+       * gives the claim back while the runner may still be opening the chain's
+       * row, so a later escalation can find no row although one is coming. It
+       * then rings today's number rather than starting a second chain that
+       * would text and ring the same provider again (review of #514, round 16).
+       */
+      let handoffsInFlight = 0;
+      /**
        * Claim the chain for this escalation, or say why not. The claim is
        * taken BEFORE the first await: two escalations on one call can arrive
        * in the same tick, and a check that awaited before claiming let both
@@ -892,6 +903,13 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
             return { kind: "today" };
           }
           const { row } = read;
+          if (!row && handoffsInFlight > 0) {
+            chainState = before;
+            log(
+              `[ON-CALL] ${metadata.callSid}: the hand-off to the runner is still opening this call's chain; today's path`,
+            );
+            return { kind: "today" };
+          }
           if (!row) return { kind: "route", before };
           chainState = before;
           return row.status === "active" ? { kind: "refuse", why: "active" } : { kind: "today" };
@@ -1201,6 +1219,7 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
           // The level-0 call ended when its outcome arrived, not after the
           // text's record below: the retry is timed from this.
           const endedAt = now();
+          handoffsInFlight += 1;
           let released = false;
           const release = (): void => {
             if (released) return;
@@ -1249,6 +1268,7 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
               return false;
             })
             .finally(() => {
+              handoffsInFlight -= 1;
               clearTimeout(bound);
               release();
             });

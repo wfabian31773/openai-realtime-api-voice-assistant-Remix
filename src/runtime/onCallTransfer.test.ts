@@ -944,25 +944,19 @@ describe("one chain per call, read from the chain's own row", () => {
     expect(built.handed).toHaveLength(1);
   });
 
-  it("releases the call's claim when the hand-off never answers, and a late answer does not undo a later claim", async () => {
+  it("rings today's number, not a second chain, while a hand-off past its bound is still opening the chain", async () => {
     const { ops, dialed } = fakeOps();
     const built = buildWiring();
     built.wiring.handoffResultWaitMs = 10;
-    // Long enough that the second hand-off is still inside its bound when the
-    // third escalation arrives, so the guard on the late release is what decides.
-    built.wiring.handoffSettleMs = 400;
+    built.wiring.handoffSettleMs = 50;
     const inner = built.wiring.runner.afterInCallTransfer;
-    let calls = 0;
     let finishFirst: () => void = () => undefined;
     const firstGate = new Promise<void>((ok) => (finishFirst = ok));
-    let finishSecond: () => void = () => undefined;
-    const secondGate = new Promise<void>((ok) => (finishSecond = ok));
     built.wiring.runner = {
       afterInCallTransfer: async (r) => {
-        const n = ++calls;
-        // Neither hand-off answers until its gate is lifted, and the first opens no row.
-        await (n === 1 ? firstGate : secondGate);
-        return n === 1 ? null : inner(r);
+        // The runner is slow to open this call's chain, and opens it in the end.
+        await firstGate;
+        return inner(r);
       },
     };
     const lines: string[] = [];
@@ -974,14 +968,16 @@ describe("one chain per call, read from the chain's own row", () => {
     await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
     transfer.handleStatus(signed(TRANSFER_STATUS_PATH, { CallSid: "CAoffice", CallStatus: "no-answer" }));
     await expect(first).rejects.toThrow(/^handoff_failed:NO_ANSWER$/);
+    expect(built.texts).toHaveLength(1);
 
-    // While the first hand-off is stuck, a second escalation is refused, and
-    // told the hand-off is still under way, not that the chain is paging: the
-    // runner may yet open nothing (review of #514).
+    // Inside the bound a second escalation is refused as still being handed over.
     urgent();
     await expect(handoff()).rejects.toThrow(/^handoff_failed:CHAIN_PENDING$/);
 
-    // Past the bound the claim is released, so the next escalation routes again.
+    // Past the bound the claim is released, but the hand-off is still running
+    // and the chain's row is not there yet. The next escalation rings today's
+    // number and texts nobody, rather than texting and ringing the provider a
+    // second time from a second chain (review of #514, round 16).
     await vi.waitFor(() => expect(lines.some((l) => l.includes("releasing this call's chain claim"))).toBe(true), {
       timeout: 3_000,
     });
@@ -989,16 +985,110 @@ describe("one chain per call, read from the chain's own row", () => {
     const second = handoff();
     await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
     expect(dialed).toHaveLength(2);
-    transfer.handleStatus(signed(TRANSFER_STATUS_PATH, { CallSid: "CAoffice", CallStatus: "no-answer" }));
-    await expect(second).rejects.toThrow(/^handoff_failed:NO_ANSWER$/);
+    expect(dialed[1].to).toBe(ENV.HUMAN_AGENT_NUMBER);
+    expect(built.texts).toHaveLength(1);
+    expect(lines.some((l) => l.includes("still opening this call's chain; today's path"))).toBe(true);
+    transfer.handleAccept(signed(TRANSFER_ACCEPT_PATH, { CallSid: "CAoffice", Digits: "1" }));
+    await second;
 
-    // The first hand-off answers late. It must not release the second's claim.
+    // The slow hand-off opens its chain in the end: one chain on the call.
+    finishFirst();
+    await vi.waitFor(() => expect(built.handed).toHaveLength(1));
+    expect(built.store.escalations.size).toBe(1);
+  });
+
+  it("routes again once a hand-off that opened no chain has ended", async () => {
+    const { ops, dialed } = fakeOps();
+    const built = buildWiring();
+    built.wiring.handoffResultWaitMs = 10;
+    built.wiring.handoffSettleMs = 50;
+    const inner = built.wiring.runner.afterInCallTransfer;
+    let calls = 0;
+    built.wiring.runner = {
+      afterInCallTransfer: async (r) => (++calls === 1 ? null : inner(r)),
+    };
+    const transfer = transferWith(ops, built.wiring);
+    const handoff = transfer.handoffFor("no-ivr", META);
+
+    urgent();
+    const first = handoff();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    transfer.handleStatus(signed(TRANSFER_STATUS_PATH, { CallSid: "CAoffice", CallStatus: "no-answer" }));
+    await expect(first).rejects.toThrow(/^handoff_failed:NO_ANSWER$/);
+    await vi.waitFor(() => expect(calls).toBe(1));
+    await new Promise((ok) => setTimeout(ok, 5));
+
+    // The first hand-off ended with no row: nothing is opening a chain, so
+    // the next escalation routes to the rotation as the first did.
+    urgent();
+    const second = handoff();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    expect(dialed).toHaveLength(2);
+    expect(dialed[1].to).not.toBe(ENV.HUMAN_AGENT_NUMBER);
+    expect(built.texts).toHaveLength(2);
+    transfer.handleStatus(signed(TRANSFER_STATUS_PATH, { CallSid: "CAoffice", CallStatus: "no-answer" }));
+    await expect(second).rejects.toThrow(/^handoff_failed:(NO_ANSWER|CHAIN_STARTED)$/);
+  });
+
+  it("a hand-off that answers after its bound does not undo a later escalation's claim", async () => {
+    const { ops, dialed } = fakeOps();
+    const built = buildWiring();
+    built.wiring.handoffResultWaitMs = 10;
+    built.wiring.handoffSettleMs = 50;
+    const inner = built.wiring.runner.afterInCallTransfer;
+    let calls = 0;
+    let finishFirst: () => void = () => undefined;
+    const firstGate = new Promise<void>((ok) => (finishFirst = ok));
+    built.wiring.runner = {
+      afterInCallTransfer: async (r) => {
+        const n = ++calls;
+        if (n === 1) {
+          // The first hand-off answers late and opens no row.
+          await firstGate;
+          return null;
+        }
+        return inner(r);
+      },
+    };
+    const lines: string[] = [];
+    const transfer = transferWith(ops, built.wiring, recordingAlerts().alerts, { log: (l) => void lines.push(l) });
+    const handoff = transfer.handoffFor("no-ivr", META);
+
+    urgent();
+    const first = handoff();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    transfer.handleStatus(signed(TRANSFER_STATUS_PATH, { CallSid: "CAoffice", CallStatus: "no-answer" }));
+    await expect(first).rejects.toThrow(/^handoff_failed:NO_ANSWER$/);
+    await vi.waitFor(() => expect(lines.some((l) => l.includes("releasing this call's chain claim"))).toBe(true), {
+      timeout: 3_000,
+    });
+
+    // A second escalation claims the chain while its record read is still in
+    // flight; the first hand-off answers during that read.
+    const realGet = built.store.getEscalationByCall.bind(built.store);
+    let liftRead: () => void = () => undefined;
+    const readGate = new Promise<void>((ok) => (liftRead = ok));
+    let reads = 0;
+    built.store.getEscalationByCall = async (sid) => {
+      if (++reads === 1) await readGate;
+      return realGet(sid);
+    };
+    urgent();
+    const second = handoff();
+    await vi.waitFor(() => expect(reads).toBe(1));
     finishFirst();
     await new Promise((ok) => setTimeout(ok, 5));
+    liftRead();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    expect(dialed).toHaveLength(2);
+    expect(dialed[1].to).not.toBe(ENV.HUMAN_AGENT_NUMBER);
+
+    // The late answer did not give the second escalation's claim away.
     urgent();
     await expect(handoff()).rejects.toThrow(/^handoff_failed:CHAIN_PENDING$/);
     expect(dialed).toHaveLength(2);
-    finishSecond();
+    transfer.handleStatus(signed(TRANSFER_STATUS_PATH, { CallSid: "CAoffice", CallStatus: "no-answer" }));
+    await expect(second).rejects.toThrow(/^handoff_failed:(NO_ANSWER|CHAIN_STARTED)$/);
   });
 
   it("hands the chain to the runner as failed when the dial throws after the provider was texted", async () => {
