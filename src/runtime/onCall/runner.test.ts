@@ -1151,6 +1151,26 @@ describe("what keeps the chain moving when something goes wrong", () => {
     expect(lines).not.toMatch(/failed before its call was placed/);
   });
 
+  it("moves on when a call that could not be placed also cannot be ended the first time", async () => {
+    let n = 0;
+    const placeCall = vi.fn(async () => {
+      n += 1;
+      if (n === 1) throw new Error("twilio said no");
+      return { sid: "CA9" + "0".repeat(31) };
+    });
+    const h = harness({ placeCall });
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    const realEnd = h.store.endAttempt.bind(h.store);
+    h.store.endAttempt = async (...args: Parameters<typeof realEnd>) => {
+      h.store.endAttempt = realEnd;
+      throw new Error("hub blip");
+    };
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    expect(h.lastCallAttempt()).toMatchObject({ levelIndex: 0, attemptNo: 2, outcome: "failed" });
+    expect(h.escalation()).toMatchObject({ status: "active", levelIndex: 1, attemptNo: 1, phase: "due" });
+  });
+
   it("goes straight to the next level when a level with no number cannot move on the first time", async () => {
     const h = harness();
     const plan = wedPlan();
