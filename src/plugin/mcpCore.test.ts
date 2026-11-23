@@ -65,7 +65,7 @@ describe("voice fleet MCP core", () => {
     const core = create();
     for (const value of [null, [], {}, { jsonrpc: "1.0", id: 1, method: "ping" }, { jsonrpc: "2.0", id: {}, method: "ping" }]) expect(await core.handleMessage(value)).toMatchObject({ error: { code: -32600 } });
     expect(await core.handleMessage({ jsonrpc: "2.0", id: 1, method: "ping", params: [] })).toMatchObject({ error: { code: -32602 } });
-    for (const message of [call("commit"), call("commit_call_live", { approvalId: "synthetic" }), call("live_call_status", { sessionId: "../x" }), call("live_call_instruct", { sessionId: "s1", text: "x".repeat(2001) }), call("health", []), call("health", null)]) expect(await core.handleMessage(message)).toMatchObject({ result: { isError: true } });
+    for (const message of [call("commit"), call("commit_call_live", { approvalId: "synthetic" }), call("operator_inbound_get", { callSid: "../x" }), call("operator_prepare_call", { phone: "+19095550113", purpose: "x".repeat(4001) }), call("health", []), call("health", null)]) expect(await core.handleMessage(message)).toMatchObject({ result: { isError: true } });
     expect(await core.handleMessage(call("unknown"))).toMatchObject({ error: { code: -32602 } });
     expect(await core.handleMessage({ jsonrpc: "2.0", method: "notifications/initialized" })).toBeNull();
     expect(fetch).not.toHaveBeenCalled();

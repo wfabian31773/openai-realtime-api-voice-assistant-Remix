@@ -31,8 +31,8 @@ assert(status.content[0].text.includes('909-555-1234') && status.content[0].text
 assert(status.content[0].text.includes('Synthetic private words'));
 assert(!(await call('live_call_instruct', { sessionId: 's1', text: 'Synthetic guidance' })).isError);
 const invalidBefore = seen.length;
-assert((await call('live_call_instruct', { sessionId: 's1', text: 'x'.repeat(2001) })).isError);
-assert((await call('live_call_status', { sessionId: '../x' })).isError);
+assert((await call('operator_prepare_call', { phone: '+19095550113', purpose: 'x'.repeat(4001) })).isError);
+assert((await call('operator_inbound_get', { callSid: '../x' })).isError);
 assert.equal(seen.length, invalidBefore);
 // The original never probed capabilities. A token without fleet:read can
 // still use its owned live routes, and the real route decides availability.

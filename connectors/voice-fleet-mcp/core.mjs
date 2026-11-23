@@ -89,15 +89,14 @@ export function createVoiceFleetMcp({ baseUrl, getToken, timeoutMs = 30000 }) {
 
   async function confirmFor(a) {
     if (a.confirmToken) return { token: a.confirmToken };
-    if (!a.id) throw new InputError("Provide confirmToken or id");
+    if (!a.id) return { error: { status: 400, ok: false, data: { error: "Provide confirmToken or id" } } };
     const r = await call("GET", `/contact_requests/${enc(a.id)}/confirm_token`);
     if (!r.ok) return { error: r };
-    if (typeof r.data.confirmToken !== "string" || !r.data.confirmToken) throw new InputError("Confirmation token is unavailable");
     return { token: r.data.confirmToken };
   }
 
   async function sidGet(re, label, sid, path, includeContent) {
-    if (typeof sid !== "string" || !re.test(sid)) throw new InputError(`Invalid ${label} format`);
+    if (typeof sid !== "string" || !re.test(sid)) return { status: 400, ok: false, data: { error: `Invalid ${label} format` } };
     const result = await call("GET", path + enc(sid));
     return { ...result, data: mask(result.data, "", includeContent === true) };
   }
@@ -151,26 +150,6 @@ export function createVoiceFleetMcp({ baseUrl, getToken, timeoutMs = 30000 }) {
       }],
   ].map(([n, description, inputSchema, run]) => ({ name: `voice_fleet_${n}`, description, inputSchema, run }));
 
-  function validateArguments(tool, args) {
-    if (!args || typeof args !== "object" || Array.isArray(args)) throw new InputError("arguments must be an object");
-    for (const key of tool.inputSchema.required) {
-      if (args[key] === undefined) throw new InputError(`${key} is required`);
-    }
-    for (const [key, spec] of Object.entries(tool.inputSchema.properties)) {
-      const value = args[key];
-      if (value === undefined) continue;
-      if (spec.type === "integer" ? !Number.isInteger(value) : typeof value !== spec.type) throw new InputError(`Invalid ${key} type`);
-      if (spec.enum && !spec.enum.includes(value)) throw new InputError(`Invalid ${key}`);
-      if (spec.pattern && !new RegExp(spec.pattern).test(value)) throw new InputError(`Invalid ${key} format`);
-      if (spec.minimum !== undefined && value < spec.minimum) throw new InputError(`Invalid ${key} range`);
-    }
-    for (const key of ["id", "sessionId"]) {
-      if (args[key] !== undefined && (typeof args[key] !== "string" || !/^[A-Za-z0-9_-]{1,200}$/.test(args[key]))) throw new InputError(`Invalid ${key} format`);
-    }
-    if (tool.name === "voice_fleet_live_call_instruct" && (!args.text.trim() || args.text.length > 2000)) throw new InputError("text must contain 1 to 2000 characters");
-    if (["voice_fleet_commit", "voice_fleet_commit_call_live", "voice_fleet_operator_commit_call"].includes(tool.name) && !args.id && !args.confirmToken) throw new InputError("Provide confirmToken or id");
-  }
-
   const rpcError = (id, code, message) => ({ jsonrpc: "2.0", id, error: { code, message } });
 
   async function handleMessage(msg) {
@@ -194,7 +173,10 @@ export function createVoiceFleetMcp({ baseUrl, getToken, timeoutMs = 30000 }) {
     if (!tool) return rpcError(id, -32602, "Unknown tool");
     try {
       const args = params.arguments === undefined ? {} : params.arguments;
-      validateArguments(tool, args);
+      if (!args || typeof args !== "object" || Array.isArray(args)) throw new InputError("arguments must be an object");
+      // Keep the original handlers' normalization and validation order. Discovery
+      // schemas are not preflight validators: optional empties and unused fields
+      // must reach the handler, and the fleet validates its request payload.
       const result = await tool.run(args);
       return reply({ content: [{ type: "text", text: JSON.stringify(result, null, 2) }], isError: !result.ok });
     } catch (error) {

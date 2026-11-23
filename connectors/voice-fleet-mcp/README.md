@@ -120,6 +120,12 @@ requires `to`, nonblank `body` and a stable 1–200-character `idempotency_key`.
 It uses the operator number; owner texts send immediately and other targets
 need approval, with opt-out checks enforced by the API. Operator prepare
 normalizes caller_script/opening_line aliases to callerScript/openingLine.
+Its optional `scenario_id`, `initiated_by`, `language` and `maxDurationSec`
+fields omit empty strings and preserve `null`, matching the imported connector.
+Tool schemas describe discovery; the original handlers normalize and validate
+their own inputs before sending requests. Other payload validation remains with
+the fleet API. A supplied `confirmToken` takes precedence over any unused `id`.
+At the JSON-RPC boundary, tool `arguments` must be an object; omission uses `{}`.
 
 ## Masking
 
@@ -139,7 +145,8 @@ does not enable content on SMS-send replies.
 
 Other tools, including `get_transcript` and live-call status, return the fleet's
 JSON unchanged, as the original did. Fetch errors and non-JSON upstream pages
-are replaced with generic errors. Tokens and bodies are never logged.
+are replaced with generic errors, and upstream redirects are refused. Tokens
+and bodies are never logged.
 
 ## Tests
 
@@ -147,7 +154,7 @@ From the repo root, without credentials or external network:
 
 ```sh
 npx tsc -p . --noEmit
-npx vitest run src/plugin/mcpCore.test.ts src/plugin/mcpRoute.security.test.ts connectors/voice-fleet-mcp/offline.test.ts
+npx vitest run src/plugin/mcpCore.test.ts src/plugin/mcpParity.test.ts src/plugin/mcpRoute.security.test.ts connectors/voice-fleet-mcp/offline.test.ts
 npx vitest run src/plugin connectors
 node connectors/voice-fleet-mcp/test-offline.mjs
 node connectors/voice-fleet-mcp/test-operator-offline.mjs
@@ -157,6 +164,11 @@ node connectors/voice-fleet-mcp/test-operator-prepare-offline.mjs
 The offline `.mjs` scripts mock fetch directly and are also run by Vitest.
 `tools-list-b7f9b822.json` records the original connector's full tool catalog;
 the core tests compare every name, description and input schema exactly.
+`fixtures/server-b7f9b822.txt` is the exact original server source. The parity
+tests evaluate its handlers against mocked fetch and compare method, encoded
+path/query, serialized body and tool result with the core for all 26 tools, including empty
+optional fields, extra fields and snake/camel aliases. Only the original imports,
+exports and stdio listener are excluded; no git history or token file is needed.
 HTTP security tests run the mounted middleware and raw parser in process without
 sockets; the remaining HTTP integration tests use a local server. Both use an
 in-memory token store; no DB is loaded.
