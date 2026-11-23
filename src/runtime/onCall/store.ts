@@ -210,13 +210,17 @@ export interface OnCallStore {
   closeEscalation(id: number, version: number, patch: EscalationPatch & { status: Exclude<EscalationStatus, "active"> }): Promise<EscalationRow | null>;
   logAttempt(a: NewAttempt): Promise<AttemptRow>;
   setAttemptCallSid(attemptId: number, providerCallSid: string): Promise<void>;
-  /** Ends an attempt once; a second end returns null. */
+  /**
+   * Ends an attempt once; a second end returns null. An `accepted` end also
+   * needs the attempt's escalation active, and moves its version, so a write
+   * read before the accept loses its race (null when the chain has ended).
+   */
   endAttempt(attemptId: number, outcome: Exclude<AttemptOutcome, "in_progress">, at: Date): Promise<AttemptRow | null>;
   /**
    * A key press on a call we had already ended (a ring-out, a status that
    * never came, a dial we recorded as failed that Twilio placed after all):
-   * marks it accepted once, and only while its escalation is still active.
-   * Null when it is in progress, already accepted, hung up because another
+   * marks it accepted once, and only while its escalation is still active,
+   * moving the escalation's version as an accepted end does. Null when it is in progress, already accepted, hung up because another
    * call took the patient, or its chain has ended.
    */
   acceptLate(attemptId: number, at: Date): Promise<AttemptRow | null>;
@@ -390,12 +394,37 @@ export const SQL = {
     update on_call_attempts set outcome = $2::text, ended_at = $3::timestamptz
      where id = $1::integer and outcome = 'in_progress'
     returning *`,
+  // An accept is written through its chain's row: the chain must still be
+  // active, and its version moves, in the same statement. Locking the chain's
+  // row orders the accept against a close of that row, and the version moving
+  // makes any version-checked write read before the accept lose its race, so
+  // a move that saw no accepted attempt cannot then close the chain as
+  // exhausted over one (review of #514, round 15). Without the version bump the
+  // two writes touch different rows and both land.
+  endAttemptAccepted: `
+    with chain as (
+      update on_call_escalations e set version = e.version + 1, updated_at = now()
+       where e.id = (select a.escalation_id from on_call_attempts a where a.id = $1::integer)
+         and e.status = 'active'
+         and exists (select 1 from on_call_attempts a where a.id = $1::integer and a.outcome = 'in_progress')
+      returning e.id)
+    update on_call_attempts set outcome = 'accepted', ended_at = $2::timestamptz
+     where id = $1::integer and outcome = 'in_progress'
+       and escalation_id in (select id from chain)
+    returning *`,
   acceptLate: `
+    with chain as (
+      update on_call_escalations e set version = e.version + 1, updated_at = now()
+       where e.id = (select a.escalation_id from on_call_attempts a where a.id = $1::integer)
+         and e.status = 'active'
+         and exists (select 1 from on_call_attempts a
+                      where a.id = $1::integer and a.kind = 'call'
+                        and a.outcome in (${LATE_ACCEPTABLE_OUTCOMES.map((o) => `'${o}'`).join(", ")}))
+      returning e.id)
     update on_call_attempts set outcome = 'accepted', ended_at = $2::timestamptz
      where id = $1::integer and kind = 'call'
        and outcome in (${LATE_ACCEPTABLE_OUTCOMES.map((o) => `'${o}'`).join(", ")})
-       and exists (select 1 from on_call_escalations e
-                    where e.id = on_call_attempts.escalation_id and e.status = 'active')
+       and escalation_id in (select id from chain)
     returning *`,
   attempt: `select * from on_call_attempts where id = $1::integer`,
   attemptsFor: `select * from on_call_attempts where call_sid = $1::text order by started_at, id`,
@@ -522,7 +551,10 @@ export function createPgOnCallStore(
       await query(SQL.setAttemptCallSid, [attemptId, providerCallSid]);
     },
     async endAttempt(attemptId, outcome, at) {
-      const { rows } = await query(SQL.endAttempt, [attemptId, outcome, at.toISOString()]);
+      const { rows } =
+        outcome === "accepted"
+          ? await query(SQL.endAttemptAccepted, [attemptId, at.toISOString()])
+          : await query(SQL.endAttempt, [attemptId, outcome, at.toISOString()]);
       return rows[0] ? attemptFromRow(rows[0]) : null;
     },
     async acceptLate(attemptId, at) {

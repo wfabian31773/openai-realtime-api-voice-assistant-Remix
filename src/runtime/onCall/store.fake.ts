@@ -163,6 +163,12 @@ export function createFakeOnCallStore(rotation: RotationData, now: () => Date = 
       if (store.failWrites) throw new Error("fake store: writes failing");
       const a = attempts.get(attemptId);
       if (!a || a.outcome !== "in_progress") return null;
+      if (outcome === "accepted") {
+        // As the SQL: an accept needs its chain active, and moves its version.
+        const e = escalations.get(a.escalationId);
+        if (e?.status !== "active") return null;
+        e.version += 1;
+      }
       a.outcome = outcome;
       a.endedAt = at;
       return { ...a };
@@ -171,7 +177,9 @@ export function createFakeOnCallStore(rotation: RotationData, now: () => Date = 
       if (store.failWrites) throw new Error("fake store: writes failing");
       const a = attempts.get(attemptId);
       if (!a || a.kind !== "call" || !LATE_ACCEPTABLE.has(a.outcome)) return null;
-      if (escalations.get(a.escalationId)?.status !== "active") return null;
+      const e = escalations.get(a.escalationId);
+      if (e?.status !== "active") return null;
+      e.version += 1;
       a.outcome = "accepted";
       a.endedAt = at;
       return { ...a };

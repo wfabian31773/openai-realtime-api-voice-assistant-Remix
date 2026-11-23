@@ -798,6 +798,60 @@ describe("a key press on a call we had marked over (review of #514, round 10)", 
     expect(h.escalation()).toMatchObject({ status: "exhausted", acceptedAttemptId: null });
   });
 
+  it("takes the patient when the key press lands between the last move's read and its close", async () => {
+    // Round 15 of the review of #514: the move read no accepted attempt, the
+    // key press then recorded one, and the move's close still landed, so the
+    // chain read exhausted over an accepted call and the urgent number was told
+    // nobody took the patient. An accept now moves the chain's version, so the
+    // close loses its race and the move's next read finds the press.
+    const h = harness();
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    await h.runner.onProviderStatus(h.lastCallAttempt().id, "no-answer");
+    await h.runner.tick();
+    await h.runner.onProviderStatus(h.lastCallAttempt().id, "no-answer");
+    h.advance(RETRY_GAP_MS);
+    await h.runner.tick();
+    await h.runner.onProviderStatus(h.lastCallAttempt().id, "no-answer");
+    await h.runner.tick();
+    await h.runner.onProviderStatus(h.lastCallAttempt().id, "no-answer");
+    h.advance(RETRY_GAP_MS);
+    await h.runner.tick();
+    const last = h.lastCallAttempt();
+    expect(last.levelIndex).toBe(2);
+    expect(last.attemptNo).toBe(2);
+    const real = h.store.attemptsFor.bind(h.store);
+    let pressed = false;
+    h.store.attemptsFor = async (callSid) => {
+      const seen = await real(callSid);
+      if (!pressed && h.store.attempts.get(last.id)?.outcome === "no_answer") {
+        pressed = true;
+        expect(await h.store.acceptLate(last.id, h.now())).toMatchObject({ outcome: "accepted" });
+      }
+      return seen;
+    };
+    await h.runner.onProviderStatus(last.id, "no-answer");
+    expect(pressed).toBe(true);
+    expect(h.escalation()).toMatchObject({ status: "accepted", acceptedAttemptId: last.id });
+    expect(h.urgent.some((u) => /NOBODY TOOK/.test(u))).toBe(false);
+  });
+
+  it("refuses a key press on a call still ringing once its chain has ended", async () => {
+    // The accepted end needs the chain active, as the late accept always has.
+    const h = harness();
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    const id = h.lastCallAttempt().id;
+    const cur = h.escalation();
+    const v = cur.version;
+    await h.store.closeEscalation(cur.id, v, { status: "exhausted", nextAt: null });
+    expect(await h.store.endAttempt(id, "accepted", h.now())).toBeNull();
+    expect(h.store.attempts.get(id)?.outcome).toBe("in_progress");
+    expect(h.escalation().version).toBe(v + 1);
+  });
+
   it("is told nobody was reached in time, not taken, when the chain ends between the read and the press", async () => {
     const h = harness();
     const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
