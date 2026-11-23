@@ -3372,17 +3372,16 @@ PREREQUISITE: one quick ask for name and DOB; transfer even if unavailable. Clin
         // claim the caller was connected or that a request was submitted before
         // create_ticket returns.
         const failure = handoffError instanceof Error ? handoffError.message : String(handoffError);
-        const message = failure === 'handoff_failed:NO_ANSWER'
-          ? HANDOFF_FAILED_DIRECTIVE
-          : failure === 'handoff_failed:CHAIN_RUNNING'
-            ? HANDOFF_CHAIN_RUNNING_DIRECTIVE
-            : failure === 'handoff_failed:CHAIN_PENDING'
-              ? HANDOFF_CHAIN_PENDING_DIRECTIVE
-            : failure === 'handoff_failed:CHAIN_STARTED'
-              ? HANDOFF_CHAIN_STARTED_DIRECTIVE
-            : failure === 'handoff_failed:UNAVAILABLE'
-              ? HANDOFF_NOT_PLACED_DIRECTIVE
-              : HANDOFF_ERROR_DIRECTIVE;
+        const directives: Record<string, string> = {
+          'handoff_failed:NO_ANSWER': HANDOFF_FAILED_DIRECTIVE,
+          'handoff_failed:CHAIN_RUNNING': HANDOFF_CHAIN_RUNNING_DIRECTIVE,
+          'handoff_failed:CHAIN_PENDING': HANDOFF_CHAIN_PENDING_DIRECTIVE,
+          'handoff_failed:CHAIN_STARTED': HANDOFF_CHAIN_STARTED_DIRECTIVE,
+          'handoff_failed:UNAVAILABLE': HANDOFF_NOT_PLACED_DIRECTIVE,
+        };
+        const message = Object.prototype.hasOwnProperty.call(directives, failure)
+          ? directives[failure]
+          : HANDOFF_ERROR_DIRECTIVE;
         return { success: false, handoffFailed: true, message };
       }
     },

@@ -109,6 +109,24 @@ same moment) still takes the patient: the press is logged as accepted, the
 chain is brought due at once, and the next pass finds the press and closes
 the chain on it. Nothing else is rung in between.
 
+When no text with the details reached that number on this escalation (every
+text and reminder to it failed to send), the call says so instead:
+
+> This is the Azul Vision answering service. You have an urgent patient who
+> needs a call back. We could not text you the details. Press any key to take
+> this patient, and we will read you the callback number.
+
+A key press then hears the callback number read twice, in groups ("7 1 4,
+5 5 5, 0 1 0 0"), the number the caller gave first and the caller ID
+otherwise; with neither, the provider is told there is no number to read.
+Nothing about the patient is said before the key press, so a voicemail
+greeting or a screening assistant still hears nothing. An earlier text that
+did reach the same number counts (the pre-dial text, the first text or a
+reminder), and the call uses the usual opening. A key press that cannot be
+recorded on such a call hears that the press was not recorded and that we
+will keep trying to reach a provider, not "call the patient from the number in
+the text message"; the chain carries on as if the call had not been answered. A level-0 call is the in-call warm transfer and is unchanged.
+
 Any key counts, `#` and `*` included. A pickup with no key press (a person
 who listens and hangs up, a voicemail, a hang-up during the prompt) is logged
 `declined` and counted as not taken: the chain carries on, with a second call

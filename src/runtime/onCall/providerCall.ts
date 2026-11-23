@@ -56,7 +56,7 @@ export const PROVIDER_ACK_FAILED_LINE =
   "We could not record that. Please call the patient from the number in the text message. Goodbye.";
 /** The ack could not be recorded, on a call whose details text did not reach the provider. */
 export const PROVIDER_ACK_FAILED_NO_TEXT_LINE =
-  "We could not record that, and the text with the patient's details did not reach you, so we will keep calling other providers. Goodbye.";
+  "We could not record that, and the text with the patient's details did not reach you. We will keep trying to reach a provider for this patient. Goodbye.";
 
 /**
  * The query flag on the ack URL that says the details text did not reach this
