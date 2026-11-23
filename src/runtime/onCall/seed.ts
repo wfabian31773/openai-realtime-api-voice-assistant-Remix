@@ -163,10 +163,11 @@ function cleanRegion(raw: string): string {
  * The SQL test that a stored region is `region`, keyed the way the runtime
  * keys it (`regionKey`: trimmed, spaces collapsed, case ignored), so a region
  * entered by hand with a stray space is the same region to the change scripts
- * as it is to a call (review of #514, round 7).
+ * as it is to a call (review of #514, round 7). `region` is already cleaned
+ * by the caller (`cleanRegion`).
  */
 function regionIs(region: string): string {
-  return `lower(regexp_replace(btrim(region), '\\s+', ' ', 'g')) = lower(${lit(cleanRegion(region))})`;
+  return `lower(regexp_replace(btrim(region), '\\s+', ' ', 'g')) = lower(${lit(region)})`;
 }
 
 /** The last word of a name with its title and degree dropped: "Dr. Pabalan" -> "pabalan". */
