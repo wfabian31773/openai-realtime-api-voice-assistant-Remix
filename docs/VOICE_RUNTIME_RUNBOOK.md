@@ -59,8 +59,29 @@ refused, with the reason logged at mount:
 |---|---|
 | `TWILIO_PHONE_NUMBER` | the number the office leg is dialled *from*, and the caller ID on the bridge. |
 | `DOMAIN` (or `REPLIT_DOMAINS`) | builds the accept/status webhook URLs Twilio posts the keypress to. A localhost resolution yields no domain and transfers stay refused. |
-| `HUMAN_AGENT_NUMBER` | destination for the **clinical** policy — the no-IVR family. |
+| `HUMAN_AGENT_NUMBER` | destination for the **clinical** policy — the no-IVR family. With the on-call rotation on (below), it is still the number for weekday daytime and for any urgent call the rotation does not decide. |
 | `PCP_HUMAN_AGENT_NUMBER` | destination for the **pcp** lane's queue. |
+
+And for the **after-hours on-call rotation** (v268, `docs/ON_CALL_ROTATION.md`).
+Nothing here is required: unset, the no-IVR lane's urgent transfer rings
+`HUMAN_AGENT_NUMBER` exactly as before. A value the rotation cannot honour
+turns the whole rotation off, logs why at boot and shows it on `/voice/health`
+`onCall.disabledBecause`; it never half-runs.
+
+| Variable | Why |
+|---|---|
+| `ON_CALL_ROTATION_MODE` | `off` (default), `test` or `live`. `test` rings only `ON_CALL_TEST_PHONES` and marks every text `[TEST MODE]`; `live` rings the providers in the rotation tables. Going live is the operator's. |
+| `ON_CALL_TEST_PHONES` | comma list of the only numbers test mode may ring. The first number takes the first level, the second the next, and a short list reuses its last number. Test mode with no numbers here is off. |
+| `ON_CALL_CALLER_ID` | the number provider calls and texts come from. Defaults to `TWILIO_PHONE_NUMBER`. Refused, and the rotation turned off, if it is the Wayne Operator Line (`OPERATOR_LINE_FROM_NUMBER`). |
+| `ON_CALL_POST_OP_REQUIRE_KEPT` | `1` routes to the surgeon only when the surgery is marked kept in the Console. Unset counts any surgery 0 to 7 days ago that was not cancelled or moved. Open for the operator (`docs/ON_CALL_ROTATION.md` §8). |
+
+The rotation also needs `migrations/add_on_call_rotation.sql` applied and the
+tables loaded (`scripts/on-call-seed.ts`), and reads the Console through
+`OBS_CONSOLE_DATABASE_URL` for the post-op route. Before the migration is
+applied, both modes route nothing through the rotation (`store_unavailable` in
+the log) and the fixed number rings as before. With the tables applied and still
+empty, `test` rings a synthetic chain on the test numbers so the cadence can be
+heard, and `live` routes nothing (`no_levels`).
 
 Numbers are read from env by policy; **the model never supplies a number.**
 
@@ -229,6 +250,25 @@ Call 2 should end as `transferred` in `call_logs` with `transferred_to_human`
 set. Calls 3 and 4 should end normally with a ticket filed — **not** as
 `dead_air`. If you see `dead_air` on a transfer attempt, that is a real bug:
 tell me the callSid rather than re-dialling.
+
+### The on-call rotation's test calls (v268)
+
+With `ON_CALL_ROTATION_MODE=test` the urgent calls above (2 to 5) ring the
+on-call chain instead of `HUMAN_AGENT_NUMBER`, but only on the numbers in
+`ON_CALL_TEST_PHONES`, and only outside weekday daytime (Mon-Fri 8:00 AM to
+4:59 PM Pacific is not on call; those calls still ring the fixed number). Every
+text carries `[TEST MODE]`. The tickets and texts are real, so the whole flow
+can be read back afterwards.
+
+| # | What to do | What must happen |
+|---|---|---|
+| R1 | Call 2 on a test number, press 1 at the first ring | The level-one test phone gets the text with the patient details, then the call; the key press bridges you. One `on_call_attempts` row, outcome `accepted`; `on_call_escalations.status = 'accepted'`. |
+| R2 | Call 2, let the first ring go unanswered | Logged `no_answer`, not a failure. Inside 5 minutes of the original call the same phone gets a second call and a reminder text. |
+| R3 | Call 2, leave every call unanswered | After the second attempt the next level (the region's director) gets the text and two calls, then the final director. Every call and text is a row; the chain ends `exhausted`. For San Diego and Coachella Valley the second level is the final director. |
+| R4 | During R3, press 1 on a later call | The chain stops at that call: no further calls or texts, status `accepted`. |
+
+The full test plan, the SQL that reads the attempts back by the caller's
+CallSid, and what each log line means are in `docs/ON_CALL_ROTATION.md` §5.
 
 ## 6c. The queue-lane cutover — Optical first
 

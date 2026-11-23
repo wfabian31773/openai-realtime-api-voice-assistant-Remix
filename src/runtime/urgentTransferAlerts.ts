@@ -23,7 +23,12 @@ import {
 
 export interface UrgentTransferAlerts {
   /** The heads-up text, sent BEFORE the on-call phone rings. */
-  smsBeforeDial(input: { callerNumber?: string; escalationDetails?: EscalationDetails }): void;
+  smsBeforeDial(input: {
+    callerNumber?: string;
+    escalationDetails?: EscalationDetails;
+    /** A line put at the top of the text (v268: who the on-call rotation is ringing). */
+    note?: string;
+  }): void;
   /** The urgent ticket, filed when a transfer rang and nobody took it. */
   fallbackTicket(input: {
     callSid: string;
@@ -34,6 +39,8 @@ export interface UrgentTransferAlerts {
     agentUsed: string;
     /** What the dial did, written on the ticket as a HANDOFF FAILED line (v163). */
     handoff?: UrgentHandoffFailure;
+    /** The on-call rotation took this call and is still calling (v268). */
+    onCallChain?: boolean;
   }): void;
 }
 
@@ -123,7 +130,11 @@ export function defaultUrgentTransferAlerts(
       void (async () => {
         try {
           const body = buildUrgentTransferSms(
-            { callerNumber: input.callerNumber, escalationDetails: input.escalationDetails },
+            {
+              callerNumber: input.callerNumber,
+              escalationDetails: input.escalationDetails,
+              ...(input.note ? { note: input.note } : {}),
+            },
             urgentAlertTime(now()),
           );
           await (await smsClient()).messages.create({
@@ -174,6 +185,7 @@ export function defaultUrgentTransferAlerts(
                   agentUsed: input.agentUsed,
                   earlierTicket: earlier,
                   handoff: input.handoff,
+                  onCallChain: input.onCallChain,
                 }),
               )
             : await createTicket(
@@ -185,6 +197,7 @@ export function defaultUrgentTransferAlerts(
                   callSid: input.callSid,
                   agentUsed: input.agentUsed,
                   handoff: input.handoff,
+                  onCallChain: input.onCallChain,
                 }),
               );
           if (result.success) {

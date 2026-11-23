@@ -601,4 +601,52 @@ describe("the settle is the only thing that writes the outcome", () => {
     const [, written] = writes.persistTransferOutcome.mock.calls[0] as any[];
     expect(written.outcome, "nobody pressed a key").not.toBe("accepted");
   });
+
+  it("two overlapping escalations on one call each record their own ring time and attempt (review of #514, round 8)", async () => {
+    clearRuntimeTransferOutcomes();
+    writes.persistTransferOutcome.mockClear();
+    // Each dial gets its own office leg, so the two can be answered apart.
+    let legs = 0;
+    const base = fakeOps();
+    const ops: TransferTwilioOps = {
+      ...base.ops,
+      createOfficeLeg: async () => ({ sid: `CAoffice${++legs}` }),
+    };
+    const transfer = transferWith(ops);
+    const handoff = transfer.handoffFor("no-ivr", META);
+    const t0 = new Date("2041-03-04T06:00:00Z").getTime();
+    vi.useFakeTimers({ now: t0, toFake: ["Date"] });
+    try {
+      escalationDetailsMap.set("CAcaller", { callerType: "patient_urgent" });
+      const first = handoff().catch(() => undefined);
+      await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+
+      // A second escalation dials 20 s into the first one's ring.
+      vi.setSystemTime(t0 + 20_000);
+      escalationDetailsMap.set("CAcaller", { callerType: "patient_urgent" });
+      const second = handoff().catch(() => undefined);
+      await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(2));
+
+      // The first office presses nothing at 30 s: it rang 30 s, not 10.
+      vi.setSystemTime(t0 + 30_000);
+      transfer.handleAccept(signedAccept({ CallSid: "CAoffice1", Digits: "" }));
+      await first;
+      await vi.waitFor(() => expect(writes.persistTransferOutcome).toHaveBeenCalledTimes(1));
+      const [, one] = writes.persistTransferOutcome.mock.calls[0] as any[];
+      expect(one.ringSeconds, "timed from its own dial, not the second's").toBe(30);
+      expect(one.attempt).toBe(1);
+
+      // The second presses nothing at 35 s: 15 s from its own dial, and a
+      // second attempt rather than the first one's attempt again.
+      vi.setSystemTime(t0 + 35_000);
+      transfer.handleAccept(signedAccept({ CallSid: "CAoffice2", Digits: "" }));
+      await second;
+      await vi.waitFor(() => expect(writes.persistTransferOutcome).toHaveBeenCalledTimes(2));
+      const [, two] = writes.persistTransferOutcome.mock.calls[1] as any[];
+      expect(two.ringSeconds).toBe(15);
+      expect(two.attempt, "its own attempt id, so the store counts it").toBe(2);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

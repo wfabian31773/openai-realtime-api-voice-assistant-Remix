@@ -51,3 +51,13 @@ the spoken line is "Let me make sure the team has your details." Never tell
 the caller they are not found when a schedule match exists.
 
 Synthetic fixtures only. `src/agents/noIvrOnCallIdentityAndLookup.test.ts`.
+
+## With the on-call rotation (v268)
+
+The identity ask above still runs before the dial, unchanged. The rotation
+(`on-call-rotation.md`, dark until `ON_CALL_ROTATION_MODE` is set) reads only
+the call's CERTAIN identity to decide whether the patient had surgery in the
+last 7 days and should ring the surgeon. A caller who declined, or whose
+identity is only a phone candidate, rings the on-call provider, and the text
+says no confirmed patient was available for the surgery check. The
+failed-transfer ticket and its stand-in name are unchanged.
