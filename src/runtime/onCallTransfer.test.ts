@@ -1010,8 +1010,10 @@ describe("live mode: a level with no phone", () => {
     const outcome = transfer.handoffFor("no-ivr", META)();
     await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
     const director = base.providers.find((p) => p.id === IE_DIRECTOR)!;
+    const skipped = base.providers.find((p) => p.id === 1)!;
     expect((rec.beforeDial[0] as { note?: string }).note).toBe(
-      `The on-call rotation is ringing ${levelLabel({ role: "region_director", name: director.fullName })}.`,
+      `The on-call rotation is ringing ${levelLabel({ role: "region_director", name: director.fullName })}. ` +
+        `${levelLabel({ role: "on_call", name: skipped.fullName })} has no dialable number on file and was not called.`,
     );
     transfer.handleAccept(signed(TRANSFER_ACCEPT_PATH, { CallSid: "CAoffice", Digits: "1" }));
     await outcome;
@@ -1033,11 +1035,32 @@ describe("live mode: a level with no phone", () => {
     expect(dialed[0].to).toBe(director.phone);
     expect(built.texts[0].to).toBe(director.phone);
     expect(built.texts[0].body).not.toContain("[TEST MODE]");
+    // The first provider's text says who was passed over and why, so they
+    // know the chain started with them (review of #514, round 10).
+    const skipped = base.providers.find((p) => p.id === 1)!;
+    const skipLine = `${levelLabel({ role: "on_call", name: skipped.fullName })} has no dialable number on file and was not called.`;
+    expect(built.texts[0].body).toContain(skipLine);
     transfer.handleAccept(signed(TRANSFER_ACCEPT_PATH, { CallSid: "CAoffice", Digits: "1" }));
     await outcome;
     await vi.waitFor(() => expect(built.handed).toHaveLength(1));
     expect(built.handed[0].plan.levels[0].role).toBe("region_director");
     expect(built.handed[0].plan.notes).toContain("first_level_no_phone:on_call:1");
+    // Every later text in the chain carries it too.
+    expect(built.handed[0].routing.note).toContain(skipLine);
+  });
+
+  it("says nothing about a skipped level when none was skipped", async () => {
+    const { ops } = fakeOps();
+    const built = buildWiring({ env: LIVE });
+    const transfer = transferWith(ops, built.wiring);
+    urgent();
+    const outcome = transfer.handoffFor("no-ivr", META)();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    expect(built.texts[0].body).not.toContain("no dialable number");
+    transfer.handleAccept(signed(TRANSFER_ACCEPT_PATH, { CallSid: "CAoffice", Digits: "1" }));
+    await outcome;
+    await vi.waitFor(() => expect(built.handed).toHaveLength(1));
+    expect(built.handed[0].routing.note ?? "").not.toContain("no dialable number");
   });
 
   it("takes today's path when no level has a phone", async () => {

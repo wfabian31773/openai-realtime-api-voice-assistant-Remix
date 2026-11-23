@@ -32,7 +32,7 @@
 import { buildUrgentTransferSms, urgentAlertTime } from "../../services/urgentTransferAlert";
 import { ON_CALL_ACK_PATH, ON_CALL_STATUS_PATH, providerCallTwiml, type AckResult } from "./providerCall";
 import type { OnCallConfig } from "./config";
-import type { ChainLevel, ChainPlan } from "./rotation";
+import { noNumberNote, type ChainLevel, type ChainPlan } from "./rotation";
 import type {
   AttemptOutcome,
   AttemptRow,
@@ -207,8 +207,25 @@ export function attemptNote(e: Pick<EscalationRow, "levelIndex" | "attemptNo" | 
         : "REMINDER — we are calling you again now.",
     );
   } else if (e.levelIndex > 0) {
-    const prev = e.plan.levels[e.levelIndex - 1];
-    parts.push(`ESCALATED — ${prev?.name ?? "the on-call provider"} did not take this urgent call.`);
+    // The level rung before this one, and any between that were passed over
+    // for having no number: those were never called, so they are named as
+    // skipped and never as having not taken it (review of #514, round 10).
+    const skipped: ChainLevel[] = [];
+    let rung: ChainLevel | undefined;
+    for (let i = e.levelIndex - 1; i >= 0; i--) {
+      const l = e.plan.levels[i];
+      if (!l) continue;
+      if (isPhone(l.phone)) {
+        rung = l;
+        break;
+      }
+      skipped.unshift(l);
+    }
+    const said: string[] = [];
+    if (rung || skipped.length === 0) said.push(`${rung?.name ?? "the on-call provider"} did not take this urgent call.`);
+    const skip = noNumberNote(skipped);
+    if (skip) said.push(skip);
+    parts.push(`ESCALATED — ${said.join(" ")}`);
   }
   parts.push(PRESS_A_KEY);
   if (e.routing.note) parts.push(e.routing.note);

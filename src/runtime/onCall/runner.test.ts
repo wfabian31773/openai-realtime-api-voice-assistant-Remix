@@ -20,7 +20,7 @@ import { createFakeOnCallStore } from "./store.fake";
 import { FINAL_DIRECTOR, IE_DIRECTOR, provider, syntheticRotation } from "./testRotation";
 import { planAt, syntheticTestPlan } from "./routing";
 import type { OnCallConfig } from "./config";
-import type { ChainPlan } from "./rotation";
+import { levelLabel, type ChainPlan } from "./rotation";
 import type { RoutingFacts } from "./store";
 import { ON_CALL_ACK_PATH, ON_CALL_STATUS_PATH } from "./providerCall";
 
@@ -1535,6 +1535,28 @@ describe("the notes on the texts", () => {
 
   it("names who did not take it on a new level", () => {
     expect(attemptNote({ ...base, levelIndex: 2, attemptNo: 1 })).toMatch(/ESCALATED — Provider 91 did not take/);
+  });
+
+  it("never says a level it passed over for having no number did not take the call", () => {
+    // A director with no phone is skipped by the runner; the next level's text
+    // names the one who was rung, and says the skipped one was never called
+    // (review of #514, round 10).
+    const skippedPlan = { ...plan, levels: plan.levels.map((l, i) => (i === 1 ? { ...l, phone: "" } : l)) };
+    const note = attemptNote({ ...base, plan: skippedPlan, levelIndex: 2, attemptNo: 1 });
+    const [rung, skipped] = skippedPlan.levels;
+    expect(note).toContain(`ESCALATED — ${rung.name} did not take this urgent call.`);
+    expect(note).toContain(`${levelLabel(skipped)} has no dialable number on file and was not called.`);
+    expect(note).not.toContain(`${skipped.name} did not take`);
+  });
+
+  it("names every level passed over in a row, in order", () => {
+    const four = { ...plan, levels: [...plan.levels, { ...plan.levels[2], providerId: 92, name: "Provider 92" }] };
+    const skippedPlan = { ...four, levels: four.levels.map((l, i) => (i === 1 || i === 2 ? { ...l, phone: "" } : l)) };
+    const note = attemptNote({ ...base, plan: skippedPlan, levelIndex: 3, attemptNo: 1 });
+    expect(note).toContain(`ESCALATED — ${skippedPlan.levels[0].name} did not take this urgent call.`);
+    expect(note).toContain(
+      `${levelLabel(skippedPlan.levels[1])} and ${levelLabel(skippedPlan.levels[2])} have no dialable number on file and were not called.`,
+    );
   });
 
   it("carries the routing note, so a post-op doubt reaches every level", () => {

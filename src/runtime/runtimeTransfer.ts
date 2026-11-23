@@ -41,7 +41,7 @@ import { decideRoute } from "./onCall/routing";
 import type { OnCallConfig } from "./onCall/config";
 import type { OnCallRunner, WarmOutcome } from "./onCall/runner";
 import type { ChainPlan, RotationData } from "./onCall/rotation";
-import { levelLabel } from "./onCall/rotation";
+import { levelLabel, noNumberNote } from "./onCall/rotation";
 import { storedDetails, type OnCallMode, type OnCallStore, type Query, type RoutingFacts, type StoredDetails } from "./onCall/store";
 import {
   handleBlindDialResult,
@@ -309,12 +309,18 @@ export function rotationMayTakeTheDial(policy: ReturnType<typeof resolveHandoffD
  * the provider, which the reader needs to know when the caller is real
  * (review of #514).
  */
-export function urgentTextRotationNote(plan: ChainPlan, mode: string | undefined): string | undefined {
+export function urgentTextRotationNote(
+  plan: ChainPlan,
+  mode: string | undefined,
+  skipNote?: string,
+): string | undefined {
   const first = plan.levels[0];
   if (!first) return undefined;
-  return mode === "test"
-    ? "[TEST MODE] The on-call rotation is ringing test numbers, not the provider."
-    : `The on-call rotation is ringing ${levelLabel(first)}.`;
+  const ringing =
+    mode === "test"
+      ? "[TEST MODE] The on-call rotation is ringing test numbers, not the provider."
+      : `The on-call rotation is ringing ${levelLabel(first)}.`;
+  return skipNote ? `${ringing} ${skipNote}` : ringing;
 }
 
 /**
@@ -401,9 +407,14 @@ export async function startOnCallRoute(
     log(`[ON-CALL] ${input.callSid}: no level of the chain has a phone; today's path`);
     return null;
   }
-  const routing: RoutingFacts = decision.routing;
+  // dialablePlan drops only a leading run, so the levels passed over are the
+  // first ones. Every text in the chain says so (routing.note heads each one),
+  // the first provider's included (review of #514, round 10).
+  const skipNote = noNumberNote(decision.plan.levels.slice(0, decision.plan.levels.length - plan.levels.length));
+  const alertNote = [decision.alertNote, skipNote].filter(Boolean).join(" ") || undefined;
+  const routing: RoutingFacts = alertNote ? { ...decision.routing, note: alertNote } : decision.routing;
   const first = plan.levels[0];
-  const note = [onCall.config.mode === "test" ? "[TEST MODE]" : "", decision.alertNote ?? ""].filter(Boolean).join(" ");
+  const note = [onCall.config.mode === "test" ? "[TEST MODE]" : "", alertNote ?? ""].filter(Boolean).join(" ");
   const body = buildUrgentTransferSms(
     { callerNumber: input.callerPhone, escalationDetails: input.details, ...(note ? { note } : {}) },
     urgentAlertTime(now()),
@@ -427,12 +438,15 @@ export async function startOnCallRoute(
     details: storedDetails(input.details),
     levelStartedAt: now(),
     preDialSms: sent,
+    ...(skipNote ? { skipNote } : {}),
   };
 }
 
 interface OnCallRun {
   plan: ChainPlan;
   routing: RoutingFacts;
+  /** The levels the dial passed over for having no number, as a sentence. */
+  skipNote?: string;
   details: StoredDetails | null;
   levelStartedAt: Date;
   preDialSms: Promise<{ ok: boolean; sid: string | null; at: Date }>;
@@ -966,7 +980,7 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
           // With the rotation ringing, the dial happens even when the policy
           // had no number of its own (clinical_destination_not_configured).
           if ((policy.allowed && policy.policy !== "pcp") || holder.run) {
-            const note = holder.run ? urgentTextRotationNote(holder.run.plan, onCall?.config.mode) : undefined;
+            const note = holder.run ? urgentTextRotationNote(holder.run.plan, onCall?.config.mode, holder.run.skipNote) : undefined;
             urgentAlerts.smsBeforeDial({
               callerNumber: metadata.callerPhone,
               escalationDetails: details,

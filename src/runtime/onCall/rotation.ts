@@ -285,6 +285,21 @@ export function levelLabel(level: Pick<ChainLevel, "role" | "name">): string {
 }
 
 /**
+ * What a text says about levels the chain passed over because they have no
+ * number to ring, so a provider is never told someone "did not take" a call
+ * that never rang them, and knows who was skipped (review of #514, round 10).
+ * Undefined when nothing was skipped.
+ */
+export function noNumberNote(levels: readonly Pick<ChainLevel, "role" | "name">[]): string | undefined {
+  if (levels.length === 0) return undefined;
+  const labels = levels.map(levelLabel);
+  const who = labels.length === 1 ? labels[0] : `${labels.slice(0, -1).join(", ")} and ${labels[labels.length - 1]}`;
+  return labels.length === 1
+    ? `${who} has no dialable number on file and was not called.`
+    : `${who} have no dialable number on file and were not called.`;
+}
+
+/**
  * The levels, in order, with no provider twice. `first` is the on-call
  * provider or a post-op patient's surgeon; the region whose director comes
  * next is that provider's own.
