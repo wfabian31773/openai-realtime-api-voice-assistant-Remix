@@ -1244,6 +1244,34 @@ describe("what keeps the chain moving when something goes wrong", () => {
     expect(new Set(warm.map((x) => x.escalationId))).toEqual(new Set([a!.id]));
   });
 
+  // Review of #514, round 15: the hand-off no longer waits on the pre-dial
+  // text's record; the runner opens the chain and logs the text when it lands.
+  it("opens the chain without the pre-dial text's record, and logs the text once it lands", async () => {
+    const h = harness();
+    let land: (v: { ok: boolean; sid: string | null; at: Date } | null) => void = () => undefined;
+    const late = new Promise<{ ok: boolean; sid: string | null; at: Date } | null>((ok) => (land = ok));
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer", { preDialSms: null, preDialSmsLate: late }));
+    expect(esc?.status).toBe("active");
+    const kinds = () => [...h.store.attempts.values()].map((a) => a.kind);
+    expect(kinds()).toEqual(["warm_transfer"]);
+    land({ ok: true, sid: "SMlate", at: WED_NIGHT });
+    await vi.waitFor(() => expect(kinds()).toEqual(["warm_transfer", "sms"]));
+    const sms = [...h.store.attempts.values()].find((a) => a.kind === "sms")!;
+    expect(sms).toMatchObject({ outcome: "sent", smsSid: "SMlate", levelIndex: 0, attemptNo: 1, escalationId: esc!.id });
+  });
+
+  it("logs no text row when the late record never arrived", async () => {
+    const h = harness();
+    const esc = await h.runner.afterInCallTransfer(
+      inCall(wedPlan(), "no_answer", { preDialSms: null, preDialSmsLate: Promise.resolve(null) }),
+    );
+    expect(esc?.status).toBe("active");
+    await vi.waitFor(() =>
+      expect(h.log.mock.calls.map((c) => String(c[0])).join("\n")).toMatch(/had no result in time; its record is not logged/),
+    );
+    expect([...h.store.attempts.values()].map((a) => a.kind)).toEqual(["warm_transfer"]);
+  });
+
   it("skips a level with no phone number straight to the next level, with no retry wait", async () => {
     const h = harness();
     const plan = wedPlan();

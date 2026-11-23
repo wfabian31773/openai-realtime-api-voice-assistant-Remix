@@ -123,6 +123,12 @@ export interface InCallTransferResult {
   levelStartedAt: Date;
   /** The full-details text sent to level 0 before the in-call dial. */
   preDialSms?: { ok: boolean; sid: string | null; at: Date } | null;
+  /**
+   * The same text's record when it had not settled at the hand-off: logged
+   * once it does (null when it never did), never waited on, so the chain opens
+   * without it (review of #514, round 15).
+   */
+  preDialSmsLate?: Promise<{ ok: boolean; sid: string | null; at: Date } | null>;
 }
 
 /** What a throw inside `ringLevel` left behind: the call's attempt, and whether Twilio has the call. */
@@ -827,17 +833,16 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
             mode: r.mode,
             routingReason: r.routing.reason,
           };
-          if (r.preDialSms) {
-            await store.logAttempt({
-              ...base,
-              kind: "sms",
-              dialedTo: first.phone,
-              outcome: r.preDialSms.ok ? "sent" : "send_failed",
-              smsSid: r.preDialSms.sid,
-              endedAt: r.preDialSms.at,
-            });
-          }
-          return await store.logAttempt({
+          const smsRow = (sms: { ok: boolean; sid: string | null; at: Date }) => ({
+            ...base,
+            kind: "sms" as const,
+            dialedTo: first.phone,
+            outcome: sms.ok ? ("sent" as const) : ("send_failed" as const),
+            smsSid: sms.sid,
+            endedAt: sms.at,
+          });
+          if (r.preDialSms) await store.logAttempt(smsRow(r.preDialSms));
+          const warmRow = await store.logAttempt({
             ...base,
             kind: "warm_transfer",
             dialedTo: r.warm.dialedTo,
@@ -845,6 +850,18 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
             providerCallSid: r.warm.providerCallSid ?? null,
             endedAt: r.warm.endedAt,
           });
+          if (!r.preDialSms && r.preDialSmsLate) {
+            // Logged when it lands; the chain is not held for it.
+            void r.preDialSmsLate
+              .then(async (sms) => {
+                if (sms) await store.logAttempt(smsRow(sms));
+                else log(`[ON-CALL] ${r.callSid}: the text to level 0 had no result in time; its record is not logged`);
+              })
+              .catch((e) =>
+                log(`[ON-CALL] ${r.callSid}: the text to level 0 could not be logged: ${(e as Error)?.message ?? e}`),
+              );
+          }
+          return warmRow;
         };
 
         if (!opened) {

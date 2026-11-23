@@ -283,12 +283,38 @@ describe("an urgent after-hours call with the rotation on", () => {
     clock = answered;
     transfer.handleAccept(signed(TRANSFER_ACCEPT_PATH, { CallSid: "CAoffice", Digits: "1" }));
     await outcome;
-    // The text's record settles nine seconds later.
+    // The chain is handed over before the text's record is in (round 15).
+    await vi.waitFor(() => expect(built.handed).toHaveLength(1));
+    expect(built.handed[0].preDialSms ?? null).toBeNull();
+    // The text's record settles nine seconds later and reaches the runner late.
     clock = new Date(answered.getTime() + 9_000);
     release();
-    await vi.waitFor(() => expect(built.handed).toHaveLength(1));
     expect(built.handed[0].warm.endedAt.getTime()).toBe(answered.getTime());
-    expect(built.handed[0].preDialSms?.ok).toBe(true);
+    expect((await built.handed[0].preDialSmsLate)?.ok).toBe(true);
+  });
+
+  // Review of #514, round 15: the hand-off waited up to 10 s for the text's
+  // record before it opened the chain, so a slow send made the agent's 2 s
+  // read miss a chain the runner opened a few seconds later.
+  it("says the team is being paged when the text to level 0 never answers", async () => {
+    const { ops } = fakeOps();
+    const built = buildWiring();
+    built.wiring.handoffResultWaitMs = 300;
+    built.wiring.sendSms = (input) => {
+      built.texts.push({ ...input, at: Date.now() });
+      return new Promise(() => undefined);
+    };
+    const rec = recordingAlerts();
+    const transfer = transferWith(ops, built.wiring, rec.alerts);
+    urgent();
+    const outcome = transfer.handoffFor("no-ivr", META)();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1), { timeout: 5_000 });
+    transfer.handleStatus(signed(TRANSFER_STATUS_PATH, { CallSid: "CAoffice", CallStatus: "no-answer" }));
+    await expect(outcome).rejects.toThrow(/^handoff_failed:CHAIN_STARTED$/);
+    expect(rec.tickets[0]).toMatchObject({ onCallChain: true });
+    expect(built.handed).toHaveLength(1);
+    expect(built.handed[0].preDialSms ?? null).toBeNull();
+    expect(built.handed[0].preDialSmsLate).toBeInstanceOf(Promise);
   });
 
   // Review of #514, round 9: a dial that threw after the rotation took it

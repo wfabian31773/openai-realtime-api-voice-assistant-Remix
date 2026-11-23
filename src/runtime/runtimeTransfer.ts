@@ -1217,7 +1217,12 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
           }, settleMs);
           (bound as { unref?: () => void }).unref?.();
           return (async () => {
-            const preDialSms = await settleWithin(handed.preDialSms, PRE_DIAL_SMS_RECORD_MS);
+            // The text's record is read now if it is in, and handed over late
+            // if not: the runner opens the chain without waiting on it, so a
+            // slow or hung send never makes the agent's 2 s read of this
+            // hand-off miss a chain the runner opens a few seconds later
+            // (review of #514, round 15).
+            const preDialSms = await settleWithin(handed.preDialSms, 0);
             const row = await onCall.runner.afterInCallTransfer({
               callSid: metadata.callSid,
               mode: onCall.config.mode as OnCallMode,
@@ -1227,6 +1232,7 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
               callerNumber: metadata.callerPhone ?? null,
               levelStartedAt: handed.levelStartedAt,
               preDialSms,
+              ...(preDialSms ? {} : { preDialSmsLate: settleWithin(handed.preDialSms, PRE_DIAL_SMS_RECORD_MS) }),
               warm: {
                 outcome: warmOutcomeFor(outcome),
                 dialedTo: handed.plan.levels[0].phone,
