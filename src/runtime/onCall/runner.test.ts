@@ -226,7 +226,8 @@ describe("the cadence (success criterion: retry plus nudge within 5 minutes, the
       [1, "region_director", "sms", 1, "sent"],
       [1, "region_director", "call", 1, "no_answer"],
       [1, "region_director", "nudge_sms", 2, "sent"],
-      [1, "region_director", "call", 2, "no_answer"],
+      // picked up and hung up with no key pressed: declined, and the chain moves on
+      [1, "region_director", "call", 2, "declined"],
       [2, "final", "sms", 1, "sent"],
       [2, "final", "call", 1, "busy"],
       [2, "final", "nudge_sms", 2, "sent"],
@@ -770,7 +771,8 @@ describe("what keeps the chain moving when something goes wrong", () => {
     expect(outcomeForCallStatus("ringing")).toBeNull();
     expect(outcomeForCallStatus("in-progress")).toBeNull();
     expect(outcomeForCallStatus("no-answer")).toBe("no_answer");
-    expect(outcomeForCallStatus("completed")).toBe("no_answer");
+    // Picked up and ended with no key pressed: the ack webhook's own reading.
+    expect(outcomeForCallStatus("completed")).toBe("declined");
     expect(outcomeForCallStatus("busy")).toBe("busy");
     expect(outcomeForCallStatus("failed")).toBe("failed");
     expect(outcomeForCallStatus("canceled")).toBe("failed");

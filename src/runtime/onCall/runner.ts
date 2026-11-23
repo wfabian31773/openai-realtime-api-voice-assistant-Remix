@@ -150,10 +150,19 @@ export interface OnCallRunner {
   stop(): void;
 }
 
-/** Twilio's terminal call status, as an attempt outcome. Anything else is ignored. */
+/**
+ * Twilio's terminal call status, as an attempt outcome. Anything else is ignored.
+ *
+ * `completed` means the phone was picked up (by a person or a voicemail) and
+ * the call ended with no key pressed, usually a hang-up during the prompt: the
+ * same `declined` the key-press webhook records for a pickup that presses
+ * nothing, not a call that rang out (review of #514, round 8). A pickup that
+ * pressed a key was already ended as `accepted`, so this status moves nothing.
+ */
 export function outcomeForCallStatus(status: string): Exclude<AttemptOutcome, "in_progress"> | null {
   switch (status) {
     case "completed":
+      return "declined";
     case "no-answer":
       return "no_answer";
     case "busy":

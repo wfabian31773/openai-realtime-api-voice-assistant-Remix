@@ -461,7 +461,9 @@ WHERE call_sid = '<CallSid>';
 
 `role` is `on_call`, `surgeon`, `region_director` or `final`. `kind` is
 `warm_transfer`, `call`, `sms` or `nudge_sms`. `outcome` is `accepted`,
-`no_answer`, `declined`, `busy`, `failed`, `no_status`, `taken_elsewhere`
+`no_answer` (it rang out), `declined` (the phone was picked up, by a person
+or a voicemail, and no key was pressed, including a hang-up during the
+prompt), `busy`, `failed`, `no_status`, `taken_elsewhere`
 (another of our calls took the patient first, and this one was hung up),
 `sent`, `send_failed` or `in_progress`. The patient details and the caller's number are kept on the
 escalation only while someone is being paged, and are erased when it closes.
