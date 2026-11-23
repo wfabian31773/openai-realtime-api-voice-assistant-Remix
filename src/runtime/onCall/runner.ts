@@ -597,6 +597,7 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
       const accepted = r.warm.outcome === "accepted";
       const takenBy = { acceptedBy: storedProviderId(first.providerId), acceptedAt: r.warm.endedAt };
       let opened: EscalationRow | null = null;
+      let joined: EscalationRow | null = null;
       let warm: AttemptRow | null = null;
       try {
         opened = await store.openEscalation({
@@ -618,36 +619,70 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
           levelStartedAt: r.levelStartedAt,
           attemptNo: 2,
         });
-        if (!opened) return await store.getEscalationByCall(r.callSid);
-
-        const base = {
-          escalationId: opened.id,
-          callSid: r.callSid,
-          levelIndex: 0,
-          role: first.role,
-          providerId: storedProviderId(first.providerId),
-          attemptNo: 1,
-          mode: r.mode,
-          routingReason: r.routing.reason,
-        };
-        if (r.preDialSms) {
-          await store.logAttempt({
+        const logHandOff = async (escalationId: number): Promise<AttemptRow> => {
+          const base = {
+            escalationId,
+            callSid: r.callSid,
+            levelIndex: 0,
+            role: first.role,
+            providerId: storedProviderId(first.providerId),
+            attemptNo: 1,
+            mode: r.mode,
+            routingReason: r.routing.reason,
+          };
+          if (r.preDialSms) {
+            await store.logAttempt({
+              ...base,
+              kind: "sms",
+              dialedTo: first.phone,
+              outcome: r.preDialSms.ok ? "sent" : "send_failed",
+              smsSid: r.preDialSms.sid,
+              endedAt: r.preDialSms.at,
+            });
+          }
+          return await store.logAttempt({
             ...base,
-            kind: "sms",
-            dialedTo: first.phone,
-            outcome: r.preDialSms.ok ? "sent" : "send_failed",
-            smsSid: r.preDialSms.sid,
-            endedAt: r.preDialSms.at,
+            kind: "warm_transfer",
+            dialedTo: r.warm.dialedTo,
+            outcome: r.warm.outcome,
+            providerCallSid: r.warm.providerCallSid ?? null,
+            endedAt: r.warm.endedAt,
           });
+        };
+
+        if (!opened) {
+          /**
+           * THIS CALL'S CHAIN WAS ALREADY OPEN, so this hand-off opened
+           * nothing (review of #514, round 8). Reached when the call's chain
+           * claim was released after `HANDOFF_SETTLE_MS` while the first
+           * hand-off's open was still in flight, and a second escalation then
+           * rang level 0 again. Its text and its call are still logged, on
+           * the open chain, because they happened. The answer is the open
+           * chain only while it is paging: a chain somebody has taken is
+           * closed here rather than reported as carrying on, and when this
+           * hand-off's own call was taken, the open chain is closed on it.
+           */
+          const existing = await store.getEscalationByCall(r.callSid);
+          joined = existing;
+          if (!existing) {
+            log(`[ON-CALL] ${r.callSid}: the escalation could not be opened and none is on record; nothing is carried on`);
+            return null;
+          }
+          log(
+            `[ON-CALL] ${r.callSid}: this call's chain was already open (escalation ${existing.id}); this hand-off opened nothing and its attempts are logged on that chain`,
+          );
+          warm = await logHandOff(existing.id);
+          if (existing.status !== "active") return existing;
+          if (accepted) return await settleAccepted(existing.id, warm, takenBy);
+          const taken = await acceptedAttempt(existing);
+          if (taken) {
+            const { row } = await closeAsTaken(existing.id, taken);
+            return row ?? (await store.getEscalation(existing.id));
+          }
+          return existing;
         }
-        warm = await store.logAttempt({
-          ...base,
-          kind: "warm_transfer",
-          dialedTo: r.warm.dialedTo,
-          outcome: r.warm.outcome,
-          providerCallSid: r.warm.providerCallSid ?? null,
-          endedAt: r.warm.endedAt,
-        });
+
+        warm = await logHandOff(opened.id);
 
         if (!accepted) {
           log(`[ON-CALL] ${r.callSid}: the transfer was not taken (${r.warm.outcome}); the chain will carry on`);
@@ -657,11 +692,13 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
       } catch (err) {
         log(`[ON-CALL] ${r.callSid}: the escalation could not be recorded: ${(err as Error)?.message ?? err}`);
         if (accepted) {
-          // The provider has the patient. Close what was opened, best effort;
-          // nothing is rung either way.
-          if (opened) {
+          // The provider has the patient. Close what was opened, or the
+          // open chain this hand-off joined, best effort; nothing is rung
+          // either way.
+          const chain = opened ?? joined;
+          if (chain) {
             try {
-              await settleAccepted(opened.id, warm, takenBy);
+              await settleAccepted(chain.id, warm, takenBy);
             } catch (again) {
               log(`[ON-CALL] ${r.callSid}: the taken transfer's escalation is still open: ${(again as Error)?.message ?? again}`);
             }
@@ -674,6 +711,13 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
             `[ON-CALL] ${r.callSid}: the chain is open and carries on; its first attempt may be missing from on_call_attempts`,
           );
           return opened;
+        } else if (joined) {
+          // Another hand-off's chain is open for this call, so the urgent
+          // number is not told the escalation could not start. Whether it is
+          // still paging was not confirmed, so nothing says it is.
+          log(
+            `[ON-CALL] ${r.callSid}: this call's chain (escalation ${joined.id}) is open; this hand-off's attempts may be missing from on_call_attempts`,
+          );
         } else {
           const note =
             (r.mode === "test" ? "[TEST MODE] " : "") +

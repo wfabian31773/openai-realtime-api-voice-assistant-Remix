@@ -1390,3 +1390,110 @@ describe("one row that never answers holds no other row (review, 2026-11-23)", (
     expect(h.escalation()).toMatchObject({ phase: "ringing", attemptNo: 2 });
   });
 });
+
+describe("a second hand-off on a call whose chain is already open (review of #514, round 8)", () => {
+  // Reached when the call's chain claim was released after HANDOFF_SETTLE_MS
+  // while the first hand-off was still writing, and a second escalation rang
+  // level 0 again. The second hand-off opens nothing.
+  const kinds = (h: ReturnType<typeof harness>, escalationId: number) =>
+    [...h.store.attempts.values()].filter((a) => a.escalationId === escalationId).map((a) => `${a.kind}:${a.outcome}`);
+
+  it("answers the open chain while it is paging, opens no second row, and logs its text and call on that chain", async () => {
+    const h = harness();
+    const plan = wedPlan();
+    const first = await h.runner.afterInCallTransfer(inCall(plan, "no_answer"));
+    const second = await h.runner.afterInCallTransfer(inCall(plan, "busy"));
+    expect(h.store.escalations.size).toBe(1);
+    expect(second).toMatchObject({ id: first!.id, status: "active" });
+    expect(kinds(h, first!.id)).toEqual(["sms:sent", "warm_transfer:no_answer", "sms:sent", "warm_transfer:busy"]);
+    const lines = h.log.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(lines).toMatch(/this call's chain was already open \(escalation \d+\); this hand-off opened nothing/);
+  });
+
+  it("does not answer a chain somebody has already taken as carrying on; it closes it", async () => {
+    const h = harness();
+    const plan = wedPlan();
+    const first = await h.runner.afterInCallTransfer(inCall(plan, "no_answer"));
+    // A taken attempt whose close never landed: the row still reads active.
+    const taken = await h.store.logAttempt({
+      escalationId: first!.id,
+      callSid: SID,
+      levelIndex: 0,
+      role: "on_call",
+      providerId: null,
+      kind: "call",
+      attemptNo: 2,
+      mode: "live",
+      dialedTo: plan.levels[0].phone,
+      outcome: "accepted",
+      endedAt: h.now(),
+    });
+    expect(h.escalation().status).toBe("active");
+    const second = await h.runner.afterInCallTransfer(inCall(plan, "no_answer"));
+    expect(second?.status).toBe("accepted");
+    expect(second?.acceptedAttemptId).toBe(taken.id);
+    expect(h.escalation()).toMatchObject({ status: "accepted", acceptedAttemptId: taken.id });
+  });
+
+  it("closes the open chain on this hand-off's call when this provider took the patient, and hangs up the chain's ringing call", async () => {
+    const h = harness();
+    const plan = wedPlan();
+    const first = await h.runner.afterInCallTransfer(inCall(plan, "no_answer"));
+    h.at(first!.nextAt!);
+    await h.runner.tick(); // the chain's own retry is ringing
+    const ringing = h.lastCallAttempt();
+    expect(ringing.outcome).toBe("in_progress");
+    const second = await h.runner.afterInCallTransfer(inCall(plan, "accepted"));
+    const warm = [...h.store.attempts.values()].filter((a) => a.kind === "warm_transfer").pop()!;
+    expect(warm.outcome).toBe("accepted");
+    expect(second).toMatchObject({ id: first!.id, status: "accepted", acceptedAttemptId: warm.id });
+    expect(h.store.attempts.get(ringing.id)?.outcome).toBe("taken_elsewhere");
+    expect(h.hungUp).toEqual([ringing.providerCallSid]);
+  });
+
+  it("answers a finished chain as it is, still logging this hand-off's attempts on it", async () => {
+    const h = harness();
+    const plan = wedPlan();
+    const first = await h.runner.afterInCallTransfer(inCall(plan, "accepted"));
+    expect(first?.status).toBe("accepted");
+    const second = await h.runner.afterInCallTransfer(inCall(plan, "no_answer"));
+    expect(second?.status).toBe("accepted");
+    expect(kinds(h, first!.id)).toEqual(["sms:sent", "warm_transfer:accepted", "sms:sent", "warm_transfer:no_answer"]);
+  });
+
+  it("does not text the urgent number that the escalation could not start when its attempts cannot be logged on the open chain", async () => {
+    const h = harness();
+    const plan = wedPlan();
+    await h.runner.afterInCallTransfer(inCall(plan, "no_answer"));
+    h.store.logAttempt = async () => {
+      throw new Error("hub blip");
+    };
+    const second = await h.runner.afterInCallTransfer(inCall(plan, "no_answer"));
+    expect(second).toBeNull();
+    expect(h.urgent).toEqual([]);
+    expect(h.escalation().status).toBe("active");
+    const lines = h.log.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(lines).toMatch(/is open; this hand-off's attempts may be missing/);
+  });
+
+  it("still closes the open chain when this hand-off's call was taken and its attempts cannot be logged", async () => {
+    const h = harness();
+    const plan = wedPlan();
+    await h.runner.afterInCallTransfer(inCall(plan, "no_answer"));
+    h.store.logAttempt = async () => {
+      throw new Error("hub blip");
+    };
+    await h.runner.afterInCallTransfer(inCall(plan, "accepted"));
+    expect(h.escalation().status).toBe("accepted");
+    expect(h.urgent).toEqual([]);
+  });
+
+  it("opens nothing and answers nothing when the open fails to land and no row is on record", async () => {
+    const h = harness();
+    const plan = wedPlan();
+    h.store.openEscalation = async () => null;
+    const r = await h.runner.afterInCallTransfer(inCall(plan, "no_answer"));
+    expect(r).toBeNull();
+    expect(h.store.attempts.size).toBe(0);
+  });
+});
