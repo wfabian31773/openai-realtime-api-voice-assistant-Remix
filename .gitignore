@@ -150,3 +150,7 @@ replay-out/
 # Written at build time by scripts/write-build-info.cjs; never committed (a
 # committed copy reported 3f4ec74 as the deployed SHA for two months).
 build-info.json
+
+# The on-call rotation files hold provider phones and emails; keep them out of git.
+On_Call_*.csv
+on-call-*.sql

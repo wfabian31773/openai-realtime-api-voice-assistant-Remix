@@ -23,7 +23,7 @@
  * lunch closure, caller-type gates, env-configured numbers. The model never
  * supplies a number on either path.
  */
-import { escalationDetailsMap } from "../services/escalationStore";
+import { escalationDetailsMap, type EscalationDetails } from "../services/escalationStore";
 import { resolveHandoffDestination } from "../services/handoffPolicy";
 import { buildPcpTransferBriefing } from "../services/warmTransferBriefing";
 import {
@@ -35,7 +35,13 @@ import {
 import { ACCEPT_WINDOW_MS, conferenceNameFor, performWarmTransfer } from "./warmTransfer";
 import { performBlindTransfer } from "./blindTransfer";
 import { defaultUrgentTransferAlerts, type UrgentTransferAlerts } from "./urgentTransferAlerts";
-import { URGENT_TRANSFER_NOT_ANSWERED } from "../services/urgentTransferAlert";
+import { URGENT_TRANSFER_NOT_ANSWERED, buildUrgentTransferSms, urgentAlertTime } from "../services/urgentTransferAlert";
+import { verifiedIdentityFor } from "../tools/verifiedIdentity";
+import { decideRoute } from "./onCall/routing";
+import type { OnCallConfig } from "./onCall/config";
+import type { OnCallRunner, WarmOutcome } from "./onCall/runner";
+import type { ChainPlan, RotationData } from "./onCall/rotation";
+import { storedDetails, type OnCallMode, type OnCallStore, type Query, type RoutingFacts, type StoredDetails } from "./onCall/store";
 import {
   handleBlindDialResult,
   type PendingBlindDial,
@@ -163,7 +169,156 @@ export interface RuntimeTransferOptions {
    * moved here on 2026-10-01 without either.
    */
   urgentAlerts?: UrgentTransferAlerts;
+  /**
+   * THE AFTER-HOURS ON-CALL ROTATION (v268). When present and switched on
+   * (`ON_CALL_ROTATION=test|live`), an urgent call on the after-hours lanes
+   * rings the week's on-call provider (or a post-op patient's surgeon) instead
+   * of `HUMAN_AGENT_NUMBER`, texts them the full details first, and hands what
+   * happened to the runner, which retries, nudges and escalates to the region's
+   * medical director and then the final director. Absent or off: today's path,
+   * byte for byte. See `docs/ON_CALL_ROTATION.md`.
+   */
+  onCall?: OnCallTransferWiring;
   log?: (line: string) => void;
+}
+
+/** What the transfer needs from the on-call system. Injected so tests see it. */
+export interface OnCallTransferWiring {
+  runner: Pick<OnCallRunner, "afterInCallTransfer">;
+  config: OnCallConfig;
+  store: Pick<OnCallStore, "available" | "loadRotation">;
+  rotation: { get(): Promise<RotationData> };
+  /** The Console query, or null when the Console is not configured. */
+  consoleQuery: Query | null;
+  /** The call's CERTAIN identity's person_id. Default: the identity store. */
+  personIdFor?: (callSid: string) => string | undefined;
+  sendSms(input: { to: string; from: string; body: string }): Promise<{ sid: string }>;
+  now?: () => Date;
+}
+
+/** The lanes whose urgent calls go to the on-call rotation: the after-hours family. */
+export const ON_CALL_LANES: ReadonlySet<string> = new Set(["no-ivr", "no-ivr-v2", "dev-no-ivr"]);
+
+/** How long the dial waits for the full-details text to be accepted before it rings. */
+export const PRE_DIAL_SMS_WAIT_MS = 2_000;
+/** How long the runner hand-off waits for that text's answer before recording it as unknown. */
+export const PRE_DIAL_SMS_RECORD_MS = 10_000;
+
+const E164 = /^\+\d{10,15}$/;
+
+/** The warm transfer's outcome, in the runner's words. */
+export function warmOutcomeFor(outcome: TransferOutcome): WarmOutcome {
+  if (outcome.ok) return "accepted";
+  if (outcome.status === "NO_ANSWER") return "no_answer";
+  if (outcome.status === "DECLINED") return "declined";
+  return "failed";
+}
+
+/**
+ * The plan the in-call dial uses: leading levels with no usable phone are
+ * dropped (and said so in the notes), because the in-call dial needs a number
+ * to ring now and the runner cannot ring a level with none either. Null when
+ * no level has a phone, so the call takes today's path.
+ */
+export function dialablePlan(plan: ChainPlan): ChainPlan | null {
+  const first = plan.levels.findIndex((l) => E164.test(l.phone));
+  if (first < 0) return null;
+  if (first === 0) return plan;
+  const dropped = plan.levels.slice(0, first).map((l) => `first_level_no_phone:${l.role}:${l.providerId}`);
+  return { levels: plan.levels.slice(first), notes: [...plan.notes, ...dropped] };
+}
+
+function settleWithin<T>(p: Promise<T>, ms: number): Promise<T | null> {
+  let timer: NodeJS.Timeout | undefined;
+  return Promise.race([
+    p.finally(() => timer && clearTimeout(timer)),
+    new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), ms);
+    }),
+  ]);
+}
+
+/**
+ * Route one urgent after-hours call through the rotation, or answer null for
+ * today's path. Never throws. On a rotation route the full-details text has
+ * been started to the first level (raced against `PRE_DIAL_SMS_WAIT_MS`, so a
+ * slow send never holds the dial) and the plan is the one the dial uses.
+ */
+export async function startOnCallRoute(
+  onCall: OnCallTransferWiring,
+  input: {
+    callSid: string;
+    callerPhone?: string;
+    details: EscalationDetails | undefined;
+  },
+  log: (line: string) => void,
+): Promise<OnCallRun | null> {
+  const now = onCall.now ?? (() => new Date());
+  const personIdFor = onCall.personIdFor ?? ((sid: string) => verifiedIdentityFor(sid)?.personId);
+  let decision: Awaited<ReturnType<typeof decideRoute>>;
+  try {
+    let personId: string | undefined;
+    try {
+      personId = personIdFor(input.callSid);
+    } catch {
+      personId = undefined;
+    }
+    decision = await decideRoute({
+      at: now(),
+      config: onCall.config,
+      store: onCall.store,
+      rotation: onCall.rotation,
+      personId,
+      consoleQuery: onCall.consoleQuery,
+    });
+  } catch (e) {
+    log(`[ON-CALL] routing threw for ${input.callSid}; today's path: ${(e as Error)?.message ?? e}`);
+    return null;
+  }
+  if (decision.kind === "legacy") {
+    log(`[ON-CALL] ${input.callSid}: today's path (${decision.because})`);
+    return null;
+  }
+  const plan = dialablePlan(decision.plan);
+  if (!plan) {
+    log(`[ON-CALL] ${input.callSid}: no level of the chain has a phone; today's path`);
+    return null;
+  }
+  const routing: RoutingFacts = decision.routing;
+  const first = plan.levels[0];
+  const note = [onCall.config.mode === "test" ? "[TEST MODE]" : "", decision.alertNote ?? ""].filter(Boolean).join(" ");
+  const body = buildUrgentTransferSms(
+    { callerNumber: input.callerPhone, escalationDetails: input.details, ...(note ? { note } : {}) },
+    urgentAlertTime(now()),
+  );
+  const sent: Promise<{ ok: boolean; sid: string | null; at: Date }> = onCall
+    .sendSms({ to: first.phone, from: onCall.config.callerId, body })
+    .then(
+      (r) => ({ ok: true, sid: r.sid ?? null, at: now() }),
+      (e) => {
+        log(`[ON-CALL] ${input.callSid}: the text to level 0 failed: ${(e as Error)?.message ?? e}`);
+        return { ok: false, sid: null, at: now() };
+      },
+    );
+  await settleWithin(sent, PRE_DIAL_SMS_WAIT_MS);
+  log(
+    `[ON-CALL] ${input.callSid}: ${onCall.config.mode} rotation, ${routing.reason}, ${plan.levels.length} level(s), first ${first.role}:${first.providerId}`,
+  );
+  return {
+    plan,
+    routing,
+    details: storedDetails(input.details),
+    levelStartedAt: now(),
+    preDialSms: sent,
+  };
+}
+
+interface OnCallRun {
+  plan: ChainPlan;
+  routing: RoutingFacts;
+  details: StoredDetails | null;
+  levelStartedAt: Date;
+  preDialSms: Promise<{ ok: boolean; sid: string | null; at: Date }>;
 }
 
 export interface RuntimeTransfer {
@@ -455,6 +610,7 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
 
   const ops = options.ops ?? defaultOps(env, log);
   const urgentAlerts = options.urgentAlerts ?? defaultUrgentTransferAlerts(env, log);
+  const onCall = options.onCall;
   const accepts = new TransferAcceptRegistry({ windowMs: ACCEPT_WINDOW_MS, log });
   /** officeCallSid -> the conference its caller will be sent to. Written when
    * the wait begins, read by the accept webhook BEFORE the settle, dropped
@@ -531,8 +687,13 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
       let dialStartedAt = Date.now();
       let attemptId: TransferAttemptId = newTransferAttemptId();
       const mode = transferModeFor(slug, env);
+      /** The on-call chain this call's dial started, read by settle(). */
+      let onCallRun: OnCallRun | null = null;
+      /** One chain per call: a second escalation never starts another. */
+      let chainStarted = false;
       const attempt = async (): Promise<TransferOutcome> => {
         attemptId = newTransferAttemptId();
+        onCallRun = null;
         try {
           // Before anything dials: the whole attempt — dial, briefing,
           // keypress — is bounded by the accept window, and the bridge's
@@ -561,6 +722,35 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
           });
           if (!policy.allowed) {
             log(`[runtime-xfer] policy refused ${slug}/${metadata.callId}: ${policy.reason}`);
+          }
+          /**
+           * THE ON-CALL ROTATION (v268). On the after-hours lanes, once the
+           * policy has sanctioned a clinical dial, the rotation decides WHO is
+           * rung: the week's on-call provider, or a post-op patient's surgeon,
+           * with the full details texted to them first (spec a). Anything the
+           * rotation cannot answer (switched off, tables absent, weekday
+           * daytime, no level with a phone) leaves today's path untouched.
+           */
+          const onCallEligible =
+            onCall !== undefined &&
+            onCall.config.mode !== "off" &&
+            ON_CALL_LANES.has(slug) &&
+            policy.allowed &&
+            policy.policy !== "pcp" &&
+            mode !== "blind";
+          if (onCallEligible && chainStarted) {
+            log(`[ON-CALL] ${metadata.callSid}: a chain is already running for this call; not dialling again`);
+            return { ok: false, status: "UNAVAILABLE", reason: "on_call_chain_already_running" };
+          }
+          if (onCallEligible && onCall) {
+            onCallRun = await startOnCallRoute(
+              onCall,
+              { callSid: metadata.callSid, callerPhone: metadata.callerPhone, details },
+              log,
+            );
+            if (onCallRun) chainStarted = true;
+            // The ring is timed from the dial, not from the routing read.
+            dialStartedAt = Date.now();
           }
           /**
            * THE HEADS-UP TEXT, BEFORE THE PHONE RINGS — the old core's
@@ -629,10 +819,15 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
             }
             return blindOutcome;
           }
+          const run = onCallRun as OnCallRun | null;
+          const warmDestination = run ? run.plan.levels[0].phone : policy.allowed ? policy.destination : null;
+          // Never the operator line: the rotation's caller ID is validated E.164
+          // (config.ts), and today's path keeps today's number.
+          const warmFrom = run ? onCall!.config.callerId : env.TWILIO_PHONE_NUMBER ?? "";
           return await performWarmTransfer(
             {
               callerCallSid: metadata.callSid,
-              destination: policy.allowed ? policy.destination : null,
+              destination: warmDestination,
               briefing: briefingFor(slug, metadata, details),
             },
             {
@@ -666,8 +861,8 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
               },
               acceptUrl,
               statusUrl,
-              fromNumber: env.TWILIO_PHONE_NUMBER ?? "",
-              callerId: env.TWILIO_PHONE_NUMBER,
+              fromNumber: warmFrom,
+              callerId: run ? warmFrom : env.TWILIO_PHONE_NUMBER,
               /**
                * NO PROVISIONAL RECORD HERE ANY MORE. It existed so a success
                * would survive teardown beating the settle — and teardown no
@@ -723,6 +918,40 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
         const briefed = escalationDetailsMap.get(metadata.callId);
         const briefing = { gaps: briefed?.briefingGaps, asked: briefed?.askedBeforeDial };
         const outcome = await attempt();
+        /**
+         * HAND THE CHAIN TO THE RUNNER (v268). The in-call dial was level 0's
+         * first attempt; the runner records it and, when nobody took the
+         * patient, retries and nudges inside five minutes of the call and then
+         * escalates (spec c to f). Not awaited: the caller is waiting on the
+         * agent's next words, and the runner's Hub writes must never sit in
+         * front of them. A pickup closes the chain (spec d).
+         */
+        const run = onCallRun as OnCallRun | null;
+        if (run && onCall) {
+          const handed = run;
+          const now = onCall.now ?? (() => new Date());
+          void (async () => {
+            const preDialSms = await settleWithin(handed.preDialSms, PRE_DIAL_SMS_RECORD_MS);
+            await onCall.runner.afterInCallTransfer({
+              callSid: metadata.callSid,
+              mode: onCall.config.mode as OnCallMode,
+              plan: handed.plan,
+              routing: handed.routing,
+              details: handed.details,
+              callerNumber: metadata.callerPhone ?? null,
+              levelStartedAt: handed.levelStartedAt,
+              preDialSms,
+              warm: {
+                outcome: warmOutcomeFor(outcome),
+                dialedTo: handed.plan.levels[0].phone,
+                endedAt: now(),
+                providerCallSid: outcome.ok ? (outcome.officeCallSid ?? null) : null,
+              },
+            });
+          })().catch((e) =>
+            log(`[ON-CALL] ${metadata.callSid}: could not hand the chain to the runner: ${(e as Error)?.message ?? e}`),
+          );
+        }
         try {
           /**
            * A POLICY REFUSAL IS NOT A DIAL. Codex P2, PR #273.

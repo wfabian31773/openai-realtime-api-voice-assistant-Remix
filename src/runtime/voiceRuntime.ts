@@ -44,6 +44,8 @@ import {
   type VoiceCallRecord,
 } from "./mediaStreamBridge";
 import { urgentAlertStatus } from "./urgentTransferAlerts";
+import { buildOnCallWiring, type OnCallWiring } from "./onCall/wiring";
+import { ON_CALL_ACK_PATH, ON_CALL_STATUS_PATH, handleOnCallAck, handleOnCallStatus } from "./onCall/providerCall";
 import { CallSessionRegistry, type CallEntry } from "./sessionRegistry";
 import {
   GrokVoiceSession,
@@ -616,6 +618,13 @@ export interface VoiceRuntimeOptions {
    * lanes exactly as before, with the reason logged once at mount.
    */
   transferOps?: TransferTwilioOps;
+  /**
+   * The after-hours on-call chain (src/runtime/onCall/). Injected for tests;
+   * when omitted it is built from the environment, and with
+   * ON_CALL_ROTATION_MODE unset (the default) it is off and the urgent
+   * transfer runs exactly as before.
+   */
+  onCall?: OnCallWiring;
 }
 
 /** A transport the runtime can open. WebSocketGrokTransport satisfies it. */
@@ -823,11 +832,22 @@ export function mountVoiceRuntime(
   // for its callback URLs, called with raw env so this module never pulls
   // in the full config (which requires DATABASE_URL at import).
   const transferDomain = publicTransferDomain(env);
+  // The after-hours on-call chain. Off unless ON_CALL_ROTATION_MODE is test
+  // or live and the deployment has a public host for the provider-call
+  // webhooks; off, `onCall.transfer` is null and the transfer is unchanged.
+  const onCall = options.onCall ?? buildOnCallWiring(env, transferDomain ?? undefined);
   const transfer = createRuntimeTransfer({
     env,
     ops: options.transferOps,
     domain: transferDomain,
+    onCall: onCall.transfer ?? undefined,
   });
+  console.log(
+    onCall.runner
+      ? `[voice-runtime] on-call rotation ${onCall.config.mode.toUpperCase()}: urgent after-hours calls ring the week's on-call provider, then retry and escalate`
+      : `[voice-runtime] on-call rotation off${onCall.health.disabledBecause ? ` (${onCall.health.disabledBecause})` : onCall.health.blockedBy ? ` (${onCall.health.blockedBy})` : ""} — urgent transfers ring the fixed on-call number as before`,
+  );
+  onCall.runner?.start();
   console.log(
     transfer.unavailableReason
       ? `[voice-runtime] ${transfer.unavailableReason} — transfer-capable lanes stay refused`
@@ -868,6 +888,20 @@ export function mountVoiceRuntime(
   // connected, because the redirect killed the agent's stream.
   app.post(TRANSFER_DIAL_RESULT_PATH, (req: Request, res: Response) => {
     send(res, transfer.handleDialResult(toWebhookRequest(req)));
+  });
+
+  // The calls the on-call chain places to providers: the key press and the
+  // call status. Mounted whether or not the chain is on, so a provider call
+  // still ringing when the chain is switched off hears that it is closed.
+  const onCallRunnerForWebhooks = onCall.runner ?? {
+    onProviderAck: async () => "closed" as const,
+    onProviderStatus: async () => {},
+  };
+  app.post(ON_CALL_ACK_PATH, async (req: Request, res: Response) => {
+    send(res, await handleOnCallAck(toWebhookRequest(req), { env, runner: onCallRunnerForWebhooks }));
+  });
+  app.post(ON_CALL_STATUS_PATH, async (req: Request, res: Response) => {
+    send(res, await handleOnCallStatus(toWebhookRequest(req), { env, runner: onCallRunnerForWebhooks }));
   });
 
   app.get("/voice/health", async (_req: Request, res: Response) => {
@@ -925,6 +959,9 @@ export function mountVoiceRuntime(
       // its own so a missing number shows here instead of failing silently.
       // Names only, never the numbers.
       urgentAlert: urgentAlertStatus(env),
+      // The after-hours on-call chain: off, test or live, and why it is off.
+      // A count of test numbers, never a number.
+      onCall: onCall.health,
       // Per lane: can this deployment answer a call on it, and if not, the
       // sentence why. `transferWarning` is the second gate — a lane that IS
       // served but whose transfer has nowhere to dial, which reads as
