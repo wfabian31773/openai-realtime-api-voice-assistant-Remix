@@ -14,7 +14,10 @@ today, and nothing in this document runs.
 
 It changes only what happens **after** the after-hours agent has classified a
 call as urgent and the escalation gate has sanctioned the transfer. The urgent
-triggers, the triage flow and the gate are unchanged.
+triggers, the triage flow and the gate are unchanged. It covers the after-hours
+line (`no-ivr`) only: `no-ivr-v2` and `dev-no-ivr` keep the fixed number,
+because their agents do not yet know the chain's "already paging" answer to a
+second transfer request and would read it as a failed transfer.
 
 1. **Who is on call.** The rotation week runs **Tuesday 5:00 PM Pacific to the
    next Tuesday 8:00 AM Pacific**. Weekday daytime (Monday to Friday,
@@ -60,6 +63,9 @@ triggers, the triage flow and the gate are unchanged.
    - A director marked inactive is never rung: the level is left out of the
      chain and the plan says why (`region_director_inactive`,
      `final_director_inactive`).
+   - A level whose phone number cannot be dialled (missing or malformed in
+     the table) gets one `failed` attempt row and the chain moves straight to
+     the next level, with no second call and no wait.
 5. **Every attempt is logged** in `on_call_attempts`: who, when, answered or
    not, the text sent, the level, and the caller's CallSid as the
    conversation ID.
@@ -335,6 +341,13 @@ seen; every provider call and text goes to the test numbers.
 1. Set `ON_CALL_ROTATION_MODE=test`, `ON_CALL_TEST_PHONES` to three numbers
    (one per level), and, if needed, `ON_CALL_CALLER_ID`. Republish. Check the
    boot line and `/voice/health` `onCall.running`.
+
+   **Keep the test window short.** While test mode is on it applies to every
+   urgent after-hours call, a real caller's included: that caller's chain
+   rings and texts the test numbers, not the provider. Today's urgent text to
+   `URGENT_NOTIFICATION_NUMBER` and the urgent ticket still go out on every
+   such call, test or real, so the patient is not lost, but switch the mode
+   back to `off` (or to `live`) as soon as the test calls are done.
 2. With the tables seeded, the chain is the real one for the time of the call
    (the real names in the texts, the test numbers on the phone). With the
    tables empty, a test-mode call runs a synthetic three-level chain over the

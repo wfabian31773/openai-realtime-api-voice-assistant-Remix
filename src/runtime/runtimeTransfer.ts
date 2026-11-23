@@ -171,7 +171,7 @@ export interface RuntimeTransferOptions {
   urgentAlerts?: UrgentTransferAlerts;
   /**
    * THE AFTER-HOURS ON-CALL ROTATION (v268). When present and switched on
-   * (`ON_CALL_ROTATION=test|live`), an urgent call on the after-hours lanes
+   * (`ON_CALL_ROTATION_MODE=test|live`), an urgent call on the after-hours lane
    * rings the week's on-call provider (or a post-op patient's surgeon) instead
    * of `HUMAN_AGENT_NUMBER`, texts them the full details first, and hands what
    * happened to the runner, which retries, nudges and escalates to the region's
@@ -196,8 +196,13 @@ export interface OnCallTransferWiring {
   now?: () => Date;
 }
 
-/** The lanes whose urgent calls go to the on-call rotation: the after-hours family. */
-export const ON_CALL_LANES: ReadonlySet<string> = new Set(["no-ivr", "no-ivr-v2", "dev-no-ivr"]);
+/**
+ * The lanes whose urgent calls go to the on-call rotation: the after-hours line
+ * only. no-ivr-v2 and dev-no-ivr can transfer too, but their agents do not know
+ * the chain's "already paging" refusal (CHAIN_RUNNING) and would read it as a
+ * failed transfer, so they keep today's path until they do.
+ */
+export const ON_CALL_LANES: ReadonlySet<string> = new Set(["no-ivr"]);
 
 /**
  * The refusal reason for a second escalation on a call whose on-call chain is

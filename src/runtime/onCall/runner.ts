@@ -288,7 +288,15 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
    * Read fresh every time, and only from the attempt it names, so a late or a
    * duplicate webhook cannot move it twice.
    */
-  async function advance(escalationId: number, levelIndex: number, attemptNo: number): Promise<void> {
+  async function advance(
+    escalationId: number,
+    levelIndex: number,
+    attemptNo: number,
+    opts: { retryThisLevel?: boolean } = {},
+  ): Promise<void> {
+    // A level with no number cannot be rung on a retry either, so it goes
+    // straight to the next level instead of waiting out a retry gap.
+    const retryThisLevel = opts.retryThisLevel ?? true;
     for (let i = 0; i < 3; i++) {
       const e = await store.getEscalation(escalationId);
       if (!e || e.status !== "active" || e.levelIndex !== levelIndex || e.attemptNo !== attemptNo || e.phase !== "ringing") {
@@ -301,7 +309,7 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
         return;
       }
       const t = now().getTime();
-      if (attemptNo < ATTEMPTS_PER_LEVEL) {
+      if (retryThisLevel && attemptNo < ATTEMPTS_PER_LEVEL) {
         const deadline = e.levelStartedAt.getTime() + LEVEL_RETRY_DEADLINE_MS;
         const next = Math.max(t, Math.min(t + RETRY_GAP_MS, deadline));
         const patch: EscalationPatch = { attemptNo: attemptNo + 1, phase: "due", nextAt: new Date(next), releaseLease: true };
@@ -400,8 +408,8 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
 
     if (!isPhone(level.phone)) {
       const a = await store.logAttempt({ ...base, kind: "call", dialedTo: null, outcome: "failed", endedAt: t });
-      log(`[ON-CALL] ${row.callSid}: level ${row.levelIndex} (${level.role}) has no phone number; moving on`);
-      await advance(a.escalationId, a.levelIndex, a.attemptNo);
+      log(`[ON-CALL] ${row.callSid}: level ${row.levelIndex} (${level.role}) has no phone number; moving to the next level`);
+      await advance(a.escalationId, a.levelIndex, a.attemptNo, { retryThisLevel: false });
       return;
     }
 

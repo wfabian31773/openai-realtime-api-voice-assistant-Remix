@@ -850,7 +850,7 @@ describe("what keeps the chain moving when something goes wrong", () => {
     expect([...h.store.attempts.values()].filter((x) => x.kind === "warm_transfer")).toHaveLength(1);
   });
 
-  it("skips a level with no phone number and moves on", async () => {
+  it("skips a level with no phone number straight to the next level, with no retry wait", async () => {
     const h = harness();
     const plan = wedPlan();
     plan.levels[1] = { ...plan.levels[1], phone: "" };
@@ -858,8 +858,21 @@ describe("what keeps the chain moving when something goes wrong", () => {
     h.at(esc!.nextAt!);
     await h.runner.tick();
     await h.runner.onProviderStatus(h.lastCallAttempt().id, "no-answer");
+    const atLevel1 = h.escalation();
+    expect(atLevel1).toMatchObject({ levelIndex: 1, attemptNo: 1, phase: "due" });
+    const before = h.calls.length;
     await h.runner.tick(); // level 1 has no number
-    expect(h.escalation()).toMatchObject({ levelIndex: 1, attemptNo: 2 });
+    // One failed attempt row for the level, and the chain is at the next level,
+    // due now: no 60-second retry of a number that does not exist.
+    const level1 = [...h.store.attempts.values()].filter((a) => a.levelIndex === 1);
+    expect(level1).toHaveLength(1);
+    expect(level1[0]).toMatchObject({ kind: "call", outcome: "failed", dialedTo: null });
+    expect(h.escalation()).toMatchObject({ levelIndex: 2, attemptNo: 1, phase: "due" });
+    expect(h.escalation().nextAt!.getTime()).toBeLessThanOrEqual(h.now().getTime());
+    expect(h.calls.length).toBe(before);
+    await h.runner.tick();
+    expect(h.calls.length).toBe(before + 1);
+    expect(h.lastCallAttempt()).toMatchObject({ levelIndex: 2, attemptNo: 1 });
   });
 });
 

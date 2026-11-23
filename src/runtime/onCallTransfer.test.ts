@@ -311,8 +311,8 @@ describe("an urgent after-hours call with the rotation on", () => {
     await vi.waitFor(() => expect(built.handed).toHaveLength(1));
   });
 
-  it("covers every after-hours lane", () => {
-    expect([...ON_CALL_LANES].sort()).toEqual(["dev-no-ivr", "no-ivr", "no-ivr-v2"]);
+  it("covers the after-hours line only: the v2 agents do not know CHAIN_RUNNING", () => {
+    expect([...ON_CALL_LANES]).toEqual(["no-ivr"]);
   });
 });
 
