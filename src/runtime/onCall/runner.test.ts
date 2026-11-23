@@ -703,6 +703,30 @@ describe("what keeps the chain moving when something goes wrong", () => {
     expect(placeCall).toHaveBeenCalledTimes(2);
   });
 
+  it("keeps a placed call open when its call sid cannot be saved, and the chain waits for its status", async () => {
+    const h = harness();
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    const realSave = h.store.setAttemptCallSid.bind(h.store);
+    h.store.setAttemptCallSid = async () => {
+      throw new Error("hub blip");
+    };
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    expect(h.calls).toHaveLength(1);
+    const ringing = h.lastCallAttempt();
+    expect(ringing.outcome).toBe("in_progress");
+    expect(ringing.providerCallSid ?? null).toBeNull();
+    expect(h.escalation()).toMatchObject({ status: "active", levelIndex: 0, attemptNo: 2, phase: "ringing" });
+    const lines = h.log.mock.calls.map((c) => String(c[0])).join("\n");
+    expect(lines).toMatch(/is ringing but its call sid could not be saved/);
+    expect(lines).not.toMatch(/could not be placed/);
+    h.store.setAttemptCallSid = realSave;
+    await h.runner.tick();
+    expect(h.calls).toHaveLength(1);
+    expect(await h.runner.onProviderAck(ringing.id, "1")).toBe("accepted");
+    expect(h.escalation()).toMatchObject({ status: "accepted" });
+  });
+
   it("still calls when the text could not be sent, and logs the text as send_failed", async () => {
     const sendSms = vi.fn(async () => {
       throw new Error("carrier refused");

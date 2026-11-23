@@ -23,7 +23,7 @@ import { escalationDetailsMap } from "../services/escalationStore";
 import { readOnCallConfig } from "./onCall/config";
 import { createFakeOnCallStore, type FakeOnCallStore } from "./onCall/store.fake";
 import { provider, syntheticRotation, IE_DIRECTOR } from "./onCall/testRotation";
-import type { RotationData } from "./onCall/rotation";
+import { levelLabel, type RotationData } from "./onCall/rotation";
 import type { InCallTransferResult } from "./onCall/runner";
 
 const AUTH_TOKEN = "test-auth-token";
@@ -292,6 +292,13 @@ describe("an urgent after-hours call with the rotation on", () => {
     await expect(outcome).rejects.toThrow(/^handoff_failed:CHAIN_STARTED$/);
     expect(rec.tickets).toHaveLength(1);
     expect(rec.tickets[0]).toMatchObject({ onCallChain: true });
+    // The ticket names who was rung, never the provider's own phone.
+    const level = built.handed[0].plan.levels[0];
+    const dialTarget = String((rec.tickets[0] as { dialTarget?: unknown }).dialTarget);
+    expect(dialTarget).toBe(levelLabel(level));
+    expect(dialTarget).toContain(level.name);
+    expect(dialTarget).not.toContain(level.phone);
+    expect(dialTarget).not.toMatch(/\d{7}/);
   });
 
   it("does not say the team is being paged when the runner opened no chain", async () => {
@@ -883,6 +890,8 @@ describe("today's path, byte for byte", () => {
     await expect(outcome).rejects.toThrow(/^handoff_failed:NO_ANSWER$/);
     expect(rec.tickets).toHaveLength(1);
     expect(rec.tickets[0]).not.toHaveProperty("onCallChain");
+    // Off the rotation the ticket still names the number it rang, as before.
+    expect((rec.tickets[0] as { dialTarget?: unknown }).dialTarget).toBe(ENV.HUMAN_AGENT_NUMBER);
     expect(built.handed).toHaveLength(0);
   });
 

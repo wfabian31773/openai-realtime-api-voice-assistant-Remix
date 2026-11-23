@@ -269,6 +269,21 @@ export interface ChainPlan {
   notes: string[];
 }
 
+const ROLE_WORDS: Record<ChainRole, string> = {
+  on_call: "this week's on-call provider",
+  surgeon: "the patient's surgeon",
+  region_director: "the region's medical director",
+  final: "the final escalation director",
+};
+
+/**
+ * A level as staff read it on a ticket: who and in what role. Never the
+ * number, because the number a level rings is a provider's own phone.
+ */
+export function levelLabel(level: Pick<ChainLevel, "role" | "name">): string {
+  return `${level.name} (${ROLE_WORDS[level.role]})`;
+}
+
 /**
  * The levels, in order, with no provider twice. `first` is the on-call
  * provider or a post-op patient's surgeon; the region whose director comes

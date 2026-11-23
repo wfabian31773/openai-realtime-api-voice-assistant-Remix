@@ -149,7 +149,12 @@ export function matchSurgeon(
   }
   const key = nameKeyForMatch(fact.providerName);
   if (!key) return null;
-  const byName = providers.filter((p) => nameKeyForMatch(p.fullName) === key);
+  // A row's NPI that matches nobody can still be one of ours whose pool row
+  // has no NPI on file; it cannot be a pool provider whose NPI is another
+  // one, who is a different person with the same name.
+  const byName = providers.filter(
+    (p) => nameKeyForMatch(p.fullName) === key && !(npi && npiKey(p.npi)),
+  );
   // Two pool rows with one name: not confident.
   return byName.length === 1 ? byName[0] : null;
 }
@@ -168,6 +173,14 @@ function surgeonId(f: SurgeryFact, providers: readonly OnCallProvider[]): string
   return name ? `name:${name}` : null;
 }
 
+/**
+ * A surgery the patient is booked for counts whether or not it is marked kept:
+ * on the Console `is_kept` false is the state a surgery sits in until NextGen
+ * marks it, not a recorded no-show (measured 2026-11-23, surgeries 2 to 6
+ * days ago neither cancelled nor moved: 138 kept, 77 false, 0 null), so
+ * reading false as "did not happen" would send a third of the first week's
+ * post-op patients to on-call. ON_CALL_POST_OP_REQUIRE_KEPT=1 is that choice.
+ */
 function counts(f: SurgeryFact): boolean {
   if (!SURGERY_EVENTS.includes(f.eventName)) return false;
   if (f.cancelled) return false;

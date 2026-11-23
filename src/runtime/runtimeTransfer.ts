@@ -41,6 +41,7 @@ import { decideRoute } from "./onCall/routing";
 import type { OnCallConfig } from "./onCall/config";
 import type { OnCallRunner, WarmOutcome } from "./onCall/runner";
 import type { ChainPlan, RotationData } from "./onCall/rotation";
+import { levelLabel } from "./onCall/rotation";
 import { storedDetails, type OnCallMode, type OnCallStore, type Query, type RoutingFacts, type StoredDetails } from "./onCall/store";
 import {
   handleBlindDialResult,
@@ -1183,7 +1184,9 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
                 outcome.status === "NO_ANSWER" || outcome.status === "DECLINED"
                   ? URGENT_TRANSFER_NOT_ANSWERED
                   : `Transfer dial failed: ${outcome.reason}`,
-              dialTarget: outcome.destination,
+              // A rotation run rang a provider's own phone: the ticket names
+              // who was called, never the number (review of #514).
+              dialTarget: holder.run ? levelLabel(holder.run.plan.levels[0]) : outcome.destination,
               agentUsed: slug,
               // v163: the failure itself, structured, so the ticket says the
               // caller was never connected and how long the phone rang (70166).

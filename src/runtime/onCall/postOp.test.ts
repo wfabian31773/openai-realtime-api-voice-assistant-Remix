@@ -185,9 +185,18 @@ describe("the surgeon", () => {
     expect(matchSurgeon({ providerNpi: "1000000011", providerName: "Ada Quill, MD" }, POOL)?.id).toBe(11);
   });
 
-  it("falls back to the name when there is no NPI, or the NPI is not in the list", () => {
+  it("falls back to the name when the row has no NPI, or the list row has none on file", () => {
     expect(matchSurgeon({ providerNpi: null, providerName: "Ada Quill, M.D." }, POOL)?.id).toBe(10);
-    expect(matchSurgeon({ providerNpi: "1999999999", providerName: "Dr. Ada M. Quill, MD" }, POOL)?.id).toBe(10);
+    const noNpiOnFile = [provider(10, "Inland Empire", { fullName: "Ada Quill", npi: null }), OTHER];
+    expect(matchSurgeon({ providerNpi: "1999999999", providerName: "Dr. Ada M. Quill, MD" }, noNpiOnFile)?.id).toBe(10);
+  });
+
+  it("does not match a name whose list row carries another NPI: that is not a confident match", () => {
+    // The Console has one provider name with two NPIs (measured 2026-11-23).
+    expect(matchSurgeon({ providerNpi: "1999999999", providerName: "Dr. Ada M. Quill, MD" }, POOL)).toBeNull();
+    const d = decidePostOp([surgery({ providerNpi: "1999999999", providerName: "Ada Quill, MD" })], TODAY, POOL);
+    expect(d).toMatchObject({ route: "on_call", reason: "surgeon_not_in_pool" });
+    expect(d.note).toContain("Ada Quill, MD");
   });
 
   it("does not match a name two list rows share", () => {

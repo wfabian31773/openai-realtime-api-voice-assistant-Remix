@@ -441,8 +441,9 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
     });
 
     const call = await store.logAttempt({ ...base, kind: "call", dialedTo: level.phone });
+    let placed: { sid: string };
     try {
-      const placed = await deps.placeCall({
+      placed = await deps.placeCall({
         to: level.phone,
         from: config.callerId,
         twiml: providerCallTwiml(url(ON_CALL_ACK_PATH, call.id)),
@@ -450,12 +451,24 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
         timeout: PROVIDER_RING_SECONDS,
         timeLimit: PROVIDER_CALL_LIMIT_SECONDS,
       });
-      await store.setAttemptCallSid(call.id, placed.sid);
-      log(`[ON-CALL] ${row.callSid}: calling level ${row.levelIndex} (${level.role}), attempt ${row.attemptNo}`);
     } catch (err) {
       log(`[ON-CALL] ${row.callSid}: the call to level ${row.levelIndex} could not be placed: ${(err as Error)?.message ?? err}`);
       await endAndAdvance(call, "failed");
+      return;
     }
+    // Twilio has the call and the phone is ringing. A failed write of its sid
+    // must not read as a call that was never placed: the attempt stays open,
+    // and the ack and status webhooks find it by the attempt id in their URLs.
+    // Without the sid it cannot be hung up if another call takes the patient;
+    // it rings out on its own after PROVIDER_RING_SECONDS.
+    try {
+      await store.setAttemptCallSid(call.id, placed.sid);
+    } catch (err) {
+      log(
+        `[ON-CALL] ${row.callSid}: the call to level ${row.levelIndex} is ringing but its call sid could not be saved: ${(err as Error)?.message ?? err}`,
+      );
+    }
+    log(`[ON-CALL] ${row.callSid}: calling level ${row.levelIndex} (${level.role}), attempt ${row.attemptNo}`);
   }
 
   /** A ringing row past its guard: the call's status never came back. */
