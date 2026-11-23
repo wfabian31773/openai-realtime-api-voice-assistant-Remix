@@ -560,11 +560,14 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
       }
       const { row, byThis } = await closeAsTaken(e.id, by);
       if (row && row.status !== "accepted") return "closed";
-      if (row && !byThis) {
-        // Closed by someone else: by another call's key press, or by a move
-        // that found this call's key press. The earliest accepted call won.
-        const winner = await acceptedAttempt(row);
-        if (winner && winner.id !== by.id) return "already_taken";
+      if (row && !byThis && row.acceptedBy !== by.providerId) {
+        // Closed by someone else: by another provider's key press, or by a
+        // move that found theirs. The escalation row names who took the
+        // patient, and only that provider is told they have it. (A lower
+        // attempt id is not the winner: two key presses can each record
+        // `accepted` before either close lands, and the close that lands
+        // first is the one the row keeps.)
+        return "already_taken";
       }
       // Taken, whether or not the close won its race: the attempt says
       // accepted, and the next move closes the escalation on it.

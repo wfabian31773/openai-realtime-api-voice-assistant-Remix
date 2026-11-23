@@ -360,6 +360,119 @@ describe("a pickup at any step stops the chain (success criterion)", () => {
     expect(await h.runner.onProviderAck(stray.id, "1")).toBe("already_taken");
   });
 
+  /** A second call of ours on the same escalation, still ringing. */
+  async function strayCall(h: ReturnType<typeof harness>, escalationId: number, levelIndex = 0, providerId = 1) {
+    const stray = await h.store.logAttempt({
+      escalationId,
+      callSid: SID,
+      levelIndex,
+      role: levelIndex === 0 ? "on_call" : "region_director",
+      providerId,
+      kind: "call",
+      attemptNo: 1,
+      mode: "live",
+      dialedTo: phoneOf(providerId),
+    });
+    await h.store.setAttemptCallSid(stray.id, "CA8".padEnd(34, "0"));
+    return stray;
+  }
+
+  it("still takes the patient and logs it when hanging up the other call fails", async () => {
+    const endCall = vi.fn(async () => {
+      throw new Error("twilio down");
+    });
+    const h = harness({ endCall });
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    const taking = h.lastCallAttempt();
+    const stray = await strayCall(h, esc!.id);
+    expect(await h.runner.onProviderAck(taking.id, "1")).toBe("accepted");
+    expect(endCall).toHaveBeenCalledWith("CA8".padEnd(34, "0"));
+    expect(h.store.attempts.get(stray.id)?.outcome).toBe("taken_elsewhere");
+    expect(h.escalation()).toMatchObject({ status: "accepted", acceptedBy: 1 });
+    expect(h.log.mock.calls.some(([l]) => /could not hang up a provider call: twilio down/.test(String(l)))).toBe(true);
+  });
+
+  it("tells a key press that read the chain before another took it that the patient is taken", async () => {
+    const h = harness();
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    const taking = h.lastCallAttempt();
+    const stray = await strayCall(h, esc!.id);
+    // The stray's key press reads the escalation while it is still active;
+    // the taking call's key press then runs to the end before the stray's
+    // carries on, closing the chain and ending the stray as taken_elsewhere.
+    const real = h.store.getEscalation.bind(h.store);
+    let raced = false;
+    let takingAnswer: string | undefined;
+    vi.spyOn(h.store, "getEscalation").mockImplementation(async (id: number) => {
+      const row = await real(id);
+      if (!raced) {
+        raced = true;
+        takingAnswer = await h.runner.onProviderAck(taking.id, "1");
+      }
+      return row;
+    });
+    expect(await h.runner.onProviderAck(stray.id, "1")).toBe("already_taken");
+    expect(takingAnswer).toBe("accepted");
+    expect(h.store.attempts.get(stray.id)?.outcome).toBe("taken_elsewhere");
+  });
+
+  it("when two providers press a key at once, tells only the one the escalation names", async () => {
+    const h = harness();
+    const plan = wedPlan();
+    const esc = await h.runner.afterInCallTransfer(inCall(plan, "no_answer"));
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    const first = h.lastCallAttempt(); // the on-call provider, the lower attempt id
+    const second = await strayCall(h, esc!.id, 1, plan.levels[1].providerId); // the director
+    // The first provider's key press records `accepted`; before it closes the
+    // chain, the director's key press runs to the end and closes it.
+    const real = h.store.endAttempt.bind(h.store);
+    let raced = false;
+    let secondAnswer: string | undefined;
+    vi.spyOn(h.store, "endAttempt").mockImplementation(async (id: number, outcome: any, at: Date) => {
+      const row = await real(id, outcome, at);
+      if (!raced && id === first.id && outcome === "accepted") {
+        raced = true;
+        secondAnswer = await h.runner.onProviderAck(second.id, "1");
+      }
+      return row;
+    });
+    const firstAnswer = await h.runner.onProviderAck(first.id, "1");
+    expect(secondAnswer).toBe("accepted");
+    expect(h.escalation()).toMatchObject({ status: "accepted", acceptedBy: plan.levels[1].providerId });
+    // one provider is told they have the patient, not two
+    expect(firstAnswer).toBe("already_taken");
+  });
+
+  it("tells a key press that a move already found, and closed the chain on, that the patient is theirs", async () => {
+    const h = harness();
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    const taking = h.lastCallAttempt();
+    // The key press records `accepted`; before it closes the chain, the next
+    // move comes due, finds that press and closes the chain on it first.
+    const real = h.store.endAttempt.bind(h.store);
+    let raced = false;
+    vi.spyOn(h.store, "endAttempt").mockImplementation(async (id: number, outcome: any, at: Date) => {
+      const row = await real(id, outcome, at);
+      if (!raced && id === taking.id && outcome === "accepted") {
+        raced = true;
+        h.advance(RING_GUARD_MS + 1);
+        await h.runner.tick();
+      }
+      return row;
+    });
+    const answer = await h.runner.onProviderAck(taking.id, "1");
+    expect(raced).toBe(true);
+    expect(h.escalation()).toMatchObject({ status: "accepted", acceptedBy: taking.providerId });
+    expect(answer).toBe("accepted");
+  });
+
   it("hangs up nothing when the call that was taken was the only one", async () => {
     const h = harness();
     const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));

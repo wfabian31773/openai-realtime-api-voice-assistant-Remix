@@ -34,13 +34,22 @@ triggers, the triage flow and the gate are unchanged.
    (two surgeons on the latest surgery date, a surgeon not in the provider
    pool or marked inactive, a lookup that fails or runs past 1.5 seconds, or
    no confirmed identity), the call goes to on-call and the text says why.
+   The whole routing decision (the rotation read and the Console lookup
+   together) has one 2.5-second deadline, so a slow read cannot hold the
+   caller longer than that; the Console gets whatever is left of it, never
+   more than 1.5 seconds, and is not asked at all once the deadline is spent.
 4. **The cadence, per level:**
    - a. A text with the patient's details (the same details as today's urgent
      text, in the text itself, never behind a link), then the transfer call.
    - b. No answer is logged as `no_answer`, not as a failure.
    - c. Within 5 minutes of the original call: a second call and a reminder
-     text.
+     text. The reminder says "REMINDER — the urgent transfer to you was not
+     taken. We are calling you again now." when the first call was the
+     in-call transfer, and "REMINDER — we are calling you again now."
+     otherwise, followed by the patient's details again.
    - d. A key press on any of our calls takes the patient and stops the chain.
+     Any other call of ours still ringing for that patient is hung up and
+     logged `taken_elsewhere`.
    - e. Otherwise the region's medical director, with the same cadence.
    - f. Then Dr. Logan, with the same cadence. San Diego and Coachella Valley
      go straight from the provider to Dr. Logan, because he is their
@@ -66,6 +75,14 @@ A key press answers "Thank you. This patient is yours. The callback number is
 in the text message. Goodbye." No patient detail is ever spoken on the call;
 the details are only in the text. A provider who presses a key after someone
 else has taken the patient hears "This patient has already been taken."
+If two providers press a key at nearly the same moment, the one the
+escalation records as having taken the patient (`accepted_by`) is told it is
+theirs and the other hears that it has already been taken.
+
+If the caller asks for the on-call team again while an escalation is already
+running for their call, nothing new is dialled: the agent is told the team is
+already being paged, tells the caller so, and files anything new on the
+ticket.
 
 ### The levels and their timing
 
@@ -78,8 +95,8 @@ else has taken the patient hears "This patient has already been taken."
 | after the last call | the escalation is marked `exhausted` |
 
 Each of our callback calls rings for 30 seconds (the in-call warm transfer
-rings as it does today). A call whose status never comes back is closed after
-6.5 minutes and the chain carries on.
+rings as it does today). A call whose status never comes back is hung up and
+logged `no_status` after 6.5 minutes, and the chain carries on.
 
 ---
 
@@ -227,6 +244,10 @@ npx tsx scripts/on-call-change.ts activate "Dr. Name"
 
 A deactivated provider is skipped by `extend`, and a swap or cover to them is
 refused. Their weeks already on the schedule are listed so you can swap them.
+A cover entered before they were deactivated (or before their row was
+removed) is not rung: the window falls back to the week's scheduled provider,
+and the lookup and the alert say so (`override_provider_inactive` or
+`override_provider_missing`).
 
 ### A region's director
 
@@ -299,8 +320,9 @@ WHERE call_sid = '<CallSid>';
 
 `role` is `on_call`, `surgeon`, `region_director` or `final`. `kind` is
 `warm_transfer`, `call`, `sms` or `nudge_sms`. `outcome` is `accepted`,
-`no_answer`, `declined`, `busy`, `failed`, `no_status`, `sent`, `send_failed`
-or `in_progress`. The patient details and the caller's number are kept on the
+`no_answer`, `declined`, `busy`, `failed`, `no_status`, `taken_elsewhere`
+(another of our calls took the patient first, and this one was hung up),
+`sent`, `send_failed` or `in_progress`. The patient details and the caller's number are kept on the
 escalation only while someone is being paged, and are erased when it closes.
 
 ---
