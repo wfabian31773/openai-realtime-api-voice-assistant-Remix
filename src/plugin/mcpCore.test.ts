@@ -33,35 +33,53 @@ describe("voice fleet MCP core", () => {
     expect(JSON.stringify(reply)).toBe(JSON.stringify({ jsonrpc: "2.0", id: 1, result: { tools } }));
   });
 
-  it("masks international E.164 phones to last four while preserving NANP output", () => {
-    for (const phone of ["+44 20 7946 0000", "+44-20-7946-0000", "+442079460000", "+99990000", "+999999999990000"]) {
-      expect(maskString(`Call ${phone} now`)).toBe("Call ***-***-0000 now");
-      expect(mask({ phone, body: `Call ${phone}`, nested: [{ text: phone }] }, "", true))
-        .toEqual({ phone: "***-***-0000", body: "Call ***-***-0000", nested: [{ text: "***-***-0000" }] });
-    }
-    for (const phone of ["9095550113", "909-555-0113", "909.555.0113", "(909) 555-0113", "+19095550113", "+1 (909) 555-0113"]) {
-      expect(maskString(`Call ${phone} now`)).toBe("Call ***-***-0113 now");
-    }
-    expect(maskString("Call +19095550113 123")).toBe("Call ***-***-0113 123");
+  it.each([
+    ["+44 20 7946 0000", "***-***-0000"],
+    ["+44-20-7946-0001", "***-***-0001"],
+    ["+442079460002", "***-***-0002"],
+    ["+44 (20) 7946-0000", "***-***-0000"],
+    ["+44.20.7946.0000", "***-***-0000"],
+    ["+44(20)7946.0003", "***-***-0003"],
+    ["+44 . (20) - 7946 . 0004", "***-***-0004"],
+    // Unassigned country code for synthetic 8- and 15-digit boundaries.
+    ["+99990000", "***-***-0000"],
+    ["+999999999990000", "***-***-0000"],
+    ["9095550113", "***-***-0113"],
+    ["909-555-0113", "***-***-0113"],
+    ["909.555.0113", "***-***-0113"],
+    ["(909) 555-0113", "***-***-0113"],
+    ["+19095550113", "***-***-0113"],
+    ["+1 (909) 555-0113", "***-***-0113"],
+    ["+19095550113 123", "***-***-0113 123"],
+    ["+9990000", "+9990000"],
+    ["+9999999999990000", "+9999999999990000"],
+    ["+99.99.99.99.99.99.00.00", "+99.99.99.99.99.99.00.00"],
+  ])("masks synthetic phone %s to %s in strings, fields and included content", (phone, expected) => {
+    expect(maskString(`Call ${phone} now`)).toBe(`Call ${expected} now`);
+    expect(mask({ phone, note: `Call ${phone}` })).toEqual({ phone: expected, note: `Call ${expected}` });
+    expect(mask({ phone, body: `Call ${phone}`, nested: [{ text: phone }] }, "", true))
+      .toEqual({ phone: expected, body: `Call ${expected}`, nested: [{ text: expected }] });
   });
 
   it("rejects notification methods with ids and invalid request ids without dispatch", async () => {
     const fetch = vi.spyOn(globalThis, "fetch");
     const core = create();
-    for (const id of ["notification", "", 0, -1, 1.5]) {
+    for (const id of ["notification", "", 0, -1, Number.MAX_SAFE_INTEGER, Number.MIN_SAFE_INTEGER]) {
       for (const method of ["notifications/initialized", "notifications/custom"]) {
         expect(await core.handleMessage({ ...call("health"), method, id }))
           .toEqual({ jsonrpc: "2.0", id, error: { code: -32600, message: "Invalid Request" } });
       }
     }
-    for (const id of [null, undefined, false, {}, [], Infinity, -Infinity, NaN]) {
-      expect(await core.handleMessage({ ...call("health"), id }))
-        .toEqual({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid Request" } });
+    for (const id of [null, undefined, false, {}, [], 1.5, -1.5, 1e-200, Number.MAX_SAFE_INTEGER + 1, Number.MIN_SAFE_INTEGER - 1, Infinity, -Infinity, NaN]) {
+      for (const method of ["tools/call", "notifications/custom"]) {
+        expect(await core.handleMessage({ ...call("health"), method, id }))
+          .toEqual({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid Request" } });
+      }
     }
     expect(await core.handleMessage(JSON.parse('{"jsonrpc":"2.0","id":1e400,"method":"tools/call","params":{"name":"voice_fleet_health"}}')))
       .toEqual({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid Request" } });
     expect(fetch).not.toHaveBeenCalled();
-    for (const id of ["", "request", 0, -1, 1.5, Number.MAX_SAFE_INTEGER, Number.MIN_SAFE_INTEGER, 1e-200]) {
+    for (const id of ["", "request", 0, -1, Number.MAX_SAFE_INTEGER, Number.MIN_SAFE_INTEGER]) {
       const response = await core.handleMessage({ jsonrpc: "2.0", id, method: "ping" });
       expect(JSON.parse(JSON.stringify(response))).toEqual({ jsonrpc: "2.0", id, result: {} });
     }
@@ -127,10 +145,34 @@ describe("voice fleet MCP core", () => {
     for (const message of [
       { jsonrpc: "2.0", id: 1, result: {} },
       { jsonrpc: "2.0", id: 2, result: null },
-      { jsonrpc: "2.0", id: null, error: { code: -32603, message: "Synthetic error" } },
+      { jsonrpc: "2.0", id: "error", error: { code: -32603, message: "Synthetic error" } },
       { jsonrpc: "2.0", method: "tools/call", params: { name: "voice_fleet_health" } },
     ]) expect(await core.handleMessage(message)).toBeNull();
     expect(await core.handleMessage({ jsonrpc: "2.0", id: 3 })).toMatchObject({ error: { code: -32600 } });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("rejects malformed client responses without dispatch", async () => {
+    const fetch = vi.spyOn(globalThis, "fetch");
+    const core = create();
+    const invalid = [
+      { jsonrpc: "2.0", id: 1 },
+      { jsonrpc: "2.0", id: 1, result: null, error: { code: -32603, message: "Synthetic error" } },
+      ...[undefined, null, true, {}, [], 1.5, 1e-200, Number.MAX_SAFE_INTEGER + 1, Infinity, -Infinity, NaN].flatMap((id) => [
+        { jsonrpc: "2.0", id, result: null },
+        { jsonrpc: "2.0", id, error: { code: -32603, message: "Synthetic error" } },
+      ]),
+      ...[undefined, null, false, "error", 1, [], {}, { code: -32603 }, { message: "Synthetic error" },
+        { code: "-32603", message: "Synthetic error" }, { code: 1.5, message: "Synthetic error" },
+        { code: Infinity, message: "Synthetic error" }, { code: NaN, message: "Synthetic error" },
+        { code: -32603, message: 1 }].map((error) => ({ jsonrpc: "2.0", id: 1, error })),
+    ];
+    for (const message of invalid) expect(await core.handleMessage(message))
+      .toEqual({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "Invalid Request" } });
+    for (const id of ["", "response", 0, -1, Number.MAX_SAFE_INTEGER, Number.MIN_SAFE_INTEGER]) {
+      for (const result of [null, false, 0, "", [], {}]) expect(await core.handleMessage({ jsonrpc: "2.0", id, result })).toBeNull();
+      expect(await core.handleMessage({ jsonrpc: "2.0", id, error: { code: 0, message: "", data: null } })).toBeNull();
+    }
     expect(fetch).not.toHaveBeenCalled();
   });
 

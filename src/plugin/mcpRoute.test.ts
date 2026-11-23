@@ -6,7 +6,7 @@ import { PassThrough } from "node:stream";
 import { once } from "node:events";
 import { startStdio } from "../../connectors/voice-fleet-mcp/server.mjs";
 import { MemoryPluginStore } from "./store";
-import { mountVoiceFleetMcp, pluginAwareBodyParsers, VOICE_FLEET_MCP_PATH } from "./mcpRoute";
+import { mountVoiceFleetMcp, pluginAwareBodyParsers, pluginAwareCors, VOICE_FLEET_MCP_PATH } from "./mcpRoute";
 
 const servers: Server[] = [];
 afterEach(async () => {
@@ -22,7 +22,8 @@ const tool = (name: string, args: Record<string, unknown> = {}) => rpc("tools/ca
 
 async function boot(setup?: (app: Express) => void, overrides: Record<string, string | undefined> = {}) {
   const app = express();
-  // Same parser wiring as server/index.ts, including its original 100 KB default.
+  // Same middleware order as server/index.ts, including the 100 KB parser default.
+  app.use(pluginAwareCors());
   app.use(pluginAwareBodyParsers());
   const store = new MemoryPluginStore();
   const token = store.mint();

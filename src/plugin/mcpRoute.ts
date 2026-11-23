@@ -1,18 +1,29 @@
 /** Stateless Streamable HTTP transport; no database or production wiring here. */
 import express, { type ErrorRequestHandler, type Express, type RequestHandler } from "express";
+import cors from "cors";
 import { createVoiceFleetMcp, SUPPORTED } from "../../connectors/voice-fleet-mcp/core.mjs";
 import { resolveAppDomain } from "../config/environment";
 import { verifyStoredToken, type PluginStore } from "./store";
 import { parseBearerToken } from "./tokens";
 
 export const VOICE_FLEET_MCP_PATH = "/api/plugin/v1/mcp";
+const isMcpPath = (path: string) => /^\/api\/plugin\/v1\/mcp\/?$/i.test(path);
+
+/** MCP owns method handling and does not expose browser CORS headers. */
+export function pluginAwareCors(): RequestHandler {
+  const middleware = cors();
+  return (req, res, next) => {
+    if (isMcpPath(req.path)) return next();
+    middleware(req, res, next);
+  };
+}
 
 /** Keep MCP raw until its own authentication and 1 MB parser have run. */
 export function pluginAwareBodyParsers(): RequestHandler {
   const parsers = express.Router();
   parsers.use(express.json(), express.urlencoded({ extended: true }));
   return (req, res, next) => {
-    if (/^\/api\/plugin\/v1\/mcp\/?$/i.test(req.path)) return next();
+    if (isMcpPath(req.path)) return next();
     parsers(req, res, next);
   };
 }
@@ -28,8 +39,13 @@ function envelopeKind(message: unknown): "request" | "ignored" | "invalid" {
   const item = message as Record<string, unknown>;
   if (item.jsonrpc !== "2.0") return "invalid";
   const owns = (key: string) => Object.prototype.hasOwnProperty.call(item, key);
-  const validId = typeof item.id === "string" || (typeof item.id === "number" && Number.isFinite(item.id));
-  if (!owns("method")) return validId && owns("result") !== owns("error") ? "ignored" : "invalid";
+  const validId = typeof item.id === "string" || Number.isSafeInteger(item.id);
+  if (!owns("method")) {
+    const error = item.error as Record<string, unknown> | null;
+    const validError = error && typeof error === "object" && !Array.isArray(error) &&
+      Number.isInteger(error.code) && typeof error.message === "string";
+    return validId && owns("result") !== owns("error") && (!owns("error") || validError) ? "ignored" : "invalid";
+  }
   if (owns("result") || owns("error")) return "invalid";
   if (typeof item.method !== "string") return "invalid";
   if (!owns("id")) return item.method.startsWith("notifications/") ? "ignored" : "invalid";
@@ -42,7 +58,7 @@ function invalidRequestId(message: unknown): string | number | null {
   const item = message as Record<string, unknown>;
   // Notification methods cannot carry ids, but echo a valid id on rejection.
   if (item.jsonrpc === "2.0" && typeof item.method === "string" && item.method.startsWith("notifications/")) {
-    if (typeof item.id === "string" || (typeof item.id === "number" && Number.isFinite(item.id))) return item.id;
+    if (typeof item.id === "string" || (typeof item.id === "number" && Number.isSafeInteger(item.id))) return item.id;
   }
   return null;
 }

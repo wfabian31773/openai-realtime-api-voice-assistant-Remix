@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ErrorRequestHandler, Express, NextFunction, Request, RequestHandler, Response } from "express";
 import { Readable } from "node:stream";
 import { MemoryPluginStore } from "./store";
-import { mountVoiceFleetMcp, VOICE_FLEET_MCP_PATH } from "./mcpRoute";
+import { mountVoiceFleetMcp, pluginAwareBodyParsers, pluginAwareCors, VOICE_FLEET_MCP_PATH } from "./mcpRoute";
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -13,13 +13,14 @@ function boot(env: Record<string, string | undefined> = {}) {
   const store = new MemoryPluginStore();
   const token = store.mint();
   let handlers: Array<RequestHandler | ErrorRequestHandler> = [];
-  // Exercise the mounted auth, origin check, raw parser and handler without TCP.
+  // Production order from server/index.ts: CORS, body parsers, then MCP routes.
+  // Exercise the real middleware, authentication and raw parser without TCP.
   const app = { all(path: string, ...middleware: typeof handlers) {
     expect(path).toBe(VOICE_FLEET_MCP_PATH);
-    handlers = middleware;
+    handlers = [pluginAwareCors(), pluginAwareBodyParsers(), ...middleware];
   } } as unknown as Express;
   mountVoiceFleetMcp(app, { store, env });
-  function post(body: unknown, headers: Record<string, string> = {}) {
+  function post(body: unknown, headers: Record<string, string> = {}, method = "POST", path = VOICE_FLEET_MCP_PATH) {
     const bytes = Buffer.from(typeof body === "string" ? body : JSON.stringify(body));
     const requestHeaders: Record<string, string> = {
       authorization: `Bearer ${token.plaintext}`, "content-type": "application/json",
@@ -27,13 +28,16 @@ function boot(env: Record<string, string | undefined> = {}) {
       ...Object.fromEntries(Object.entries(headers).map(([name, value]) => [name.toLowerCase(), value])),
     };
     const req = Object.assign(Readable.from([bytes]), {
-      method: "POST", headers: requestHeaders,
+      method, path, headers: requestHeaders,
       get: (name: string) => requestHeaders[name.toLowerCase()],
     }) as unknown as Request;
     return new Promise<{ status: number; body?: unknown; headers: Headers }>((resolve, reject) => {
       const result = { status: 200, body: undefined as unknown, headers: new Headers() };
       const res = {
+        get statusCode() { return result.status; },
+        set statusCode(value: number) { result.status = value; },
         setHeader(name: string, value: string) { result.headers.set(name, value); },
+        getHeader(name: string) { return result.headers.get(name) ?? undefined; },
         status(status: number) { result.status = status; return res; },
         json(value: unknown) { result.body = value; result.headers.set("Content-Type", "application/json"); resolve(result); return res; },
         end() { resolve(result); return res; },
@@ -57,6 +61,23 @@ function boot(env: Record<string, string | undefined> = {}) {
 }
 
 describe("hosted MCP HTTP security boundary (socket-free)", () => {
+  it.each([VOICE_FLEET_MCP_PATH, `${VOICE_FLEET_MCP_PATH}/`, "/API/PLUGIN/V1/MCP/"])("lets OPTIONS %s reach MCP method handling without CORS headers in production order", async (path) => {
+    const fetch = vi.spyOn(globalThis, "fetch");
+    const { post } = boot();
+    const headers = { Origin: "https://bot.example", "Access-Control-Request-Method": "POST", "Access-Control-Request-Headers": "authorization,content-type" };
+    const response = await post("", headers, "OPTIONS", path);
+    expect(response).toMatchObject({ status: 405, body: { error: "Method not allowed" } });
+    expect(response.headers.get("allow")).toBe("POST");
+    expect([...response.headers.keys()].filter((name) => name.startsWith("access-control-"))).toEqual([]);
+    expect(await post("", { ...headers, Authorization: "Bearer invalid" }, "OPTIONS", path)).toMatchObject({ status: 401 });
+    for (const ordinaryPath of ["/ordinary", `${VOICE_FLEET_MCP_PATH}/extra`]) {
+      const ordinary = await post("", headers, "OPTIONS", ordinaryPath);
+      expect(ordinary.status).toBe(204);
+      expect(ordinary.headers.get("access-control-allow-origin")).toBe("*");
+    }
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
   it("allows each configured origin and server-to-server requests without Origin", async () => {
     const fetch = vi.spyOn(globalThis, "fetch").mockImplementation(async () => Response.json({ ok: true }));
     const { post } = boot({ VOICE_FLEET_MCP_ALLOWED_ORIGINS: " https://bot.example, ,http://localhost:3000 " });
@@ -147,7 +168,7 @@ describe("hosted MCP HTTP security boundary (socket-free)", () => {
     const fetch = vi.spyOn(globalThis, "fetch");
     const { post } = boot();
     for (const method of ["notifications/initialized", "notifications/custom"]) {
-      for (const id of ["notification", "", 0, -1, 1.5]) {
+      for (const id of ["notification", "", 0, -1, Number.MAX_SAFE_INTEGER, Number.MIN_SAFE_INTEGER]) {
         const payload = { ...tool, method, id };
         const error = { ...invalidRequest, id };
         expect(await post(payload)).toMatchObject({ status: 400, body: error });
@@ -158,10 +179,10 @@ describe("hosted MCP HTTP security boundary (socket-free)", () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it("rejects overflowing numeric ids from raw JSON with id null before dispatch", async () => {
+  it("rejects fractional, unsafe and overflowing numeric ids from raw JSON with id null before dispatch", async () => {
     const fetch = vi.spyOn(globalThis, "fetch");
     const { post } = boot();
-    for (const id of ["1e400", "-1e400", "null", "false", "{}", "[]"]) {
+    for (const id of ["1.5", "-1.5", "1e-200", "9007199254740992", "-9007199254740992", "1e400", "-1e400", "null", "false", "{}", "[]"]) {
       for (const method of ["tools/call", "notifications/custom"]) {
         const payload = `{"jsonrpc":"2.0","id":${id},"method":"${method}","params":{"name":"voice_fleet_health"}}`;
         expect(await post(payload)).toMatchObject({ status: 400, body: invalidRequest });
@@ -169,7 +190,7 @@ describe("hosted MCP HTTP security boundary (socket-free)", () => {
       }
     }
     expect(fetch).not.toHaveBeenCalled();
-    for (const id of ["", "request", 0, -1, 1.5, Number.MAX_SAFE_INTEGER, Number.MIN_SAFE_INTEGER, 1e-200]) {
+    for (const id of ["", "request", 0, -1, Number.MAX_SAFE_INTEGER, Number.MIN_SAFE_INTEGER]) {
       const response = await post({ jsonrpc: "2.0", id, method: "ping" });
       expect(JSON.parse(JSON.stringify(response.body))).toEqual({ jsonrpc: "2.0", id, result: {} });
     }
@@ -177,7 +198,7 @@ describe("hosted MCP HTTP security boundary (socket-free)", () => {
 
   it("masks international phones in hosted operator fields and included content", async () => {
     vi.spyOn(globalThis, "fetch").mockImplementation(async () => Response.json({
-      from: "+44 20 7946 0000", note: "+44-20-7946-0001", body: "Call +442079460002 or +1 (909) 555-0113",
+      from: "+44 (20) 7946-0000", note: "+44.20.7946.0001", body: "Call +442079460002 or +1 (909) 555-0113",
     }));
     const { post } = boot();
     for (const includeContent of [false, true]) {
@@ -224,14 +245,23 @@ describe("hosted MCP HTTP security boundary (socket-free)", () => {
       { jsonrpc: "2.0", id: 0 },
       { jsonrpc: "2.0", id: "both", result: null, error: null },
       { jsonrpc: "2.0", id: 0, result: {}, error: { code: -32603, message: "Synthetic error" } },
-      ...[undefined, null, true, false, {}, [], Infinity].flatMap((id) => [
+      ...[undefined, null, true, false, {}, [], 1.5, 1e-200, Number.MAX_SAFE_INTEGER + 1, Number.MIN_SAFE_INTEGER - 1, Infinity, -Infinity, NaN].flatMap((id) => [
         { jsonrpc: "2.0", id, result: null },
         { jsonrpc: "2.0", id, error: { code: -32603, message: "Synthetic error" } },
       ]),
+      ...[undefined, null, false, "error", 1, [], {}, { code: -32603 }, { message: "Synthetic error" },
+        { code: "-32603", message: "Synthetic error" }, { code: 1.5, message: "Synthetic error" },
+        { code: Infinity, message: "Synthetic error" }, { code: NaN, message: "Synthetic error" },
+        { code: -32603, message: 1 }].map((error) => ({ jsonrpc: "2.0", id: 1, error })),
     ];
     for (const payload of invalid) {
       expect(await post(payload)).toMatchObject({ status: 400, body: invalidRequest });
       expect(await post([payload])).toMatchObject({ status: 200, body: [invalidRequest] });
+    }
+    for (const id of ["1e400", "-1e400"]) {
+      const payload = `{"jsonrpc":"2.0","id":${id},"result":null}`;
+      expect(await post(payload)).toMatchObject({ status: 400, body: invalidRequest });
+      expect(await post(`[${payload}]`)).toMatchObject({ status: 200, body: [invalidRequest] });
     }
     expect(fetch).not.toHaveBeenCalled();
   });
@@ -242,12 +272,14 @@ describe("hosted MCP HTTP security boundary (socket-free)", () => {
     const ignored = [
       { jsonrpc: "2.0", method: "notifications/initialized" },
       { jsonrpc: "2.0", method: "notifications/custom", params: tool.params },
-      ...["", "response", 0, -1, 1.5].flatMap((id) => [
+      ...["", "response", 0, -1, Number.MAX_SAFE_INTEGER, Number.MIN_SAFE_INTEGER].flatMap((id) => [
         { jsonrpc: "2.0", id, result: null },
         { jsonrpc: "2.0", id, error: { code: -32603, message: "Synthetic error" } },
       ]),
+      ...[false, 0, "", [], {}].map((result) => ({ jsonrpc: "2.0", id: "result", result })),
+      { jsonrpc: "2.0", id: "error", error: { code: 0, message: "", data: null } },
     ];
-    for (const payload of [...ignored, ignored]) expect(await post(payload)).toMatchObject({ status: 202, body: undefined });
+    for (const payload of [...ignored, ignored.slice(0, 10), ignored.slice(10)]) expect(await post(payload)).toMatchObject({ status: 202, body: undefined });
     expect(fetch).not.toHaveBeenCalled();
   });
 

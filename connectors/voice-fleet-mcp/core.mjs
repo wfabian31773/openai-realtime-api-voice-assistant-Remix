@@ -35,7 +35,7 @@ const CONTENT_KEYS = /^(body|text|transcript|transcription|transcriptionText|con
 const PHI_KEYS = /^(name|callerName|fromName|firstName|lastName|dob|dateOfBirth|email|subject)$/i;
 const URL_KEYS = /^(mediaUrl|mediaUrls|recordingUrl|url|uri|mediaUri)$/i;
 // Prefer the original NANP match so adjacent numeric text keeps its old output.
-const maskPhone = (value) => value.replace(/(?<![\w+])(?:(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?(\d{4})(?!\w)|\+\d(?:[ -]?\d){7,14}(?!\w|[ -]?\d))/g,
+const maskPhone = (value) => value.replace(/(?<![\w+])(?:(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?(\d{4})(?!\w)|\+\d(?:[ ().-]*\d){7,14}(?!\w|[ ().-]*\d))/g,
   (phone, lastFour) => `***-***-${lastFour ?? phone.replace(/\D/g, "").slice(-4)}`);
 
 export function maskString(value) {
@@ -156,13 +156,18 @@ export function createVoiceFleetMcp({ baseUrl, getToken, timeoutMs = 30000 }) {
 
   async function handleMessage(msg) {
     if (!msg || typeof msg !== "object" || Array.isArray(msg) || msg.jsonrpc !== "2.0" ||
-        (Object.hasOwn(msg, "id") && msg.id !== null && typeof msg.id !== "string" && !(typeof msg.id === "number" && Number.isFinite(msg.id)))) {
+        (Object.hasOwn(msg, "id") && typeof msg.id !== "string" && !Number.isSafeInteger(msg.id))) {
       return rpcError(null, -32600, "Invalid Request");
     }
     // Client responses are acknowledgements, not requests to dispatch.
-    if (!Object.hasOwn(msg, "method") && (Object.hasOwn(msg, "result") || Object.hasOwn(msg, "error"))) return null;
+    if (!Object.hasOwn(msg, "method")) {
+      const validError = msg.error && typeof msg.error === "object" && !Array.isArray(msg.error) &&
+        Number.isInteger(msg.error.code) && typeof msg.error.message === "string";
+      return Object.hasOwn(msg, "id") && Object.hasOwn(msg, "result") !== Object.hasOwn(msg, "error") &&
+        (!Object.hasOwn(msg, "error") || validError) ? null : rpcError(null, -32600, "Invalid Request");
+    }
+    if (Object.hasOwn(msg, "result") || Object.hasOwn(msg, "error")) return rpcError(null, -32600, "Invalid Request");
     if (typeof msg.method !== "string") return rpcError(null, -32600, "Invalid Request");
-    if (Object.hasOwn(msg, "id") && msg.id === null) return rpcError(null, -32600, "Invalid Request");
     if (msg.method.startsWith("notifications/") && Object.hasOwn(msg, "id")) return rpcError(msg.id, -32600, "Invalid Request");
     // MCP notifications never produce a reply or trigger tools.
     if (!Object.hasOwn(msg, "id")) return null;
