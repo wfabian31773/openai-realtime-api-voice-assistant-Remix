@@ -11,6 +11,35 @@ Skip the notes for quick questions that changed nothing. Never put secrets or pa
 
 ---
 
+## 2026-11-23 — hosted voice-fleet MCP v4.0.0 (NOT deployed)
+
+`feat/voice-fleet-hosted-mcp` hosts the imported box connector (snapshot
+`681b21d`, import `b7f9b822`) at `POST /api/plugin/v1/mcp` on the public
+Express server (`server/index.ts`, `API_PORT` default 5000). `core.mjs`
+owns the same 26 tools for HTTP and stdio; initialize reports connector
+`4.0.0`. This is a connector version, not a new voice-runtime marker.
+The stored plugin-token validator is reused before parsing, then the caller's
+exact bearer is forwarded to loopback; no new scope, dependency or migration.
+The global parsers skip MCP so the route owns its auth-first 1 MB limit and
+JSON-RPC parse errors; the raw voice proxy keeps its ordering. On operator SID
+reads and SMS-send replies, the connector's `mask()` masks phones to last-4,
+redacts named sensitive string fields and drops media/recording URLs. Operator
+reads with `includeContent: true` return content and descendants unredacted
+except phones last-4 and media/recording URLs dropped. Other tools preserve
+fleet JSON. Stdio env/defaults and per-call token-file reads
+are retained. Offline tests now use mocked fetch, fix the stale approvalId
+fixture to the documented id hand-off, and require an error when neither id
+nor confirmToken is supplied. Validation: `npx tsc -p . --noEmit` passes;
+Vitest on `src/plugin` plus the connector offline wrapper passes 499 tests
+in 17 files with a verification-only in-memory HTTP adapter, because this
+workspace denies listening sockets (`listen EPERM`). The three offline
+`.mjs` scripts also pass directly with mocked fetch. Normal socket-backed
+HTTP tests still need an unrestricted test environment. Manual live/tsx
+scripts were left manual. **NOT deployed; no push.** Next: publish only through the normal release
+process, then verify initialize version 4.0.0 and 26 tools on the published host.
+
+---
+
 # RULE ZERO — THE RECORD AND THE FUNNEL
 
 **Wayne, 2026-09-12. These two rules are BINDING. They SUPERSEDE everything
@@ -3027,6 +3056,7 @@ on it is evidence about current code.
 
 | the marker reads | what the build does NOT contain |
 |---|---|
+| MCP `serverInfo` before **4.0.0**, or `/api/plugin/v1/mcp` is absent | hosted voice-fleet MCP, built 2026-11-23 on `feat/voice-fleet-hosted-mcp`, **NOT deployed**. A new connector marker only: the public Express API on port 5000 authenticates before its 1 MB parser, reuses the existing token validator, and serves the same 26 tools as stdio with shared masking. No migration or new scope. Check `initialize` and `tools/list` after publication; production impact is unmeasured. |
 | earlier than **20260908** | the PCP blind transfer — a PCP call used the WARM path, so its silence while the queue rang is expected rather than a defect |
 | earlier than **20260911** | the date-of-birth transcript backstop (#280, #281, merged 2026-09-10) |
 | **v5**-…-20260911 | the West Covina fix: v5 routes a "West Covina" caller to our Covina office, v6 refuses and asks again (#287) |
