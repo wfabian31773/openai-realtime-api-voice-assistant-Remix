@@ -23,6 +23,10 @@
  *   ON_CALL_POST_OP_REQUIRE_KEPT=1
  *                            a booked surgery not yet marked kept in NextGen
  *                            routes to on-call instead of the surgeon.
+ *   RUNTIME_TRANSFER_MODE=blind
+ *                            (not this module's lever) forces every transfer
+ *                            blind, which the rotation cannot ride, so it
+ *                            turns the rotation off and says so.
  *
  * Any lever that cannot be honoured turns the whole thing OFF and says why,
  * rather than ringing a number nobody chose.
@@ -64,6 +68,16 @@ export function readOnCallConfig(env: Env = process.env): OnCallConfig {
 
   if (asked !== "test" && asked !== "live") {
     return asked === "" || asked === "off" ? off() : off(`ON_CALL_ROTATION_MODE="${asked}" is not off, test or live`);
+  }
+
+  // The rotation rides the after-hours line's WARM transfer; a fleet-wide
+  // RUNTIME_TRANSFER_MODE=blind sends that line's urgent calls down the blind
+  // path, where nothing is texted, retried or escalated. Say so here, at boot
+  // and on /voice/health, rather than skipping the rotation on every call
+  // without a word (review of #514, round 8). Read the way `transferModeFor`
+  // reads it; a test holds the two to one answer.
+  if ((env.RUNTIME_TRANSFER_MODE ?? "").trim().toLowerCase() === "blind") {
+    return off("RUNTIME_TRANSFER_MODE=blind: the rotation needs the warm transfer on the after-hours line");
   }
 
   // A caller ID the operator chose and mistyped is not replaced by another

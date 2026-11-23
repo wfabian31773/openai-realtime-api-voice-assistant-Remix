@@ -14,6 +14,7 @@ import {
   rotationMayTakeTheDial,
   TRANSFER_ACCEPT_PATH,
   TRANSFER_STATUS_PATH,
+  transferModeFor,
   urgentTextRotationNote,
   ringOutDialTarget,
   type OnCallTransferWiring,
@@ -592,6 +593,18 @@ describe("an urgent after-hours call with the rotation on", () => {
 
   it("covers the after-hours line only: the v2 agents do not know CHAIN_RUNNING", () => {
     expect([...ON_CALL_LANES]).toEqual(["no-ivr"]);
+  });
+
+  it("turns off whenever the after-hours line's transfer would be blind (review of #514, round 8)", () => {
+    // The config reads RUNTIME_TRANSFER_MODE itself, so the boot line and
+    // /voice/health say why; it must give the answer transferModeFor gives.
+    for (const value of [undefined, "", "warm", "blind", " Blind ", "BLIND", "blindly", "cold"]) {
+      const env = { TWILIO_PHONE_NUMBER: "+15550000001", ON_CALL_ROTATION_MODE: "live", RUNTIME_TRANSFER_MODE: value };
+      for (const lane of ON_CALL_LANES) {
+        const blind = transferModeFor(lane, env) === "blind";
+        expect(readOnCallConfig(env).mode === "off", `RUNTIME_TRANSFER_MODE=${String(value)}`).toBe(blind);
+      }
+    }
   });
 });
 

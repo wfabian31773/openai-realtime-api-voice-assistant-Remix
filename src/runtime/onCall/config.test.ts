@@ -87,6 +87,30 @@ describe("the on-call switch", () => {
     expect(c).toMatchObject({ mode: "test", testPhones: ["+15550100001", "+15550100002"] });
   });
 
+  it("is off, and says why, when every transfer is forced blind (review of #514, round 8)", () => {
+    for (const blind of ["blind", " BLIND "]) {
+      for (const mode of ["test", "live"]) {
+        const c = readOnCallConfig({
+          ...BASE,
+          ON_CALL_ROTATION_MODE: mode,
+          ON_CALL_TEST_PHONES: "+15550100001",
+          RUNTIME_TRANSFER_MODE: blind,
+        });
+        expect(c.mode).toBe("off");
+        expect(c.disabledBecause).toMatch(/RUNTIME_TRANSFER_MODE=blind/);
+        expect(onCallHealth(c).disabledBecause).toMatch(/warm transfer/);
+      }
+    }
+    // warm, unset or anything else leaves the rotation as asked
+    for (const other of ["warm", "", undefined, "blind-ish"]) {
+      expect(readOnCallConfig({ ...BASE, ON_CALL_ROTATION_MODE: "live", RUNTIME_TRANSFER_MODE: other }).mode).toBe(
+        "live",
+      );
+    }
+    // a switch that is off stays off with no reason given
+    expect(readOnCallConfig({ ...BASE, RUNTIME_TRANSFER_MODE: "blind" }).disabledBecause).toBeUndefined();
+  });
+
   it("reads the kept lever only as 1", () => {
     expect(readOnCallConfig({ ...BASE, ON_CALL_POST_OP_REQUIRE_KEPT: "1" }).requireKept).toBe(true);
     expect(readOnCallConfig({ ...BASE, ON_CALL_POST_OP_REQUIRE_KEPT: "true" }).requireKept).toBe(false);

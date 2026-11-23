@@ -428,6 +428,14 @@ interface OnCallRun {
   preDialSms: Promise<{ ok: boolean; sid: string | null; at: Date }>;
 }
 
+/** One escalation's own state: never shared between two escalations on a call. */
+interface AttemptHolder {
+  run: OnCallRun | null;
+  attemptId: TransferAttemptId;
+  /** When this attempt's dial started, so its recorded ring time is its own. */
+  dialStartedAt: number;
+}
+
 export interface RuntimeTransfer {
   /** Null when transfers can work; otherwise the reason they cannot. When
    * non-null, voiceRuntime must NOT pass a handoff to resolveLane, so the
@@ -791,8 +799,6 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
       metadata: LaneCallMetadata,
       hooks?: TransferLifecycleHooks,
     ): () => Promise<unknown> {
-      let dialStartedAt = Date.now();
-      let attemptId: TransferAttemptId = newTransferAttemptId();
       const mode = transferModeFor(slug, env);
       /**
        * ONE CHAIN PER CALL. `none`: no chain yet, or the last route attempt
@@ -838,12 +844,14 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
         }
       };
       /**
-       * The attempt writes the run it started into `holder`, a fresh object
-       * per invocation, so two escalations on one call can never read each
-       * other's run.
+       * The attempt writes the run it started, its own attempt id and the
+       * moment its dial started into `holder`, a fresh object per invocation,
+       * so two escalations on one call can never read each other's run, ring
+       * time or attempt (review of #514, round 8: one closure variable shared
+       * by overlapping escalations timed the first one's ring from the
+       * second's dial).
        */
-      const attempt = async (holder: { run: OnCallRun | null }): Promise<TransferOutcome> => {
-        attemptId = newTransferAttemptId();
+      const attempt = async (holder: AttemptHolder): Promise<TransferOutcome> => {
         try {
           // Before anything dials: the whole attempt — dial, briefing,
           // keypress — is bounded by the accept window, and the bridge's
@@ -859,7 +867,7 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
           // When the office leg started ringing, so the recorded outcome can
           // say how long it rang. The old core reports this and the runtime
           // reported nothing at all.
-          dialStartedAt = Date.now();
+          holder.dialStartedAt = Date.now();
           // Read at INVOKE time, not build time: the agent's escalate tool
           // writes the side channel during the call, after the factory ran.
           const details = escalationDetailsMap.get(metadata.callId);
@@ -916,7 +924,7 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
                 if (!holder.run) chainState = claim.before;
               }
               // The ring is timed from the dial, not from the routing read.
-              dialStartedAt = Date.now();
+              holder.dialStartedAt = Date.now();
             }
           }
           /**
@@ -976,7 +984,7 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
             if (blindOutcome.ok) {
               forgetStaleBlindDials(Date.now());
               pendingBlindDials.set(metadata.callSid, {
-                attemptId,
+                attemptId: holder.attemptId,
                 destination: blindOutcome.destination,
                 redirectedAtMs: Date.now(),
                 ...(details?.briefingGaps ? { briefingGaps: details.briefingGaps } : {}),
@@ -1098,7 +1106,11 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
          */
         const briefed = escalationDetailsMap.get(metadata.callId);
         const briefing = { gaps: briefed?.briefingGaps, asked: briefed?.askedBeforeDial };
-        const holder: { run: OnCallRun | null } = { run: null };
+        const holder: AttemptHolder = {
+          run: null,
+          attemptId: newTransferAttemptId(),
+          dialStartedAt: Date.now(),
+        };
         /**
          * HAND THE CHAIN TO THE RUNNER (v268). The in-call dial was level 0's
          * first attempt; the runner records it and, when nobody took the
@@ -1180,7 +1192,7 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
         // The ring is read here, before the hand-off wait below, so the
         // ticket's ring time is the dial's and not the dial's plus that wait
         // (review of #514).
-        const ringSeconds = Math.round((Date.now() - dialStartedAt) / 1000);
+        const ringSeconds = Math.round((Date.now() - holder.dialStartedAt) / 1000);
         /**
          * WHAT THE CALLER AND THE TICKET ARE TOLD WAITS FOR THE HAND-OFF,
          * briefly. A not-taken dial is "the on-call team is being paged" only
@@ -1278,7 +1290,7 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
           const toPersist = recordRuntimeTransferOutcome(
             metadata.callSid,
             toRecordedOutcome(outcome, ringSeconds, briefing),
-            attemptId,
+            holder.attemptId,
           );
           writeOutcome(metadata.callSid, toPersist);
         } catch (err) {
