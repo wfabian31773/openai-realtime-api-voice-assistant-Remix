@@ -78,6 +78,145 @@ describe("voice fleet MCP core", () => {
   });
 
   it.each([
+    ["Call 909-555-0113 at 5 pm", "Call ***-***-0113 at 5 pm"],
+    ["Call 909-555-0113 room 12", "Call ***-***-0113 room 12"],
+    ["Call 909-555-0113 on 11/23", "Call ***-***-0113 on 11/23"],
+    ["Call 909-555-0113 5 pm", "Call ***-***-0113 5 pm"],
+    ["Call 909-555-0113 5 pm then 909-555-0113", "Call ***-***-0113 5 pm then ***-***-0113"],
+    ["909-555-0113 ext 12 at 5 pm", "***-***-0113 at 5 pm"],
+    ["ticket 12 call 909 555 0113 room 4", "ticket 12 call ***-***-0113 room 4"],
+    ["room 12", "room 12"],
+    ["on 11/23", "on 11/23"],
+  ])("preserves prose and the phone's actual last four: %s", (input, expected) => {
+    expect(maskString(input)).toBe(expected);
+    expect(mask({ note: input })).toEqual({ note: expected });
+    for (const key of ["transcript", "body", "messages"]) {
+      expect(mask({ [key]: [input] }, "", true)).toEqual({ [key]: [expected] });
+    }
+  });
+
+  it.each([
+    ["909 555 0113 5 pm", "***-***-0113 5 pm"],
+    ["+1 909 555 0113 x 5", "***-***-0113"],
+    ["909 555 0113 or 909 555 0114", "***-***-0113 or ***-***-0114"],
+    ["call 909 555 0113 now 5550113", "call ***-***-0113 now ***-***-0113"],
+    ["909 a 555 0113", "***-***-0113"],
+    ["909 abc 555 0113", "***-***-0113"],
+    ["9095550 a 113", "***-***-0113"],
+    ["9095550 abc 113", "***-***-0113"],
+    ["+1 909 a 555 0113", "***-***-0113"],
+    ["９０９ ａ ５５５ ０１１３", "***-***-0113"],
+    ["٩٠٩\u00a0字\u202f٥٥٥ ٠١١٣", "***-***-0113"],
+    ["909\\u0020a\\u0020555 0113", "***-***-0113"],
+    ["123 4567 890", "***-***-7890"],
+    ["+44 1234 5678 90", "***-***-7890"],
+    ["＋４４ １２３４ ５６７８ ９０", "***-***-7890"],
+    ["+359 888 1234 56", "***-***-3456"],
+    ["909 555 0113 5", "***-***-1135"],
+    ["909 555 0113 ext 12 a 3456789", "***-***-0113"],
+    ["909 555 0113 ext 12 abc 3456789", "***-***-0113"],
+  ])("does not expose partial phone groups or extensions at word/space boundaries: %s", (input, expected) => {
+    expect(maskString(input)).toBe(expected);
+    expect(mask({ note: input })).toEqual({ note: expected });
+    expect(mask({ body: [{ text: input }] }, "", true)).toEqual({ body: [{ text: expected }] });
+    expect(maskString(JSON.stringify({ note: input }))).toBe(JSON.stringify({ note: expected }));
+  });
+
+  it("removes URL keys recursively from embedded and repeatedly serialized JSON", () => {
+    const input = {
+      recordingUrl: "https://example.test/private-recording",
+      mediaUrl: "https://example.test/private-media",
+      note: "Call 909-555-0113 at 5 pm",
+      nested: { uri: "https://example.test/private-uri", phone: "5550100" },
+      items: [{ mediaUrls: ["https://example.test/private-array"], text: "555a0100" }],
+    };
+    const expected = {
+      note: "Call ***-***-0113 at 5 pm",
+      nested: { phone: "***-***-0100" }, items: [{ text: "***-***-0100" }],
+    };
+    for (const [data, redacted] of [[input, expected], [[input], [expected]]]) {
+      const json = JSON.stringify(data), masked = JSON.stringify(redacted);
+      expect(maskString(json)).toBe(masked);
+      expect(mask({ note: json })).toEqual({ note: masked });
+      for (const key of ["transcript", "body", "messages"]) {
+        expect(mask({ [key]: [{ text: json }] }, "", true)).toEqual({ [key]: [{ text: masked }] });
+      }
+      expect(maskString(JSON.stringify(json))).toBe(JSON.stringify(masked));
+    }
+  });
+
+  it.each([
+    ['record {"recordingUrl": "https://example.test/private", "phone": "909-555-0113"',
+      'record {, "phone": "***-***-0113"'],
+    ['record {"mediaUrl": "https://example.test/private", broken', 'record {, broken'],
+    ["Listen https://example.test/Recordings/synthetic then call 909-555-0113 at 5 pm",
+      "Listen [redacted URL] then call ***-***-0113 at 5 pm"],
+    ...["recordings.twilio.com", "media.twilio.com", "mms.twiliocdn.com"].map((host) => [
+      `Listen https://${host}/synthetic then call 5550100`, "Listen [redacted URL] then call ***-***-0100",
+    ]),
+  ])("removes recording/media links from free text and malformed JSON: %s", (input, expected) => {
+    expect(maskString(input)).toBe(expected);
+    expect(mask({ note: input })).toEqual({ note: expected });
+    expect(mask({ messages: [{ text: input }] }, "", true)).toEqual({ messages: [{ text: expected }] });
+  });
+
+  it("removes media URLs in encoded, prefixed, quoted and array-valued embedded fields", () => {
+    const url = "https://example.test/private-audio";
+    const json = JSON.stringify({ recordingUrl: url });
+    const escaped = '{"recording\\u0055rl":"https:\\/\\/example.test\\/private-audio"}';
+    const inputs = [
+      json, escaped, `[${escaped}]`, JSON.stringify({ nested: escaped }, null, 2),
+      `record ${escaped}`, `record ${JSON.stringify({ mediaUrls: [url, { link: url }] })}`,
+      `record ${JSON.stringify({ RECORDINGURL: [url] }, null, 2)}`,
+      `{'recordingUrl':'${url}'}`, `recordingUrl=${url}`, `RECORDINGURL: '${url}'`,
+      `recording URL: ${url}`, `recording URL ${url}`, `mediaUrl: '${url}'`,
+      JSON.stringify({ "recording%55rl": url }), JSON.stringify({ "recording\\u0055rl": url }),
+      encodeURIComponent(json), encodeURIComponent(encodeURIComponent(json)),
+      `record ${encodeURIComponent(json)}`,
+      // Malformed percent sequences must not prevent decoding the rest.
+      `%ff${encodeURIComponent(json)}`,
+    ];
+    let serialized = json;
+    for (let depth = 0; depth < 4; depth++) {
+      inputs.push(serialized, `record ${serialized}`, JSON.stringify({ text: `record ${serialized}` }),
+        `record ${JSON.stringify({ nested: serialized }, null, 2)}`);
+      serialized = JSON.stringify(serialized);
+    }
+    for (const input of inputs) {
+      const redacted = maskString(input);
+      expect(redacted, input).not.toContain("private-audio");
+      expect(mask({ note: input })).toEqual({ note: redacted });
+      expect(mask({ messages: [{ text: input }] }, "", true)).toEqual({ messages: [{ text: redacted }] });
+    }
+  });
+
+  it("removes escaped and URL-encoded standalone recording links", () => {
+    const url = "https://example.test/Recordings/private-audio";
+    const escaped = url.replace(/\//g, "\\/");
+    const unicode = Array.from(url, (point) => `\\u${point.charCodeAt(0).toString(16).padStart(4, "0")}`).join("");
+    for (const link of [escaped, unicode, encodeURIComponent(url), encodeURIComponent(encodeURIComponent(url)),
+      "https%3A%2F%2Fmedia.twilio.com%2Fprivate-audio"]) {
+      const input = `Listen ${link}`;
+      expect(maskString(input), input).toBe("[redacted URL]");
+      expect(mask({ body: input }, "", true)).toEqual({ body: "[redacted URL]" });
+    }
+    expect(maskString("Visit https://example.test/docs%20page")).toBe("Visit https://example.test/docs%20page");
+  });
+
+  it("bounds work for repeatedly encoded media fields and large embedded URL arrays under 50 ms", () => {
+    const url = "https://example.test/private-audio";
+    const repeated = `record ${JSON.stringify({ mediaUrls: Array(1000).fill(url) })}`;
+    const deeplyEncoded = `%${"25".repeat(1000)}7B%22recordingUrl%22%3A%22${url}%22%7D`;
+    for (const input of [repeated, deeplyEncoded]) {
+      maskString(input);
+      const start = performance.now();
+      const output = maskString(input);
+      expect(performance.now() - start).toBeLessThan(50);
+      expect(output).toMatch(/^\[redacted (?:URL|encoded content)\]$/);
+    }
+  });
+
+  it.each([
     ["555/0100", "***-***-0100"],
     ["(909)\n555-0113", "***-***-0113"],
     ["+44\u00A020\u202F7946\u20130958 x\n123", "***-***-0958"],

@@ -161,6 +161,7 @@ function maskDigitArray(value, key) {
 function maskPhoneData(value, key = "") {
   if (Array.isArray(value)) return (maskDigitArray(value, key) ?? value).map((item) => maskPhoneData(item, key));
   if (value && typeof value === "object") return Object.fromEntries(Object.entries(value)
+    .filter(([k]) => !isMediaUrlKey(k))
     .map(([k, v]) => [maskPhone(k), maskPhoneData(v, k)]));
   if (typeof value === "string") return maskPhone(value, key);
   if (typeof value === "number" && Number.isFinite(value)) {
@@ -168,6 +169,61 @@ function maskPhoneData(value, key = "") {
     return masked === text ? value : masked;
   }
   return value;
+}
+
+function decodeMediaText(value) {
+  let decoded = value;
+  for (let i = 0; i < 8 && /[\\%]/.test(decoded); i++) {
+    const next = decoded.replace(/\\(?:u\{([a-f\d]{1,6})\}|u([a-f\d]{4})|x([a-f\d]{2})|(["'\\/])|([bfnrtv]))/gi,
+      (escape, wide, unicode, hex, literal, space) => {
+        if (literal) return literal;
+        if (space) return " ";
+        const code = parseInt(wide || unicode || hex, 16);
+        return code <= 0x10ffff ? String.fromCodePoint(code) : escape;
+      }).replace(/(?:%[a-f\d]{2})+/gi, (encoded) => {
+      try { return decodeURIComponent(encoded); }
+      catch { return encoded.replace(/%([0-7][a-f\d])/gi, (_, hex) => String.fromCharCode(parseInt(hex, 16))); }
+    });
+    if (next === decoded) break;
+    decoded = next;
+    // Bound work even for adversarially repeated percent/JSON encodings.
+    if (i === 7) return null;
+  }
+  return decoded;
+}
+
+function isMediaUrlKey(key) {
+  if (URL_KEYS.test(key)) return true;
+  if (!/[\\%]/.test(key)) return false;
+  const decoded = decodeMediaText(key);
+  return decoded === null || URL_KEYS.test(decoded);
+}
+
+function removeMediaUrls(value) {
+  // Preserve simple free-text fields' existing removal. For other embedded
+  // formats, inspect decoded text without trusting JSON punctuation or quotes.
+  value = value.replace(/"(?:mediaUrls?|recordingUrl|url|uri|mediaUri)"\s*:\s*"(?:[^"\\]|\\[\s\S])*(?:"|\\?$)/gi, "");
+  const decoded = decodeMediaText(value);
+  if (decoded === null) return "[redacted encoded content]";
+  // Arrays, escaped keys, single quotes and prose assignments cannot reliably
+  // be removed field-by-field. Prefer dropping the enclosing text to a leak.
+  if (/\b(?:media[\s+_-]*urls?|recording[\s+_-]*urls?|url|uri|media[\s+_-]*uri)(?:\s*["']?\s*[:=]|\s+(?=https?:))/i.test(decoded)) {
+    return "[redacted URL]";
+  }
+  let removed = false;
+  const result = decoded.replace(/https?:\/\/[^\s<>"'\\]+/gi, (url) => {
+    try {
+      const { hostname, pathname } = new URL(url);
+      if (/\/Recordings(?:\/|$)/i.test(pathname) ||
+        /(?:^|\.)twiliocdn\.com$/i.test(hostname) ||
+        /^(?:recordings?|media|mms)(?:\.[\w-]+)*\.twilio\.com$/i.test(hostname)) {
+        removed = true;
+        return "[redacted URL]";
+      }
+    } catch { /* Invalid URLs still pass through phone masking. */ }
+    return url;
+  });
+  return removed ? (decoded === value ? result : "[redacted URL]") : value;
 }
 
 function maskPhone(value, key = "") {
@@ -181,6 +237,7 @@ function maskPhone(value, key = "") {
       return JSON.stringify(masked) === JSON.stringify(parsed) ? value : JSON.stringify(masked);
     } catch { /* Free text can contain JSON-like punctuation. */ }
   }
+  value = removeMediaUrls(value);
   const protectedValues = new Map();
   const delimiter = "\uE000";
   const protect = (token) => {
@@ -223,9 +280,10 @@ function maskPhone(value, key = "") {
   const groups = Array.from(normalized.matchAll(/\d+/g));
   const gaps = groups.map((group, i) => i ? normalized.slice(groups[i - 1].index + groups[i - 1][0].length, group.index) : "\0");
   const joins = gaps.map((gap) => LETTER_GAP.test(gap));
+  const wordGaps = gaps.map((gap) => /\p{White_Space}\p{L}+[\p{P}\p{S}]*\p{White_Space}/u.test(gap));
   const following = new Array(groups.length).fill(0);
   for (let i = groups.length - 1; i >= 0; i--) following[i] = groups[i][0].length +
-    (i + 1 < groups.length && joins[i + 1] && !/[,;]/.test(gaps[i + 1]) ? following[i + 1] : 0);
+    (i + 1 < groups.length && joins[i + 1] && !wordGaps[i + 1] && !/[,;]/.test(gaps[i + 1]) ? following[i + 1] : 0);
   const pieces = [];
   let previousEnd = 0, first = 0, count = 0, hasExtension = false;
   const emit = (last) => {
@@ -252,8 +310,25 @@ function maskPhone(value, key = "") {
     previousEnd = originalEnd;
   };
   for (let i = 0; i < groups.length; i++) {
-    if (i && count >= 7 && /(?:extension|ext\.?|x|#|\()/iu.test(gaps[i])) hasExtension = true;
-    if (i && (!joins[i] || (!hasExtension && count >= 7 && /[,;]|\p{L}.*\p{White_Space}|\p{White_Space}.*\p{L}/u.test(gaps[i]) && following[i] >= 7))) {
+    const gap = gaps[i];
+    const extension = count >= 7 && /^[\p{White_Space}\p{P}\p{S}]*(?:extension|ext\.?|x|#)[\p{White_Space}\p{P}\p{S}]*$/iu.test(gap);
+    // Ambiguous words may split a single phone (909 a 555 0113). Only clear
+    // prose cues can separate an incomplete side; otherwise mask the whole run.
+    const proseGap = /\p{White_Space}(?:at|on|room|call|now|or|and|then)[\p{P}\p{S}]*\p{White_Space}/iu.test(gap);
+    const wordBoundary = !extension && (!hasExtension || proseGap) && wordGaps[i] &&
+      (count >= 7 && following[i] >= 7 || proseGap && (count >= 7 || following[i] >= 7));
+    // Only the standard 3-3-4 shape (optionally prefixed by country code 1)
+    // followed by a time supports treating a trailing short group as prose.
+    // Other valid groupings, e.g. 123 4567 890, must stay together.
+    const lengths = i - first;
+    const completePhone = (lengths === 3 || lengths === 4 && groups[first][0] === "1") &&
+      groups[i - 3][0].length === 3 && groups[i - 2][0].length === 3 && groups[i - 1][0].length === 4;
+    const trailingGroup = !hasExtension && completePhone && i - first >= 2 &&
+      gap === " " && /^(?:[1-9]|1[0-2])$/.test(groups[i][0]) && following[i] < 7 &&
+      /^[\p{White_Space}]*[ap]m\b/iu.test(normalized.slice(groups[i].index + groups[i][0].length));
+    if (i && (extension || /\(/.test(gap)) && count >= 7) hasExtension = true;
+    if (i && (!joins[i] || wordBoundary || trailingGroup ||
+      (!hasExtension && count >= 7 && /[,;]/.test(gap) && following[i] >= 7))) {
       emit(i - 1); first = i; count = 0; hasExtension = false;
     }
     count += groups[i][0].length;
@@ -278,7 +353,7 @@ export function mask(value, key = "", includeContent = false, inContent = false)
   const isContent = inContent || (includeContent && CONTENT_KEYS.test(key));
   if (Array.isArray(value)) return (maskDigitArray(value, key) ?? value).map((item) => mask(item, key, includeContent, isContent));
   if (value && typeof value === "object") {
-    return Object.fromEntries(Object.entries(value).filter(([k]) => !URL_KEYS.test(k))
+    return Object.fromEntries(Object.entries(value).filter(([k]) => !isMediaUrlKey(k))
       .map(([k, v]) => [maskPhone(k), mask(v, k, includeContent, isContent)]));
   }
   if (typeof value === "number") return maskPhoneData(value, key);
