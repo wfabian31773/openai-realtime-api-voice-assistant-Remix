@@ -904,20 +904,22 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
         // twice. A provider pressing a key while the chain is still running
         // has the patient, so the late press takes it (review of #514, round
         // 10): telling them it is closed would keep ringing the next level.
-        const fresh = await store.getAttempt(a.id);
-        if (fresh?.outcome === "taken_elsewhere") return "already_taken";
-        if (fresh?.outcome === "accepted") {
-          by = fresh;
+        // acceptLate refuses a call another took (taken_elsewhere), one
+        // already accepted, and any call of a chain that has ended; the read
+        // after it says which.
+        const was = (await store.getAttempt(a.id))?.outcome;
+        by = await store.acceptLate(a.id, now());
+        if (by) {
+          log(`[ON-CALL] ${a.callSid}: a key press on a call recorded ${was ?? "over"} at level ${a.levelIndex}; it takes the patient`);
         } else {
-          by = await store.acceptLate(a.id, now());
-          if (!by) {
-            const again = await store.getAttempt(a.id);
-            if (again?.outcome === "taken_elsewhere") return "already_taken";
-            if (again?.outcome !== "accepted") return "closed";
-            by = again;
-          } else {
-            log(`[ON-CALL] ${a.callSid}: a key press on a call recorded ${fresh?.outcome ?? "over"} at level ${a.levelIndex}; it takes the patient`);
+          const after = await store.getAttempt(a.id);
+          if (after?.outcome === "taken_elsewhere") return "already_taken";
+          if (after?.outcome !== "accepted") {
+            // The chain ended between the read above and this press: another
+            // call took the patient, or nobody did.
+            return (await store.getEscalation(e.id))?.status === "accepted" ? "already_taken" : "closed";
           }
+          by = after;
         }
       }
       let { row, byThis } = await closeAsTaken(e.id, by);

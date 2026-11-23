@@ -772,6 +772,30 @@ describe("a key press on a call we had marked over (review of #514, round 10)", 
     expect(h.store.attempts.get(id)?.outcome).toBe("no_answer");
   });
 
+  it("is told already taken when another call takes the patient between the read and the press", async () => {
+    const h = harness();
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    const id = h.lastCallAttempt().id;
+    await h.store.endAttempt(id, "no_answer", h.now());
+    const real = h.store.acceptLate.bind(h.store);
+    h.store.acceptLate = async (attemptId, at) => {
+      const cur = h.escalation();
+      await h.store.closeEscalation(cur.id, cur.version, {
+        status: "accepted",
+        acceptedBy: IE_DIRECTOR,
+        acceptedAt: at,
+        acceptedAttemptId: 999,
+        nextAt: null,
+      });
+      return real(attemptId, at);
+    };
+    expect(await h.runner.onProviderAck(id, "1")).toBe("already_taken");
+    expect(h.store.attempts.get(id)?.outcome).toBe("no_answer");
+    expect(h.escalation()).toMatchObject({ status: "accepted", acceptedAttemptId: 999 });
+  });
+
   it("keeps a call hung up because another took the patient as already taken", async () => {
     const h = harness();
     const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
