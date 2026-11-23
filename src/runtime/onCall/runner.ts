@@ -67,6 +67,20 @@ export const CLAIM_LIMIT = 10;
  * were equal, so the lease ran out the moment the next tick could start).
  */
 export const TICK_BUDGET_MS = CLAIM_LEASE_MS - 15_000;
+/**
+ * How many ticks may still be waiting past their budget before the runner
+ * stops claiming more rows. Under a stalled store or Twilio every tick would
+ * otherwise start another claim and more sends that hang beside the last ones
+ * (review of #514, round 9). One or two slow ticks still let the next tick run,
+ * which is what the budget is for.
+ */
+export const MAX_LATE_TICKS = 3;
+/**
+ * A late tick stops counting after this long, so work that never answers (a
+ * pool connection that never returns) cannot stop the chain for good. The
+ * ringing guard: by then every row such a tick was on is due again anyway.
+ */
+export const LATE_TICK_FORGET_MS = RING_GUARD_MS;
 /** How long the provider's phone rings before Twilio gives up. */
 export const PROVIDER_RING_SECONDS = 30;
 /** The provider's call can never run longer than this. */
@@ -145,6 +159,8 @@ export interface OnCallRunnerDeps {
   log?: (line: string) => void;
   /** For tests: how long a tick waits for its rows. TICK_BUDGET_MS. */
   tickBudgetMs?: number;
+  /** For tests: how long a late tick counts. LATE_TICK_FORGET_MS. */
+  lateTickForgetMs?: number;
 }
 
 export interface OnCallRunner {
@@ -229,6 +245,10 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
   const log = deps.log ?? ((line: string) => console.log(line));
   let running = false;
   let timer: NodeJS.Timeout | null = null;
+  // The ticks still waiting past their budget, each until its work settles or
+  // LATE_TICK_FORGET_MS passes, whichever is first.
+  const lateTicks = new Set<symbol>();
+  let pauseLogged = false;
 
   const url = (path: string, attemptId: number) => `https://${deps.host}${path}?attempt=${attemptId}`;
 
@@ -806,6 +826,16 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
 
     async tick() {
       if (running) return;
+      if (lateTicks.size >= MAX_LATE_TICKS) {
+        if (!pauseLogged) {
+          pauseLogged = true;
+          log(
+            `[ON-CALL] ${lateTicks.size} ticks are still waiting on a send or the store; no new rows are claimed until one of them answers`,
+          );
+        }
+        return;
+      }
+      pauseLogged = false;
       running = true;
       // Each claimed row is stepped on its own, side by side: a row whose text
       // or call never answers does not hold the rows claimed with it.
@@ -832,6 +862,14 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
       try {
         if ((await Promise.race([work.then(() => "done" as const), outOfTime])) === "late") {
           log("[ON-CALL] a tick is still waiting on a send or the store; the next tick runs without it");
+          const token = Symbol("late tick");
+          lateTicks.add(token);
+          const forget = setTimeout(() => lateTicks.delete(token), deps.lateTickForgetMs ?? LATE_TICK_FORGET_MS);
+          forget.unref?.();
+          void work.finally(() => {
+            clearTimeout(forget);
+            lateTicks.delete(token);
+          });
         }
       } finally {
         if (budget) clearTimeout(budget);

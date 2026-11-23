@@ -7,6 +7,8 @@ import {
   RING_GUARD_MS,
   STALE_ESCALATION_MS,
   TICK_BUDGET_MS,
+  MAX_LATE_TICKS,
+  LATE_TICK_FORGET_MS,
   attemptNote,
   createOnCallRunner,
   exhaustedNote,
@@ -56,6 +58,7 @@ function harness(
     notifyUrgent?: any;
     endCall?: any;
     tickBudgetMs?: number;
+    lateTickForgetMs?: number;
   } = {},
 ) {
   let clock = new Date(opts.start ?? WED_NIGHT);
@@ -104,6 +107,7 @@ function harness(
     now,
     log,
     ...(opts.tickBudgetMs !== undefined ? { tickBudgetMs: opts.tickBudgetMs } : {}),
+    ...(opts.lateTickForgetMs !== undefined ? { lateTickForgetMs: opts.lateTickForgetMs } : {}),
   });
   return {
     store,
@@ -1484,6 +1488,56 @@ describe("one row that never answers holds no other row (review, 2026-11-23)", (
     const lines = h.log.mock.calls.map(([l]) => String(l));
     expect(lines.some((l) => l.includes(`${a!.callSid}: step failed: store write refused`))).toBe(true);
     expect(lines.some((l) => l.includes("tick failed"))).toBe(false);
+  });
+
+  // Review of #514, round 9: under a stalled store every tick started another
+  // claim beside the ones still hanging.
+  it("stops claiming while three ticks are still waiting, and claims again when one answers", async () => {
+    const h = harness({ tickBudgetMs: 20 });
+    const claimDue = h.store.claimDue.bind(h.store);
+    const hung: Array<() => void> = [];
+    const claim = vi.spyOn(h.store, "claimDue").mockImplementation(async (...args) => {
+      if (hung.length < MAX_LATE_TICKS) {
+        await new Promise<void>((res) => hung.push(res));
+      }
+      return claimDue(...args);
+    });
+    for (let i = 0; i < MAX_LATE_TICKS; i++) await h.runner.tick();
+    expect(claim).toHaveBeenCalledTimes(MAX_LATE_TICKS);
+    await h.runner.tick();
+    await h.runner.tick();
+    expect(claim).toHaveBeenCalledTimes(MAX_LATE_TICKS);
+    const paused = h.log.mock.calls.map(([l]) => String(l)).filter((l) => l.includes("no new rows are claimed"));
+    expect(paused).toHaveLength(1);
+    hung[0]();
+    await vi.waitFor(async () => {
+      await h.runner.tick();
+      expect(claim).toHaveBeenCalledTimes(MAX_LATE_TICKS + 1);
+    });
+  });
+
+  it("still lets the next tick claim while fewer than three ticks are late", async () => {
+    const h = harness({ tickBudgetMs: 20 });
+    const claim = vi.spyOn(h.store, "claimDue").mockImplementation(() => new Promise(() => {}));
+    for (let i = 0; i < MAX_LATE_TICKS; i++) await h.runner.tick();
+    expect(claim).toHaveBeenCalledTimes(MAX_LATE_TICKS);
+  });
+
+  it("forgets a late tick that never answers, so the chain is not stopped for good", async () => {
+    const h = harness({ tickBudgetMs: 20, lateTickForgetMs: 60 });
+    const claim = vi.spyOn(h.store, "claimDue").mockImplementation(() => new Promise(() => {}));
+    for (let i = 0; i < MAX_LATE_TICKS; i++) await h.runner.tick();
+    await h.runner.tick();
+    expect(claim).toHaveBeenCalledTimes(MAX_LATE_TICKS);
+    await new Promise((r) => setTimeout(r, 80));
+    await h.runner.tick();
+    expect(claim).toHaveBeenCalledTimes(MAX_LATE_TICKS + 1);
+  });
+
+  it("forgets a late tick no sooner than the ringing guard", () => {
+    expect(MAX_LATE_TICKS).toBeGreaterThanOrEqual(2);
+    expect(LATE_TICK_FORGET_MS).toBeGreaterThan(TICK_BUDGET_MS);
+    expect(LATE_TICK_FORGET_MS).toBeLessThanOrEqual(RING_GUARD_MS);
   });
 
   it("gives up waiting on a tick before its rows' lease runs out", () => {
