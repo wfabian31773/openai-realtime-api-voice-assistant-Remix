@@ -169,15 +169,20 @@ A call has at most one escalation chain running at a time.
   patient, every level was tried, or it was stopped), the second request
   takes today's path: the fixed on-call number, rung as before the rotation.
   It does not start a second chain.
-- If the chain's record for this call cannot be read (a database outage), the
-  second request also takes today's path, so an urgent caller always rings a
-  person rather than being told a chain is paging when nobody can see one.
+- If the chain's record for this call cannot be read (a database outage), or
+  the read has not answered within 2 seconds, the second request also takes
+  today's path, so an urgent caller always rings a person rather than being
+  told a chain is paging when nobody can see one, and is never held on a read
+  that does not answer.
 - If the first request could not open its record at all (a database outage
   at the moment it started), the next request routes through the rotation
   again.
-- If the in-call dial fails outright after the provider was texted, the chain
-  is handed on as a failed first call, so the retry and the directors still
-  follow.
+- If the in-call dial fails outright after the provider was texted (the
+  dial, or the urgent text before it, throws), it is handled as a failed first
+  call: the chain is handed on, so the retry and the directors still follow;
+  the urgent ring-out ticket is filed; and the agent is told the team is being
+  paged, the same words as a transfer nobody took. With the rotation off, a
+  dial that throws reaches the agent as it does today.
 
 The rotation also runs when `HUMAN_AGENT_NUMBER` is not set: the number to
 ring comes from the rotation. With the rotation off, an unset
@@ -226,10 +231,24 @@ logged `no_status` after 6.5 minutes, and the chain carries on.
 
 The chain's steps run every ten seconds, up to ten calls' chains at a time,
 side by side: a text or a call that never answers holds up only its own chain.
-A step waits at most 60 seconds before the next one runs without it (the log
-says `a tick is still waiting on a send or the store`). Every text and call is
+A step waits at most 45 seconds before the next one runs without it (the log
+says `a tick is still waiting on a send or the store`). While three steps are
+still waiting like that, no new calls' chains are picked up until one of them
+answers (the log says `no new rows are claimed`), so a stalled Twilio or Hub
+does not pile up more sends behind the ones already hanging. A step that never
+answers stops counting after 6.5 minutes, so the chain cannot be stopped for
+good. Every text and call is
 sent after the step has written that it is ringing, so a step that answers late
-changes nothing the next step did.
+changes nothing the next step did. A text or call that fails before our call
+is placed (Twilio refuses it, or the step itself errors) is logged as a failed
+call and the chain moves on to the next call, as a no-answer would; it is
+never left waiting on the 6.5-minute guard.
+
+The rotation itself (the providers, the weeks, the covers and the directors)
+is read from the Hub at most once a minute and shared by every urgent call. A
+read that has not answered after 15 seconds is given up on and the next urgent
+call starts a fresh one; each call waits at most 2.5 seconds for the routing
+decision and otherwise rings the fixed number, as today.
 
 ---
 
