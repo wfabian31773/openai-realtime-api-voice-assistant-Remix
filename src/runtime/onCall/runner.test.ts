@@ -2587,6 +2587,15 @@ describe("the rotation switched off while a chain was open (review of #514, roun
     await d.runner.tick();
     expect(available).toHaveBeenCalledTimes(1);
     expect(h.escalation()).toMatchObject({ status: "active" });
+    // Started again after it stopped, it starts no timer.
+    const setIntervalSpy = vi.spyOn(globalThis, "setInterval");
+    try {
+      d.runner.start();
+      expect(setIntervalSpy).not.toHaveBeenCalled();
+    } finally {
+      d.runner.stop();
+      setIntervalSpy.mockRestore();
+    }
   });
 
   it("keeps ticking while a chain is open, and stops once it closes", async () => {
