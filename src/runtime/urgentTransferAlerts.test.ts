@@ -225,6 +225,23 @@ describe("the sender the runtime uses in production", () => {
     expect(created[0].body).toContain(`Reason: ${URGENT.reason}`);
   });
 
+  it("puts the rotation's line at the top of the same text, keeping the patient's details in it", async () => {
+    const created: Array<{ body: string; from: string; to: string }> = [];
+    const alerts = defaultUrgentTransferAlerts(ENV, () => undefined, {
+      smsClient: async () => ({ messages: { create: async (m) => void created.push(m) } }),
+      now: () => new Date("2026-10-02T00:15:00Z"),
+    });
+    const note = "[TEST MODE] The on-call rotation is ringing test numbers, not the provider.";
+    alerts.smsBeforeDial({ callerNumber: META.callerPhone, escalationDetails: URGENT, note });
+    await vi.waitFor(() => expect(created).toHaveLength(1));
+    expect(created[0].to).toBe(ENV.URGENT_NOTIFICATION_NUMBER);
+    expect(created[0].body).toBe(
+      buildUrgentTransferSms({ callerNumber: META.callerPhone, escalationDetails: URGENT, note }, "5:15 PM"),
+    );
+    expect(created[0].body).toContain(`⚠️ ${note}`);
+    expect(created[0].body).toContain(`Reason: ${URGENT.reason}`);
+  });
+
   it("says it skipped, and sends nothing, when the recipient is not configured", async () => {
     const lines: string[] = [];
     const create = vi.fn();
