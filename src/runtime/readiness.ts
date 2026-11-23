@@ -2157,9 +2157,20 @@ import { callEnvironment } from "./callRecord";
  * contains along with v266 (#512, `c2841ff6`); v245 is #488 on its open
  * branch. Migration
  * migrations/add_on_call_rotation.sql, written and NOT applied.
+ * On main since #514 (`e6861203`).
+ *
+ * v269 — A DECLINED CALLBACK IS NOT PROMISED (2026-11-23). v166 let a chosen
+ * contact method override the model's explicit requires_callback=false, and
+ * the after-hours prompt asks how to follow up on every call, so a caller who
+ * had declined a callback was still told the team would call them back (3 of 3
+ * such filings overridden, 2026-11-15..23). The model's false now outranks a
+ * chosen method; a caller who ASKED to be contacted still wins over it
+ * (callbackRequested.ts). Above main's v268 (#514, `e6861203`), which it
+ * contains along with v267 (#515, `32d0e528`) and v266 (#512, `c2841ff6`);
+ * v270 is #518 and v245 is #488 on their open branches. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v268-the-after-hours-on-call-rotation-20261123";
+  "voice-runtime-v269-a-declined-callback-is-not-promised-20261123";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

@@ -442,8 +442,9 @@ Call this ONLY when you have collected ALL required information.`,
       // Lazy import to avoid module initialization during agent bootstrap
       const { SyncAgentService } = await import("../services/syncAgentService");
       
-      // v166: a caller who chose a contact method or asked to be called back
-      // is never filed as NO CALLBACK NEEDED, whatever the model sent.
+      // v166: a caller who asked to be called back is never filed as NO
+      // CALLBACK NEEDED, whatever the model sent. v269: a chosen contact
+      // method alone does not outrank the model's explicit FALSE.
       const requiresCallback = callbackNeeded({
         modelSays: params.requires_callback,
         categoryDefault: SyncAgentService.requiresCallback(params.request_category as TriageOutcome),
