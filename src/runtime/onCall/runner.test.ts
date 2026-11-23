@@ -661,7 +661,10 @@ describe("a pickup at any step stops the chain (success criterion)", () => {
     expect(h.escalation()).toMatchObject({ status: "accepted", acceptedBy: 1 });
   });
 
-  it("answers closed for a key press on a call the ringing guard already gave up on", async () => {
+  it("lets a key press on a call the ringing guard gave up on take the patient while the chain runs", async () => {
+    // Round 1 of the review of #514 answered this press "closed". Round 10:
+    // the provider pressing it is on the phone, so the press takes the
+    // patient and the call ringing in its place is hung up.
     const h = harness();
     const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
     h.at(esc!.nextAt!);
@@ -670,9 +673,14 @@ describe("a pickup at any step stops the chain (success criterion)", () => {
     h.advance(RING_GUARD_MS);
     await h.runner.tick(); // gives up on it and escalates
     expect(h.store.attempts.get(stale)?.outcome).toBe("no_status");
-    expect(await h.runner.onProviderAck(stale, "1")).toBe("closed");
-    expect(h.store.attempts.get(stale)?.outcome).toBe("no_status");
     expect(h.escalation()).toMatchObject({ status: "active", levelIndex: 1 });
+    await h.runner.tick(); // rings the director
+    const next = [...h.store.attempts.values()].filter((a) => a.kind === "call" && a.outcome === "in_progress");
+    expect(next.map((a) => a.providerId)).toEqual([IE_DIRECTOR]);
+    expect(await h.runner.onProviderAck(stale, "1")).toBe("accepted");
+    expect(h.store.attempts.get(stale)?.outcome).toBe("accepted");
+    expect(h.escalation()).toMatchObject({ status: "accepted", acceptedAttemptId: stale });
+    for (const a of next) expect(h.store.attempts.get(a.id)?.outcome).toBe("taken_elsewhere");
   });
 
   it("says closed for an attempt it does not know, or one that is not a call", async () => {
@@ -681,6 +689,99 @@ describe("a pickup at any step stops the chain (success criterion)", () => {
     await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
     const warm = [...h.store.attempts.values()].find((a) => a.kind === "warm_transfer")!;
     expect(await h.runner.onProviderAck(warm.id, "1")).toBe("closed");
+  });
+});
+
+describe("a key press on a call we had marked over (review of #514, round 10)", () => {
+  it("takes the patient from a call recorded as failed, and hangs up the call ringing in its place", async () => {
+    const h = harness();
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    // The provider's second call. Say we recorded it failed (Twilio answered
+    // the create ambiguously) while Twilio placed it after all.
+    const placed = h.lastCallAttempt();
+    await h.store.endAttempt(placed.id, "failed", h.now());
+    // Meanwhile the chain moved on and the director's call is ringing.
+    const ringing = await h.store.logAttempt({
+      escalationId: esc!.id,
+      callSid: SID,
+      levelIndex: 1,
+      role: "region_director",
+      providerId: IE_DIRECTOR,
+      kind: "call",
+      attemptNo: 1,
+      mode: "live",
+      dialedTo: phoneOf(IE_DIRECTOR),
+    });
+    await h.store.setAttemptCallSid(ringing.id, "CA7".padEnd(34, "0"));
+
+    expect(await h.runner.onProviderAck(placed.id, "1")).toBe("accepted");
+    expect(h.store.attempts.get(placed.id)?.outcome).toBe("accepted");
+    expect(h.escalation()).toMatchObject({ status: "accepted", acceptedBy: 1, acceptedAttemptId: placed.id, details: null });
+    expect(h.store.attempts.get(ringing.id)?.outcome).toBe("taken_elsewhere");
+    expect(h.hungUp).toEqual(["CA7".padEnd(34, "0")]);
+    expect(h.log.mock.calls.some(([m]) => /recorded failed .* it takes the patient/.test(String(m)))).toBe(true);
+    h.advance(RING_GUARD_MS * 2);
+    await h.runner.tick();
+    expect(h.calls).toHaveLength(1);
+    expect(h.urgent).toHaveLength(0);
+  });
+
+  it("takes it from a call the ringing guard or its status had already ended", async () => {
+    for (const outcome of ["no_status", "no_answer", "declined", "busy"] as const) {
+      const h = harness();
+      const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+      h.at(esc!.nextAt!);
+      await h.runner.tick();
+      const id = h.lastCallAttempt().id;
+      await h.store.endAttempt(id, outcome, h.now());
+      expect(await h.runner.onProviderAck(id, "1")).toBe("accepted");
+      expect(h.escalation()).toMatchObject({ status: "accepted", acceptedAttemptId: id });
+    }
+  });
+
+  it("tells them it is closed once the chain has ended, and changes nothing", async () => {
+    const h = harness();
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    const id = h.lastCallAttempt().id;
+    await h.store.endAttempt(id, "no_answer", h.now());
+    const cur = h.escalation();
+    await h.store.closeEscalation(cur.id, cur.version, { status: "exhausted", nextAt: null });
+    expect(await h.runner.onProviderAck(id, "1")).toBe("closed");
+    expect(h.store.attempts.get(id)?.outcome).toBe("no_answer");
+    expect(h.escalation()).toMatchObject({ status: "exhausted", acceptedAttemptId: null });
+  });
+
+  it("is told closed, not taken, when the chain ends between the read and the press", async () => {
+    const h = harness();
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    const id = h.lastCallAttempt().id;
+    await h.store.endAttempt(id, "no_answer", h.now());
+    const real = h.store.acceptLate.bind(h.store);
+    h.store.acceptLate = async (attemptId, at) => {
+      const cur = h.escalation();
+      await h.store.closeEscalation(cur.id, cur.version, { status: "exhausted", nextAt: null });
+      return real(attemptId, at);
+    };
+    expect(await h.runner.onProviderAck(id, "1")).toBe("closed");
+    expect(h.store.attempts.get(id)?.outcome).toBe("no_answer");
+  });
+
+  it("keeps a call hung up because another took the patient as already taken", async () => {
+    const h = harness();
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    const id = h.lastCallAttempt().id;
+    await h.store.endAttempt(id, "taken_elsewhere", h.now());
+    expect(await h.runner.onProviderAck(id, "1")).toBe("already_taken");
+    expect(h.store.attempts.get(id)?.outcome).toBe("taken_elsewhere");
+    expect(h.escalation()).toMatchObject({ status: "active" });
   });
 });
 

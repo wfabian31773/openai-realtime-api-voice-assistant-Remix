@@ -898,12 +898,27 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
       let by = await store.endAttempt(a.id, "accepted", now());
       if (!by) {
         // This call is already over in our records. Another of the chain's
-        // calls took the patient and hung this one up, or its status came
-        // back, or the ringing guard ended it and the chain moved on.
+        // calls took the patient and hung this one up; or the provider is on
+        // a call we had marked over (a dial we recorded as failed that Twilio
+        // placed after all, or the ringing guard); or its key press came
+        // twice. A provider pressing a key while the chain is still running
+        // has the patient, so the late press takes it (review of #514, round
+        // 10): telling them it is closed would keep ringing the next level.
         const fresh = await store.getAttempt(a.id);
         if (fresh?.outcome === "taken_elsewhere") return "already_taken";
-        if (fresh?.outcome !== "accepted") return "closed";
-        by = fresh;
+        if (fresh?.outcome === "accepted") {
+          by = fresh;
+        } else {
+          by = await store.acceptLate(a.id, now());
+          if (!by) {
+            const again = await store.getAttempt(a.id);
+            if (again?.outcome === "taken_elsewhere") return "already_taken";
+            if (again?.outcome !== "accepted") return "closed";
+            by = again;
+          } else {
+            log(`[ON-CALL] ${a.callSid}: a key press on a call recorded ${fresh?.outcome ?? "over"} at level ${a.levelIndex}; it takes the patient`);
+          }
+        }
       }
       let { row, byThis } = await closeAsTaken(e.id, by);
       if (!row) {

@@ -29,18 +29,31 @@ export type OnCallMode = "live" | "test";
 export type EscalationStatus = "active" | "accepted" | "exhausted" | "cancelled" | "failed";
 export type EscalationPhase = "due" | "ringing";
 export type AttemptKind = "warm_transfer" | "call" | "sms" | "nudge_sms";
-export type AttemptOutcome =
-  | "in_progress"
-  | "accepted"
-  | "no_answer"
-  | "declined"
-  | "busy"
-  | "failed"
-  | "no_status"
-  /** A call still ringing when another of the chain's calls took the patient; we hung it up. */
-  | "taken_elsewhere"
-  | "sent"
-  | "send_failed";
+/**
+ * Every outcome an attempt can carry. `taken_elsewhere` is a call still
+ * ringing when another of the chain's calls took the patient; we hung it up.
+ * The migration's CHECK constraint lists the same values (store.test.ts).
+ */
+export const ATTEMPT_OUTCOMES = [
+  "in_progress",
+  "accepted",
+  "no_answer",
+  "declined",
+  "busy",
+  "failed",
+  "no_status",
+  "taken_elsewhere",
+  "sent",
+  "send_failed",
+] as const;
+export type AttemptOutcome = (typeof ATTEMPT_OUTCOMES)[number];
+
+/**
+ * The ends a call can still be taken from: the provider pressed a key on a
+ * call we had marked over. Not `taken_elsewhere` (another call has the
+ * patient) and not `in_progress` (that is the ordinary accept).
+ */
+export const LATE_ACCEPTABLE_OUTCOMES = ["no_answer", "declined", "busy", "failed", "no_status"] as const satisfies readonly AttemptOutcome[];
 
 /** The patient details the texts carry: the fields buildUrgentTransferSms reads. */
 export type StoredDetails = Pick<
@@ -199,6 +212,14 @@ export interface OnCallStore {
   setAttemptCallSid(attemptId: number, providerCallSid: string): Promise<void>;
   /** Ends an attempt once; a second end returns null. */
   endAttempt(attemptId: number, outcome: Exclude<AttemptOutcome, "in_progress">, at: Date): Promise<AttemptRow | null>;
+  /**
+   * A key press on a call we had already ended (a ring-out, a status that
+   * never came, a dial we recorded as failed that Twilio placed after all):
+   * marks it accepted once, and only while its escalation is still active.
+   * Null when it is in progress, already accepted, hung up because another
+   * call took the patient, or its chain has ended.
+   */
+  acceptLate(attemptId: number, at: Date): Promise<AttemptRow | null>;
   getAttempt(attemptId: number): Promise<AttemptRow | null>;
   attemptsFor(callSid: string): Promise<AttemptRow[]>;
 }
@@ -369,6 +390,13 @@ export const SQL = {
     update on_call_attempts set outcome = $2::text, ended_at = $3::timestamptz
      where id = $1::integer and outcome = 'in_progress'
     returning *`,
+  acceptLate: `
+    update on_call_attempts set outcome = 'accepted', ended_at = $2::timestamptz
+     where id = $1::integer and kind = 'call'
+       and outcome in (${LATE_ACCEPTABLE_OUTCOMES.map((o) => `'${o}'`).join(", ")})
+       and exists (select 1 from on_call_escalations e
+                    where e.id = on_call_attempts.escalation_id and e.status = 'active')
+    returning *`,
   attempt: `select * from on_call_attempts where id = $1::integer`,
   attemptsFor: `select * from on_call_attempts where call_sid = $1::text order by started_at, id`,
 } as const;
@@ -495,6 +523,10 @@ export function createPgOnCallStore(
     },
     async endAttempt(attemptId, outcome, at) {
       const { rows } = await query(SQL.endAttempt, [attemptId, outcome, at.toISOString()]);
+      return rows[0] ? attemptFromRow(rows[0]) : null;
+    },
+    async acceptLate(attemptId, at) {
+      const { rows } = await query(SQL.acceptLate, [attemptId, at.toISOString()]);
       return rows[0] ? attemptFromRow(rows[0]) : null;
     },
     async getAttempt(attemptId) {

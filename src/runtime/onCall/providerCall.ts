@@ -48,14 +48,17 @@ function say(line: string): string {
  * The TwiML the provider's call runs. Two gathers: the opening, and one
  * repeat that reports an empty result, so a call nobody presses a key on
  * still reaches the ack webhook and is recorded as declined rather than
- * waiting for the status callback alone.
+ * waiting for the status callback alone. `finishOnKey=""` because Twilio's
+ * default ends a gather on `#` with no digits, and "press any key" includes
+ * `#`: an empty `#` on the repeat would read as a decline (review of #514,
+ * round 10).
  */
 export function providerCallTwiml(ackUrl: string): string {
   const action = xmlEscape(ackUrl);
   return (
     `<?xml version="1.0" encoding="UTF-8"?><Response>` +
-    `<Gather input="dtmf" numDigits="1" timeout="8" action="${action}" method="POST">${say(PROVIDER_CALL_OPENING)}</Gather>` +
-    `<Gather input="dtmf" numDigits="1" timeout="10" action="${action}" method="POST" actionOnEmptyResult="true">${say(PROVIDER_CALL_REPEAT)}</Gather>` +
+    `<Gather input="dtmf" numDigits="1" finishOnKey="" timeout="8" action="${action}" method="POST">${say(PROVIDER_CALL_OPENING)}</Gather>` +
+    `<Gather input="dtmf" numDigits="1" finishOnKey="" timeout="10" action="${action}" method="POST" actionOnEmptyResult="true">${say(PROVIDER_CALL_REPEAT)}</Gather>` +
     `</Response>`
   );
 }

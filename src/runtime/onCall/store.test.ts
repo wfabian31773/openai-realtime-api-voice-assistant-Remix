@@ -1,5 +1,9 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import {
+  ATTEMPT_OUTCOMES,
+  LATE_ACCEPTABLE_OUTCOMES,
   ON_CALL_TABLES,
   SQL,
   createPgOnCallStore,
@@ -104,6 +108,32 @@ describe("the in-memory store keeps the SQL store's rules", () => {
     expect(await s.endAttempt(a.id, "accepted", AT)).toBeNull();
     expect((await s.getAttempt(a.id))?.outcome).toBe("no_answer");
   });
+
+  it("takes a late key press only on an ended call of a chain still running", async () => {
+    const s = createFakeOnCallStore(syntheticRotation(), () => AT);
+    const e = (await s.openEscalation(newEscalation()))!;
+    const call = (o: "call" | "sms" = "call") =>
+      s.logAttempt({ escalationId: e.id, callSid: SID, levelIndex: 0, role: "on_call", providerId: 1, kind: o, attemptNo: 1, mode: "test", dialedTo: "+15550100001" });
+    const ringing = await call();
+    expect(await s.acceptLate(ringing.id, AT)).toBeNull(); // still in progress: the ordinary accept
+    const elsewhere = await call();
+    await s.endAttempt(elsewhere.id, "taken_elsewhere", AT);
+    expect(await s.acceptLate(elsewhere.id, AT)).toBeNull();
+    const text = await call("sms");
+    await s.endAttempt(text.id, "failed", AT);
+    expect(await s.acceptLate(text.id, AT)).toBeNull();
+    for (const o of LATE_ACCEPTABLE_OUTCOMES) {
+      const a = await call();
+      await s.endAttempt(a.id, o, AT);
+      expect(await s.acceptLate(a.id, AT)).toMatchObject({ outcome: "accepted" });
+      expect(await s.acceptLate(a.id, AT)).toBeNull(); // once
+    }
+    const late = await call();
+    await s.endAttempt(late.id, "no_answer", AT);
+    await s.closeEscalation(e.id, (await s.getEscalation(e.id))!.version, { status: "exhausted", nextAt: null });
+    expect(await s.acceptLate(late.id, AT)).toBeNull();
+    expect((await s.getAttempt(late.id))?.outcome).toBe("no_answer");
+  });
 });
 
 describe("the table check", () => {
@@ -157,6 +187,18 @@ describe("the SQL store", () => {
   it("checks the version on every escalation write and an open outcome on every attempt end", () => {
     expect(SQL.update).toMatch(/where id = \$1::integer and version = \$2::integer/);
     expect(SQL.endAttempt).toMatch(/outcome = 'in_progress'/);
+    expect(SQL.acceptLate).toMatch(/kind = 'call'/);
+    expect(SQL.acceptLate).toMatch(/e\.status = 'active'/);
+    expect(SQL.acceptLate).toContain(`outcome in (${LATE_ACCEPTABLE_OUTCOMES.map((o) => `'${o}'`).join(", ")})`);
+    expect(LATE_ACCEPTABLE_OUTCOMES).not.toContain("taken_elsewhere");
+  });
+
+  it("refuses in the database any outcome the code does not know", () => {
+    const sql = readFileSync(join(__dirname, "../../../migrations/add_on_call_rotation.sql"), "utf8");
+    const check = sql.match(/outcome\s+TEXT[^,]*?CHECK \(outcome IN \(([^)]*)\)\)/s);
+    expect(check).not.toBeNull();
+    const listed = [...check![1].matchAll(/'([a-z_]+)'/g)].map((m) => m[1]);
+    expect(listed).toEqual([...ATTEMPT_OUTCOMES]);
     expect(SQL.open).toMatch(/on conflict \(call_sid\) do nothing/);
     expect(SQL.claimDue).toMatch(/for update skip locked/);
     expect(SQL.claimDue).toMatch(/lease_until is null or lease_until < \$1::timestamptz/);

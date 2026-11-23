@@ -3,7 +3,9 @@
  * per call, version-checked writes, a lease on claimed rows, an attempt ended
  * once, and the patient details dropped at a terminal status. Tests only.
  */
+import { LATE_ACCEPTABLE_OUTCOMES } from "./store";
 import type {
+  AttemptOutcome,
   AttemptRow,
   EscalationPatch,
   EscalationRow,
@@ -12,6 +14,8 @@ import type {
   OnCallStore,
 } from "./store";
 import type { RotationData } from "./rotation";
+
+const LATE_ACCEPTABLE = new Set<AttemptOutcome>(LATE_ACCEPTABLE_OUTCOMES);
 
 export interface FakeOnCallStore extends OnCallStore {
   escalations: Map<number, EscalationRow & { leaseUntil: Date | null }>;
@@ -160,6 +164,15 @@ export function createFakeOnCallStore(rotation: RotationData, now: () => Date = 
       const a = attempts.get(attemptId);
       if (!a || a.outcome !== "in_progress") return null;
       a.outcome = outcome;
+      a.endedAt = at;
+      return { ...a };
+    },
+    async acceptLate(attemptId, at) {
+      if (store.failWrites) throw new Error("fake store: writes failing");
+      const a = attempts.get(attemptId);
+      if (!a || a.kind !== "call" || !LATE_ACCEPTABLE.has(a.outcome)) return null;
+      if (escalations.get(a.escalationId)?.status !== "active") return null;
+      a.outcome = "accepted";
       a.endedAt = at;
       return { ...a };
     },

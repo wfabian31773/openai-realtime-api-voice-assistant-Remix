@@ -67,6 +67,15 @@ describe("the call we place to a provider", () => {
     expect(xml).toContain(PROVIDER_CALL_OPENING);
   });
 
+  it("takes # as a key press like any other, so it never ends the gather empty", () => {
+    // Twilio's default finishOnKey is "#": pressed with no digit before it,
+    // the gather ends empty, and the second one reads that as a decline. The
+    // opening says "press any key" (review of #514, round 10).
+    const gathers = providerCallTwiml(`https://${HOST}${ON_CALL_ACK_PATH}?attempt=7`).match(/<Gather [^>]*>/g) ?? [];
+    expect(gathers).toHaveLength(2);
+    for (const g of gathers) expect(g).toContain('finishOnKey=""');
+  });
+
   it("carries nothing about the patient", () => {
     const xml = providerCallTwiml(`https://${HOST}${ON_CALL_ACK_PATH}?attempt=7`);
     // Only the fixed lines and the URL: no slot exists for a name, a number or a reason.

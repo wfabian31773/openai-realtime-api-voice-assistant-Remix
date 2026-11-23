@@ -139,7 +139,9 @@ CREATE TABLE IF NOT EXISTS on_call_attempts (
   -- taken_elsewhere (hung up because another of the chain's calls took the
   -- patient) / sent / send_failed / in_progress. 'no_answer' is logged as no answer, not as a
   -- failure, as today's transfer is.
-  outcome           TEXT NOT NULL DEFAULT 'in_progress',
+  outcome           TEXT NOT NULL DEFAULT 'in_progress' CHECK (outcome IN (
+                      'in_progress', 'accepted', 'no_answer', 'declined', 'busy',
+                      'failed', 'no_status', 'taken_elsewhere', 'sent', 'send_failed')),
   provider_call_sid TEXT,
   sms_sid           TEXT,
   routing_reason    TEXT,
