@@ -806,17 +806,19 @@ export function writtenPhone(phone: string): string {
  * name. Nothing is said before the date of birth matches: only the verified
  * answer carries it.
  */
-const OFFICE_ALIASES: Record<string, string> = {
-  'riverside latham': 'Riverside',
-  'mission hlls': 'Mission Hills',
-  willow: 'Long Beach Willow',
-  dtla: 'Los Angeles (DTLA)',
-};
+const OFFICE_ALIASES: ReadonlyMap<string, string> = new Map([
+  ['riverside latham', 'Riverside'],
+  ['mission hlls', 'Mission Hills'],
+  ['willow', 'Long Beach Willow'],
+  ['dtla', 'Los Angeles (DTLA)'],
+]);
 
 export function ourOfficePhone(c: OutboundContact): string | undefined {
   const office = field(c, 'office').trim().toLowerCase();
   if (!office) return undefined;
-  const name = (OFFICE_ALIASES[office] ?? office).toLowerCase();
+  // A Map, not an object: an office named "constructor" or "__proto__" must
+  // read nothing, not an inherited property (review of #518).
+  const name = (OFFICE_ALIASES.get(office) ?? office).toLowerCase();
   const loc = AZUL_VISION_LOCATIONS.find((l) => l.name.toLowerCase() === name);
   return loc?.phone ? spokenPhone(loc.phone) : undefined;
 }

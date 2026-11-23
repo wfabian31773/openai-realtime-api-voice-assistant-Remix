@@ -210,7 +210,7 @@ describe('(A2) our own office phone, once the date of birth matches', () => {
     expect(ourOfficePhone(c)).toBe(packPhone(listed));
   });
 
-  it.each([['Atlantis Eyecare Downey'], ['Atlantis Eyecare'], ['Montebello West'], ['Test Office'], [''], ['   ']])(
+  it.each([['Atlantis Eyecare Downey'], ['Atlantis Eyecare'], ['Montebello West'], ['Test Office'], [''], ['   '], ['constructor'], ['__proto__']])(
     '"%s" reads no phone: never one taken from a near name',
     async (office) => {
       expect(ourOfficePhone({ data: { office } } as unknown as OutboundContact)).toBeUndefined();
@@ -304,7 +304,7 @@ describe('the prompt: a phone is said only as a tool gave it', () => {
     };
     const agent = createNpxOutreachAgent(async () => undefined, { outbound: contact });
     const p = String((agent as unknown as { instructions: unknown }).instructions);
-    expect(p).toMatch(/Say a phone number only as a tool gave it to you: a partner practice's from its choice in find_sooner_exam, or our office's \(our_office_phone\) once confirm_patient_birthdate answers verified\./);
+    expect(p).toMatch(/Say a phone number only as a tool gave it to you: a partner practice's from its choice in find_sooner_exam or from a booking book_sooner_exam or confirm_patient_birthdate reads back, or our office's \(our_office_phone\) once confirm_patient_birthdate answers verified\./);
     expect(p).toMatch(/Never give one from memory or make one up\. If no tool gave you the one they want, call request_staff_callback with what they want\./);
   });
 });
