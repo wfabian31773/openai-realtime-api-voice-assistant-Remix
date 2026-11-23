@@ -132,13 +132,17 @@ function postOpFacts(d: PostOpDecision): RoutingFacts["postOp"] {
 export async function decideRoute(input: RouteInput): Promise<RouteDecision> {
   const { config, at } = input;
   if (config.mode === "off") return { kind: "legacy", because: "mode_off" };
-  const budget = input.budgetMs ?? ROUTING_BUDGET_MS;
+  // One deadline for the whole decision: every wait gets only what is left of
+  // it, so a slow store check and a slow rotation read cannot each spend the
+  // full budget and hold the caller longer than the budget says.
+  const deadline = Date.now() + (input.budgetMs ?? ROUTING_BUDGET_MS);
+  const left = () => Math.max(0, deadline - Date.now());
 
   try {
-    const available = await withTimeout(input.store.available(), budget);
+    const available = await withTimeout(input.store.available(), left());
     if (available !== true) return { kind: "legacy", because: "store_unavailable" };
 
-    const data = await withTimeout(input.rotation.get(), budget);
+    const data = await withTimeout(input.rotation.get(), left());
     if (!data) return { kind: "legacy", because: "rotation_unreadable" };
 
     const answer = onCallAt(at, data);
@@ -169,7 +173,7 @@ export async function decideRoute(input: RouteInput): Promise<RouteDecision> {
       today,
       providers: data.providers,
       query: input.consoleQuery,
-      budgetMs: Math.min(POST_OP_BUDGET_MS, budget),
+      budgetMs: Math.min(POST_OP_BUDGET_MS, left()),
       requireKept: config.requireKept,
     });
 

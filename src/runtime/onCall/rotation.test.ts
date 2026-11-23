@@ -141,6 +141,57 @@ describe("overrides decide who, never whether", () => {
     expect(o?.providerId).toBe(6);
   });
 
+  it("a cover to a provider since deactivated falls back to the week's provider, and says so", () => {
+    const data = syntheticRotation({
+      overrides: [{ id: 1, startsAt: at("2026-12-10T01:00:00Z"), endsAt: at("2026-12-10T16:00:00Z"), providerId: 5 }],
+    });
+    (data.providers as ReturnType<typeof provider>[])[4] = provider(5, "Orange County", { active: false });
+    const a = onCallAt(at("2026-12-10T05:00:00Z"), data);
+    expect(a).toMatchObject({ source: "schedule", provider: { id: 2 }, note: "override_provider_inactive" });
+    expect(a.director).not.toBeNull();
+  });
+
+  it("a cover to a provider no longer on file falls back to the week's provider, and says so", () => {
+    const data = syntheticRotation({
+      overrides: [{ id: 1, startsAt: at("2026-12-10T01:00:00Z"), endsAt: at("2026-12-10T16:00:00Z"), providerId: 999 }],
+    });
+    expect(onCallAt(at("2026-12-10T05:00:00Z"), data)).toMatchObject({
+      source: "schedule",
+      provider: { id: 2 },
+      note: "override_provider_missing",
+    });
+  });
+
+  it("a stale cover over a week whose provider is also inactive returns nobody, naming the cover", () => {
+    const data = syntheticRotation({
+      overrides: [{ id: 1, startsAt: at("2026-12-10T01:00:00Z"), endsAt: at("2026-12-10T16:00:00Z"), providerId: 999 }],
+    });
+    (data.providers as ReturnType<typeof provider>[])[1] = provider(2, "Los Angeles", { active: false });
+    const a = onCallAt(at("2026-12-10T05:00:00Z"), data);
+    expect(a.provider).toBeNull();
+    expect(a.note).toBe("override_provider_missing");
+    expect(a.final?.id).toBe(FINAL_DIRECTOR);
+  });
+
+  it("a stale cover on a week nobody is entered for returns nobody, naming the cover", () => {
+    const data = syntheticRotation({
+      overrides: [{ id: 1, startsAt: at("2028-01-05T01:00:00Z"), endsAt: at("2028-01-05T16:00:00Z"), providerId: 999 }],
+    });
+    const a = onCallAt(at("2028-01-05T05:00:00Z"), data);
+    expect(a.provider).toBeNull();
+    expect(a).toMatchObject({ source: "override", note: "override_provider_missing" });
+  });
+
+  it("an active cover still covers a week whose scheduled provider was deactivated", () => {
+    const data = syntheticRotation({
+      overrides: [{ id: 1, startsAt: at("2026-12-10T01:00:00Z"), endsAt: at("2026-12-10T16:00:00Z"), providerId: 5 }],
+    });
+    (data.providers as ReturnType<typeof provider>[])[1] = provider(2, "Los Angeles", { active: false });
+    const a = onCallAt(at("2026-12-10T05:00:00Z"), data);
+    expect(a).toMatchObject({ source: "override", provider: { id: 5 } });
+    expect(a.note).toBeUndefined();
+  });
+
   it("a whole-week swap is the schedule row itself", () => {
     const data = syntheticRotation();
     (data.schedule as Map<string, number>).set("2026-12-08", 6);

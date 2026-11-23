@@ -152,8 +152,18 @@ export interface OnCallAnswer {
   /** The provider on call for this moment, or null when nobody is entered. */
   provider: OnCallProvider | null;
   source: "override" | "schedule" | "none";
-  /** Why there is no provider, or why the one returned is notable. */
-  note?: "no_schedule_for_week" | "provider_inactive" | "provider_missing";
+  /**
+   * Why there is no provider, or why the one returned is notable. An override
+   * whose provider is gone or inactive falls back to the week's scheduled
+   * provider and says so (`override_provider_*`), so a stale cover never
+   * leaves the night with nobody.
+   */
+  note?:
+    | "no_schedule_for_week"
+    | "provider_inactive"
+    | "provider_missing"
+    | "override_provider_inactive"
+    | "override_provider_missing";
   /** The provider's region director (null when the region has none). */
   director: OnCallProvider | null;
   /** Dr. Logan. */
@@ -202,19 +212,44 @@ export function onCallAt(at: Date, data: RotationData): OnCallAnswer {
   const final = finalDirector(data);
   const override = activeOverride(at, data.overrides);
   const scheduled = data.schedule.get(weekStartsOn);
-  const id = override?.providerId ?? scheduled;
-  const source = override ? "override" : scheduled !== undefined ? "schedule" : "none";
-  if (id === undefined) {
-    return { window, weekStartsOn, provider: null, source, note: "no_schedule_for_week", director: null, final };
+  const answer = (
+    provider: OnCallProvider,
+    source: OnCallAnswer["source"],
+    note?: OnCallAnswer["note"],
+  ): OnCallAnswer => ({
+    window,
+    weekStartsOn,
+    provider,
+    source,
+    ...(note ? { note } : {}),
+    director: directorFor(provider.region, data),
+    final,
+  });
+  const nobody = (source: OnCallAnswer["source"], note: NonNullable<OnCallAnswer["note"]>): OnCallAnswer => ({
+    window,
+    weekStartsOn,
+    provider: null,
+    source,
+    note,
+    director: null,
+    final,
+  });
+
+  // A cover beats the schedule, but only a cover that can be rung. One whose
+  // provider was deactivated, or is no longer on file, falls back to the
+  // week's scheduled provider with a note, rather than leaving the window to
+  // the directors alone.
+  let overrideNote: "override_provider_inactive" | "override_provider_missing" | undefined;
+  if (override) {
+    const covering = byId(data, override.providerId);
+    if (covering?.active) return answer(covering, "override");
+    overrideNote = covering ? "override_provider_inactive" : "override_provider_missing";
   }
-  const provider = byId(data, id);
-  if (!provider) {
-    return { window, weekStartsOn, provider: null, source, note: "provider_missing", director: null, final };
-  }
-  if (!provider.active) {
-    return { window, weekStartsOn, provider: null, source, note: "provider_inactive", director: null, final };
-  }
-  return { window, weekStartsOn, provider, source, director: directorFor(provider.region, data), final };
+  if (scheduled === undefined) return nobody(override ? "override" : "none", overrideNote ?? "no_schedule_for_week");
+  const provider = byId(data, scheduled);
+  if (!provider) return nobody("schedule", overrideNote ?? "provider_missing");
+  if (!provider.active) return nobody("schedule", overrideNote ?? "provider_inactive");
+  return answer(provider, "schedule", overrideNote);
 }
 
 // ── The chain ───────────────────────────────────────────────────────────────

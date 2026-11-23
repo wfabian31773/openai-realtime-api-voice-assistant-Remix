@@ -44,7 +44,7 @@ const DETAILS = { reason: "Sudden curtain over the right eye", patientFirstName:
 
 const phoneOf = (id: number) => provider(id, "x").phone;
 
-function harness(opts: { config?: OnCallConfig; start?: Date; placeCall?: any; sendSms?: any; notifyUrgent?: any } = {}) {
+function harness(opts: { config?: OnCallConfig; start?: Date; placeCall?: any; sendSms?: any; notifyUrgent?: any; endCall?: any } = {}) {
   let clock = new Date(opts.start ?? WED_NIGHT);
   const now = () => new Date(clock);
   const store = createFakeOnCallStore(syntheticRotation(), now);
@@ -69,6 +69,12 @@ function harness(opts: { config?: OnCallConfig; start?: Date; placeCall?: any; s
     vi.fn(async (body: string) => {
       urgent.push(body);
     });
+  const hungUp: string[] = [];
+  const endCall =
+    opts.endCall ??
+    vi.fn(async (callSid: string) => {
+      hungUp.push(callSid);
+    });
   const log = vi.fn();
   const runner = createOnCallRunner({
     store,
@@ -77,6 +83,7 @@ function harness(opts: { config?: OnCallConfig; start?: Date; placeCall?: any; s
     sendSms,
     placeCall,
     notifyUrgent,
+    endCall,
     now,
     log,
   });
@@ -86,10 +93,12 @@ function harness(opts: { config?: OnCallConfig; start?: Date; placeCall?: any; s
     texts,
     calls,
     urgent,
+    hungUp,
     log,
     sendSms,
     placeCall,
     notifyUrgent,
+    endCall,
     now,
     at: (d: Date) => {
       clock = new Date(d);
@@ -322,6 +331,101 @@ describe("a pickup at any step stops the chain (success criterion)", () => {
     expect(h.calls[1].to).toBe(phoneOf(IE_DIRECTOR));
   });
 
+  it("hangs up any other call of ours still ringing for the patient, and logs it taken_elsewhere", async () => {
+    const h = harness();
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    const taking = h.lastCallAttempt();
+    // A call of ours that is somehow still ringing (its hang-up failed, say).
+    const stray = await h.store.logAttempt({
+      escalationId: esc!.id,
+      callSid: SID,
+      levelIndex: 0,
+      role: "on_call",
+      providerId: 1,
+      kind: "call",
+      attemptNo: 1,
+      mode: "live",
+      dialedTo: phoneOf(1),
+    });
+    await h.store.setAttemptCallSid(stray.id, "CA8".padEnd(34, "0"));
+    expect(await h.runner.onProviderAck(taking.id, "1")).toBe("accepted");
+    expect(h.store.attempts.get(stray.id)?.outcome).toBe("taken_elsewhere");
+    expect(h.hungUp).toEqual(["CA8".padEnd(34, "0")]);
+    // the hung-up call's own status then arrives and moves nothing
+    await h.runner.onProviderStatus(stray.id, "completed");
+    expect(h.escalation()).toMatchObject({ status: "accepted" });
+    // and a key press on it answers that the patient is taken
+    expect(await h.runner.onProviderAck(stray.id, "1")).toBe("already_taken");
+  });
+
+  it("hangs up nothing when the call that was taken was the only one", async () => {
+    const h = harness();
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    expect(await h.runner.onProviderAck(h.lastCallAttempt().id, "1")).toBe("accepted");
+    expect(h.hungUp).toEqual([]);
+  });
+
+  it("does not throw when the close keeps losing its race, and the next tick finishes it instead of ringing on", async () => {
+    const h = harness();
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    const id = h.lastCallAttempt().id;
+    const real = h.store.closeEscalation.bind(h.store);
+    const spy = vi.spyOn(h.store, "closeEscalation").mockResolvedValue(null);
+    expect(await h.runner.onProviderAck(id, "1")).toBe("accepted");
+    expect(h.store.attempts.get(id)?.outcome).toBe("accepted");
+    expect(h.escalation()).toMatchObject({ status: "active" });
+    spy.mockImplementation(real);
+    // the ringing guard comes due; it must find the key press and close, not escalate
+    h.advance(RING_GUARD_MS);
+    await h.runner.tick();
+    expect(h.escalation()).toMatchObject({ status: "accepted", acceptedBy: 1, details: null });
+    expect(h.calls).toHaveLength(1);
+    expect(h.texts.filter((t) => t.to !== phoneOf(1))).toHaveLength(0);
+    expect(h.urgent).toHaveLength(0);
+  });
+
+  it("a due row with a key press on it closes instead of ringing", async () => {
+    const h = harness();
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    // A key press recorded on the chain while the row says it is due.
+    const a = await h.store.logAttempt({
+      escalationId: esc!.id,
+      callSid: SID,
+      levelIndex: 0,
+      role: "on_call",
+      providerId: 1,
+      kind: "call",
+      attemptNo: 2,
+      mode: "live",
+      dialedTo: phoneOf(1),
+    });
+    await h.store.endAttempt(a.id, "accepted", h.now());
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    expect(h.calls).toHaveLength(0);
+    expect(h.escalation()).toMatchObject({ status: "accepted", acceptedBy: 1 });
+  });
+
+  it("answers closed for a key press on a call the ringing guard already gave up on", async () => {
+    const h = harness();
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    const stale = h.lastCallAttempt().id;
+    h.advance(RING_GUARD_MS);
+    await h.runner.tick(); // gives up on it and escalates
+    expect(h.store.attempts.get(stale)?.outcome).toBe("no_status");
+    expect(await h.runner.onProviderAck(stale, "1")).toBe("closed");
+    expect(h.store.attempts.get(stale)?.outcome).toBe("no_status");
+    expect(h.escalation()).toMatchObject({ status: "active", levelIndex: 1 });
+  });
+
   it("says closed for an attempt it does not know, or one that is not a call", async () => {
     const h = harness();
     expect(await h.runner.onProviderAck(999, "1")).toBe("closed");
@@ -342,8 +446,9 @@ describe("what keeps the chain moving when something goes wrong", () => {
     await h.runner.tick();
     expect(h.calls).toHaveLength(1);
     h.advance(1);
-    await h.runner.tick(); // the guard ends the call and escalates
+    await h.runner.tick(); // the guard ends the call, hangs it up and escalates
     expect(h.store.attempts.get(id)?.outcome).toBe("no_status");
+    expect(h.hungUp).toEqual([h.store.attempts.get(id)?.providerCallSid]);
     expect(h.escalation()).toMatchObject({ levelIndex: 1, attemptNo: 1, phase: "due" });
     await h.runner.tick();
     expect(h.calls[1].to).toBe(phoneOf(IE_DIRECTOR));
@@ -412,6 +517,7 @@ describe("what keeps the chain moving when something goes wrong", () => {
       sendSms: h.sendSms,
       placeCall: h.placeCall,
       notifyUrgent: h.notifyUrgent,
+      endCall: h.endCall,
       now: h.now,
       log: () => {},
     });
@@ -539,8 +645,23 @@ describe("the notes on the texts", () => {
     }
   });
 
-  it("says the patient is no longer on the line on level 0's reminder", () => {
-    expect(attemptNote({ ...base, levelIndex: 0, attemptNo: 2 })).toMatch(/no longer on the line/);
+  it("says on level 0's reminder that the transfer was not taken and we are calling again", () => {
+    const note = attemptNote({ ...base, levelIndex: 0, attemptNo: 2 });
+    expect(note).toMatch(/the urgent transfer to you was not taken/);
+    expect(note).toMatch(/We are calling you again now/);
+  });
+
+  it("makes no claim on any text about whether the patient is still on the line", () => {
+    // When the reminder goes out the caller may well still be talking to the agent.
+    for (const [levelIndex, attemptNo] of [
+      [0, 2],
+      [1, 1],
+      [1, 2],
+      [2, 1],
+      [2, 2],
+    ]) {
+      expect(attemptNote({ ...base, levelIndex, attemptNo })).not.toMatch(/no longer on the line|still on the line/);
+    }
   });
 
   it("names who did not take it on a new level", () => {

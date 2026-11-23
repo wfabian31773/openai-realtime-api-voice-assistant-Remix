@@ -37,6 +37,8 @@ export type AttemptOutcome =
   | "busy"
   | "failed"
   | "no_status"
+  /** A call still ringing when another of the chain's calls took the patient; we hung it up. */
+  | "taken_elsewhere"
   | "sent"
   | "send_failed";
 

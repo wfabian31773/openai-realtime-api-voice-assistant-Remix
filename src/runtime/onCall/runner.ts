@@ -12,9 +12,17 @@
  *      final director) gets the same cadence.
  *
  * Level 0's first attempt is the in-call warm transfer, which the caller is
- * still on the line for. Everything after it is a callback: the patient is no
- * longer connected, so every text says so and asks the provider to press a key
- * on our call (which closes the case for the agent) and then call the patient.
+ * still on the line for. Everything after it is a callback: the patient is not
+ * connected to the provider's call, so every text asks the provider to press a
+ * key on our call (which stops the escalation) and then call the patient back.
+ * The texts make no claim about whether the patient is still on the line with
+ * the agent: when the reminder goes out they may well be.
+ *
+ * A key press anywhere stops the chain, and stays stopped: every move (a retry,
+ * an escalation, the ringing guard) first looks for an accepted attempt on the
+ * escalation and closes it as accepted instead of moving on, so a close that
+ * lost a race with a tick is finished by the next move rather than undone.
+ * Once a call is taken, any other call of ours still ringing for it is hung up.
  *
  * The state lives in the Hub (store.ts), not in this process. Every move is a
  * version-checked write, so a restart, a second process or a late webhook
@@ -96,6 +104,8 @@ export interface OnCallRunnerDeps {
   }): Promise<{ sid: string }>;
   /** The text to URGENT_NOTIFICATION_NUMBER when nobody takes the call. */
   notifyUrgent(body: string): Promise<void>;
+  /** Hang up one of our provider calls (Twilio status=completed). */
+  endCall(providerCallSid: string): Promise<void>;
   now?: () => Date;
   log?: (line: string) => void;
 }
@@ -131,7 +141,7 @@ export function attemptNote(e: Pick<EscalationRow, "levelIndex" | "attemptNo" | 
   if (e.attemptNo > 1) {
     parts.push(
       e.levelIndex === 0
-        ? "REMINDER — the transfer to you was not taken, and the patient is no longer on the line."
+        ? "REMINDER — the urgent transfer to you was not taken. We are calling you again now."
         : "REMINDER — we are calling you again now.",
     );
   } else if (e.levelIndex > 0) {
@@ -184,6 +194,67 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
     }
   }
 
+  /** Hang up one of our calls; a failure is logged, never thrown. */
+  async function hangUp(providerCallSid: string | null, callSid: string) {
+    if (!providerCallSid) return;
+    try {
+      await deps.endCall(providerCallSid);
+    } catch (err) {
+      log(`[ON-CALL] ${callSid}: could not hang up a provider call: ${(err as Error)?.message ?? err}`);
+    }
+  }
+
+  /** The attempt on this escalation that took the patient, if any. */
+  async function acceptedAttempt(e: EscalationRow): Promise<AttemptRow | null> {
+    const attempts = await store.attemptsFor(e.callSid);
+    return attempts.find((a) => a.escalationId === e.id && a.outcome === "accepted") ?? null;
+  }
+
+  /**
+   * Close the escalation as accepted by this attempt, then hang up any other
+   * call of ours still ringing for it. Retries on a version race. Answers the
+   * row as it ends up and whether this call closed it, or a null row when it
+   * could not be closed (the next move finds the accepted attempt and closes
+   * it then).
+   */
+  async function closeAsTaken(
+    escalationId: number,
+    by: AttemptRow,
+  ): Promise<{ row: EscalationRow | null; byThis: boolean }> {
+    let row: EscalationRow | null = null;
+    let byThis = false;
+    for (let i = 0; i < 5 && !row; i++) {
+      const cur = await store.getEscalation(escalationId);
+      if (!cur) return { row: null, byThis: false };
+      if (cur.status !== "active") {
+        row = cur;
+        break;
+      }
+      row = await store.closeEscalation(cur.id, cur.version, {
+        status: "accepted",
+        acceptedBy: by.providerId,
+        acceptedAt: by.endedAt ?? now(),
+        nextAt: null,
+      });
+      byThis = row !== null;
+    }
+    if (!row) {
+      log(`[ON-CALL] ${by.callSid}: taken at level ${by.levelIndex}, but the close lost five races; the next move closes it`);
+      return { row: null, byThis: false };
+    }
+    if (row.status === "accepted") {
+      const others = (await store.attemptsFor(by.callSid)).filter(
+        (a) => a.escalationId === escalationId && a.id !== by.id && a.kind === "call" && a.outcome === "in_progress",
+      );
+      for (const a of others) {
+        // Ended first, so the status the hang-up brings back moves nothing.
+        await store.endAttempt(a.id, "taken_elsewhere", now());
+        await hangUp(a.providerCallSid, a.callSid);
+      }
+    }
+    return { row, byThis };
+  }
+
   /**
    * Move the chain on from (level, attempt) once that attempt's call is over.
    * Read fresh every time, and only from the attempt it names, so a late or a
@@ -193,6 +264,12 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
     for (let i = 0; i < 3; i++) {
       const e = await store.getEscalation(escalationId);
       if (!e || e.status !== "active" || e.levelIndex !== levelIndex || e.attemptNo !== attemptNo || e.phase !== "ringing") {
+        return;
+      }
+      // A key press anywhere on the chain stops it, even one whose close lost a race.
+      const taken = await acceptedAttempt(e);
+      if (taken) {
+        await closeAsTaken(e.id, taken);
         return;
       }
       const t = now().getTime();
@@ -234,6 +311,11 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
 
   /** Ring the level a due row is at: the text, then the call. */
   async function ring(row: EscalationRow): Promise<void> {
+    const taken = await acceptedAttempt(row);
+    if (taken) {
+      await closeAsTaken(row.id, taken);
+      return;
+    }
     const level = row.plan.levels[row.levelIndex];
     if (!level) {
       await store.closeEscalation(row.id, row.version, { status: "failed", nextAt: null });
@@ -318,7 +400,13 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
         a.attemptNo === row.attemptNo &&
         a.outcome === "in_progress",
     );
-    for (const a of open) await store.endAttempt(a.id, "no_status", now());
+    for (const a of open) {
+      // The call should be over by now (its time limit is shorter than the
+      // guard), but hang it up anyway so a lost status cannot leave it ringing.
+      // Ended first, so the status the hang-up brings back moves nothing.
+      await store.endAttempt(a.id, "no_status", now());
+      await hangUp(a.providerCallSid, a.callSid);
+    }
     log(`[ON-CALL] ${row.callSid}: no status for level ${row.levelIndex} attempt ${row.attemptNo}; moving on`);
     await advance(row.id, row.levelIndex, row.attemptNo);
   }
@@ -388,6 +476,8 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
           log(`[ON-CALL] ${r.callSid}: the transfer was not taken (${r.warm.outcome}); the chain will carry on`);
           return opened;
         }
+        // The warm transfer's accepted row is logged above, so a close that
+        // loses its races here is finished by the first move that reads it.
         for (let i = 0; i < 3; i++) {
           const cur = i === 0 ? opened : await store.getEscalation(opened.id);
           if (!cur || cur.status !== "active") return cur;
@@ -458,22 +548,28 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
         return "declined";
       }
 
-      await store.endAttempt(a.id, "accepted", now());
-      for (let i = 0; i < 3; i++) {
-        const cur = await store.getEscalation(e.id);
-        if (!cur || cur.status !== "active") return cur?.status === "accepted" ? "already_taken" : "closed";
-        const closed = await store.closeEscalation(cur.id, cur.version, {
-          status: "accepted",
-          acceptedBy: a.providerId,
-          acceptedAt: now(),
-          nextAt: null,
-        });
-        if (closed) {
-          log(`[ON-CALL] ${a.callSid}: taken at level ${a.levelIndex} (${a.role}), attempt ${a.attemptNo}`);
-          return "accepted";
-        }
+      let by = await store.endAttempt(a.id, "accepted", now());
+      if (!by) {
+        // This call is already over in our records. Another of the chain's
+        // calls took the patient and hung this one up, or its status came
+        // back, or the ringing guard ended it and the chain moved on.
+        const fresh = await store.getAttempt(a.id);
+        if (fresh?.outcome === "taken_elsewhere") return "already_taken";
+        if (fresh?.outcome !== "accepted") return "closed";
+        by = fresh;
       }
-      throw new Error("the acceptance could not be recorded");
+      const { row, byThis } = await closeAsTaken(e.id, by);
+      if (row && row.status !== "accepted") return "closed";
+      if (row && !byThis) {
+        // Closed by someone else: by another call's key press, or by a move
+        // that found this call's key press. The earliest accepted call won.
+        const winner = await acceptedAttempt(row);
+        if (winner && winner.id !== by.id) return "already_taken";
+      }
+      // Taken, whether or not the close won its race: the attempt says
+      // accepted, and the next move closes the escalation on it.
+      log(`[ON-CALL] ${a.callSid}: taken at level ${a.levelIndex} (${a.role}), attempt ${a.attemptNo}`);
+      return "accepted";
     },
 
     async onProviderStatus(attemptId, callStatus) {

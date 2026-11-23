@@ -20,6 +20,7 @@ type Env = Record<string, string | undefined>;
 interface MinimalTwilio {
   messages: { create(opts: { body: string; from: string; to: string }): Promise<{ sid: string }> };
   calls: {
+    (sid: string): { update(opts: { status: "completed" }): Promise<unknown> };
     create(opts: {
       to: string;
       from: string;
@@ -108,6 +109,11 @@ export function buildOnCallWiring(env: Env, host: string | undefined, deps: OnCa
         timeLimit: input.timeLimit,
       });
       return { sid: call.sid };
+    },
+    // Hangs up one of our own provider calls: one still ringing when another
+    // call took the patient, or one whose status never came back.
+    endCall: async (sid) => {
+      await (await twilio()).calls(sid).update({ status: "completed" });
     },
     // The text that says nobody took the call goes where today's urgent text
     // goes, from today's number. It is not a provider call.

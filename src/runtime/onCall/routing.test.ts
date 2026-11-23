@@ -245,6 +245,72 @@ describe("test mode", () => {
   });
 });
 
+describe("one deadline for the whole decision", () => {
+  /** A promise that resolves with `value` after `ms` of fake time. */
+  const after = <T,>(ms: number, value: T) => new Promise<T>((resolve) => setTimeout(() => resolve(value), ms));
+
+  /** Runs a decision under fake timers and reports when it settled. */
+  async function settleTime(build: () => RouteInput, budget: number): Promise<{ at: number; d: Awaited<ReturnType<typeof decideRoute>> }> {
+    vi.useFakeTimers();
+    try {
+      const started = Date.now();
+      let at = -1;
+      const pending = decideRoute({ ...build(), budgetMs: budget }).then((d) => {
+        at = Date.now() - started;
+        return d;
+      });
+      for (let t = 0; t < 4 * budget && at < 0; t += 10) await vi.advanceTimersByTimeAsync(10);
+      return { at, d: await pending };
+    } finally {
+      vi.useRealTimers();
+    }
+  }
+
+  it("gives the rotation read only what the store check left", async () => {
+    const { at, d } = await settleTime(
+      () =>
+        input({
+          store: { available: () => after(400, true), loadRotation: vi.fn() },
+          rotation: { get: () => new Promise<RotationData>(() => {}) },
+        }),
+      500,
+    );
+    expect(d).toEqual({ kind: "legacy", because: "rotation_unreadable" });
+    expect(at).toBeLessThanOrEqual(510);
+  });
+
+  it("gives the Console only what the rotation read left, and says so in the alert", async () => {
+    const consoleQuery = vi.fn(() => new Promise<{ rows: any[] }>(() => {}));
+    const { at, d } = await settleTime(
+      () =>
+        input({
+          personId: PERSON,
+          consoleQuery,
+          rotation: { get: () => after(450, syntheticRotation()) },
+        }),
+      500,
+    );
+    expect(ids(d)?.[0]).toEqual(["on_call", 1]);
+    expect(d.kind === "rotation" && d.alertNote).toBe(CONSOLE_UNAVAILABLE_NOTE);
+    expect(at).toBeLessThanOrEqual(510);
+  });
+
+  it("never waits longer than the budget, however each read is slow", async () => {
+    const { at, d } = await settleTime(
+      () =>
+        input({
+          personId: PERSON,
+          consoleQuery: vi.fn(() => new Promise<{ rows: any[] }>(() => {})),
+          store: { available: () => after(300, true), loadRotation: vi.fn() },
+          rotation: { get: () => after(150, syntheticRotation()) },
+        }),
+      500,
+    );
+    expect(d.kind).toBe("rotation");
+    expect(at).toBeLessThanOrEqual(510);
+  });
+});
+
 describe("the rotation cache", () => {
   it("reads once a minute, shares a read in flight, and never caches a failure", async () => {
     let now = 0;

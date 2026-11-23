@@ -48,7 +48,7 @@ const { runLaneTeardownFloor } = await import('../runtime/pcpFloor');
 const { noteSpokenDob } = await import('../tools/spokenDob');
 const { rememberConfirmedClinic } = await import('../tools/verifiedIdentity');
 const { AFTER_HOURS_CATCHALL, AFTER_HOURS_REASON_IDS } = await import('../tools/afterHoursTaxonomy');
-const { HANDOFF_ERROR_DIRECTIVE, HANDOFF_FAILED_DIRECTIVE, HANDOFF_NOT_PLACED_DIRECTIVE, createNoIvrAgent } = await import('./noIvrAgent');
+const { HANDOFF_CHAIN_RUNNING_DIRECTIVE, HANDOFF_ERROR_DIRECTIVE, HANDOFF_FAILED_DIRECTIVE, HANDOFF_NOT_PLACED_DIRECTIVE, createNoIvrAgent } = await import('./noIvrAgent');
 const { isoDobToUs, dobTheCallerGave } = await import('../services/afterHoursCallFacts');
 const { __resetDirectory } = await import('../services/consoleDirectory');
 
@@ -826,6 +826,16 @@ describe('a failed on-call transfer (the 70166 shape)', () => {
     const r = await invoke(c.agent, 'escalate_to_human', PROVIDER);
     expect(r.message).toBe(HANDOFF_NOT_PLACED_DIRECTIVE);
     expect(HANDOFF_NOT_PLACED_DIRECTIVE).not.toMatch(/already been filed/);
+  });
+
+  it('says the on-call team is already being paged when the chain is running, and claims no new transfer', async () => {
+    const c = await call(NURSE, vi.fn(async () => { throw new Error('handoff_failed:CHAIN_RUNNING'); }));
+    const r = await invoke(c.agent, 'escalate_to_human', PROVIDER);
+    expect(r).toMatchObject({ success: false, handoffFailed: true, message: HANDOFF_CHAIN_RUNNING_DIRECTIVE });
+    expect(HANDOFF_CHAIN_RUNNING_DIRECTIVE).toMatch(/already being paged/);
+    expect(HANDOFF_CHAIN_RUNNING_DIRECTIVE).toMatch(/NOT connected/);
+    expect(HANDOFF_CHAIN_RUNNING_DIRECTIVE).toMatch(/Do not call escalate_to_human again/);
+    expect(HANDOFF_CHAIN_RUNNING_DIRECTIVE).not.toMatch(/could not be placed/);
   });
 
   it.each(['on-call leg failed', 'handoff_failed:FAILED', 'handoff_failed:DECLINED'])(

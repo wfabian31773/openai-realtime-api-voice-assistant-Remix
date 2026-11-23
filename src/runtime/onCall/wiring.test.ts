@@ -11,7 +11,7 @@ import { createFakeOnCallStore } from "./store.fake";
 import { syntheticRotation } from "./testRotation";
 import { planAt } from "./routing";
 import { ON_CALL_ACK_PATH, ON_CALL_STATUS_PATH } from "./providerCall";
-import type { InCallTransferResult } from "./runner";
+import { RING_GUARD_MS, type InCallTransferResult } from "./runner";
 
 const HOST = "voice.example.test";
 const CALLER_ID = "+15550001111";
@@ -23,6 +23,21 @@ afterEach(() => vi.unstubAllEnvs());
 function fakeTwilio() {
   const texts: Array<{ body: string; from: string; to: string }> = [];
   const calls: Array<Record<string, unknown>> = [];
+  const updates: Array<{ sid: string; opts: Record<string, unknown> }> = [];
+  const callsApi = Object.assign(
+    (sid: string) => ({
+      update: vi.fn(async (opts: { status: "completed" }) => {
+        updates.push({ sid, opts });
+        return {};
+      }),
+    }),
+    {
+      create: vi.fn(async (opts: Record<string, unknown>) => {
+        calls.push(opts);
+        return { sid: `CA9${String(calls.length).padStart(31, "0")}` };
+      }),
+    },
+  );
   const client = {
     messages: {
       create: vi.fn(async (opts: { body: string; from: string; to: string }) => {
@@ -30,15 +45,10 @@ function fakeTwilio() {
         return { sid: `SM${texts.length}` };
       }),
     },
-    calls: {
-      create: vi.fn(async (opts: Record<string, unknown>) => {
-        calls.push(opts);
-        return { sid: `CA9${String(calls.length).padStart(31, "0")}` };
-      }),
-    },
+    calls: callsApi,
   };
   const factory = vi.fn(async () => client);
-  return { factory, texts, calls };
+  return { factory, texts, calls, updates };
 }
 
 function noAnswer(): InCallTransferResult {
@@ -165,6 +175,17 @@ describe("running", () => {
     expect(call.timeLimit).toBe(300);
     // One Twilio client, opened once, serves the text and the call.
     expect(tw.factory).toHaveBeenCalledTimes(2);
+  });
+
+  it("hangs up a provider call whose status never came back, through the same Twilio client", async () => {
+    const { w, tw, at } = running();
+    const esc = await w.runner!.afterInCallTransfer(noAnswer());
+    at(esc!.nextAt!);
+    await w.runner!.tick();
+    expect(tw.calls).toHaveLength(1);
+    at(new Date(esc!.nextAt!.getTime() + RING_GUARD_MS));
+    await w.runner!.tick();
+    expect(tw.updates).toEqual([{ sid: `CA9${"1".padStart(31, "0")}`, opts: { status: "completed" } }]);
   });
 
   it("texts the urgent notification number from today's number when the chain cannot start", async () => {

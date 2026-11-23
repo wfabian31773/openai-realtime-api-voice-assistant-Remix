@@ -288,6 +288,8 @@ export async function postOpRouteFor(input: {
 }): Promise<PostOpDecision> {
   if (!input.personId) return { route: "on_call", reason: "no_identity", note: NO_IDENTITY_NOTE };
   if (!input.query) return { route: "on_call", reason: "console_unavailable", note: CONSOLE_UNAVAILABLE_NOTE };
+  // The routing deadline is already spent: start no query nobody will wait for.
+  if (input.budgetMs <= 0) return { route: "on_call", reason: "console_unavailable", note: CONSOLE_UNAVAILABLE_NOTE };
   let timer: NodeJS.Timeout | undefined;
   try {
     const facts = await Promise.race([

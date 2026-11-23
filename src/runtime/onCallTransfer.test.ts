@@ -251,7 +251,8 @@ describe("an urgent after-hours call with the rotation on", () => {
     await expect(first).rejects.toThrow(/handoff_failed:NO_ANSWER/);
 
     urgent();
-    await expect(handoff()).rejects.toThrow(/handoff_failed:UNAVAILABLE/);
+    // Its own slug: the chain is still paging, which is not "could not be placed".
+    await expect(handoff()).rejects.toThrow(/^handoff_failed:CHAIN_RUNNING$/);
     expect(dialed).toHaveLength(1);
     expect(built.texts).toHaveLength(1);
     await vi.waitFor(() => expect(built.handed).toHaveLength(1));

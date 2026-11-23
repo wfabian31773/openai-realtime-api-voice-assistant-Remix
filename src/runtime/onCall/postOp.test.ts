@@ -252,6 +252,13 @@ describe("the whole check", () => {
     }
   });
 
+  it("with the routing deadline already spent, starts no Console query and says why", async () => {
+    const query = vi.fn();
+    const d = await postOpRouteFor({ ...base, budgetMs: 0, personId: "p", query });
+    expect(d).toEqual({ route: "on_call", reason: "console_unavailable", note: CONSOLE_UNAVAILABLE_NOTE });
+    expect(query).not.toHaveBeenCalled();
+  });
+
   it("routes to the surgeon from the Console's rows", async () => {
     const query = async () => ({
       rows: [{ date: "2026-12-04", event_name: "Surgery", is_kept: true, is_cancelled: false, is_rescheduled: false, npi: "1000000010", nextgen_name: "Ada Quill, MD" }],

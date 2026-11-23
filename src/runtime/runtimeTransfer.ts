@@ -199,6 +199,14 @@ export interface OnCallTransferWiring {
 /** The lanes whose urgent calls go to the on-call rotation: the after-hours family. */
 export const ON_CALL_LANES: ReadonlySet<string> = new Set(["no-ivr", "no-ivr-v2", "dev-no-ivr"]);
 
+/**
+ * The refusal reason for a second escalation on a call whose on-call chain is
+ * already running. The handoff throws `handoff_failed:CHAIN_RUNNING` for it,
+ * which the after-hours agent answers with its own directive: the chain is
+ * still paging, so the caller is not told the transfer "could not be placed".
+ */
+export const ON_CALL_CHAIN_RUNNING = "on_call_chain_already_running";
+
 /** How long the dial waits for the full-details text to be accepted before it rings. */
 export const PRE_DIAL_SMS_WAIT_MS = 2_000;
 /** How long the runner hand-off waits for that text's answer before recording it as unknown. */
@@ -740,7 +748,7 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
             mode !== "blind";
           if (onCallEligible && chainStarted) {
             log(`[ON-CALL] ${metadata.callSid}: a chain is already running for this call; not dialling again`);
-            return { ok: false, status: "UNAVAILABLE", reason: "on_call_chain_already_running" };
+            return { ok: false, status: "UNAVAILABLE", reason: ON_CALL_CHAIN_RUNNING };
           }
           if (onCallEligible && onCall) {
             onCallRun = await startOnCallRoute(
@@ -1039,7 +1047,13 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
         if (!outcome.ok) {
           // A fixed slug, because the text reaches the model — the
           // detailed reason stays in the server log (warmTransfer.ts).
-          throw new Error(`handoff_failed:${outcome.status}`);
+          // A second escalation while this call's on-call chain is still
+          // paging rang nobody, but it is not "could not be placed": the
+          // chain is retrying and escalating on its own, so the agent gets
+          // its own slug and its own words (v268).
+          throw new Error(
+            `handoff_failed:${outcome.reason === ON_CALL_CHAIN_RUNNING ? "CHAIN_RUNNING" : outcome.status}`,
+          );
         }
       };
     },
