@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import {
   ROTATION_CACHE_MS,
+  ROTATION_READ_ABANDON_MS,
+  ROUTING_BUDGET_MS,
   createRotationCache,
   decideRoute,
   syntheticTestPlan,
@@ -445,5 +447,95 @@ describe("the rotation cache", () => {
     now += 1;
     await cache.get();
     expect(loadRotation).toHaveBeenCalledTimes(3);
+  });
+
+  // Review of #514, round 9: a read the Hub never answered was handed to every
+  // later call for as long as the process ran, and the rotation was never read
+  // again.
+  const deferred = () => {
+    let resolve!: (r: RotationData) => void;
+    let reject!: (e: Error) => void;
+    const promise = new Promise<RotationData>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    return { promise, resolve, reject };
+  };
+
+  it("gives up on a read that never answers and reads again", async () => {
+    let now = 0;
+    const data = syntheticRotation();
+    const hung = new Promise<RotationData>(() => {});
+    const loadRotation = vi.fn<() => Promise<RotationData>>().mockReturnValueOnce(hung).mockResolvedValue(data);
+    const cache = createRotationCache({ loadRotation }, () => now);
+    void cache.get();
+    now += ROTATION_READ_ABANDON_MS - 1;
+    void cache.get(); // still shared
+    expect(loadRotation).toHaveBeenCalledTimes(1);
+    now += 1;
+    await expect(cache.get()).resolves.toBe(data);
+    expect(loadRotation).toHaveBeenCalledTimes(2);
+    await cache.get(); // and it is cached
+    expect(loadRotation).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not let an abandoned read's late answer replace a newer one", async () => {
+    let now = 0;
+    const older = { ...syntheticRotation(), tag: "older" } as RotationData;
+    const newer = { ...syntheticRotation(), tag: "newer" } as RotationData;
+    const slow = deferred();
+    const loadRotation = vi.fn<() => Promise<RotationData>>().mockReturnValueOnce(slow.promise).mockResolvedValue(newer);
+    const cache = createRotationCache({ loadRotation }, () => now);
+    const first = cache.get();
+    now += ROTATION_READ_ABANDON_MS;
+    await expect(cache.get()).resolves.toBe(newer);
+    slow.resolve(older);
+    await expect(first).resolves.toBe(older); // its own callers still get it
+    await expect(cache.get()).resolves.toBe(newer);
+    expect(loadRotation).toHaveBeenCalledTimes(2);
+  });
+
+  it("does not let an abandoned read that fails late clear the newer read in flight", async () => {
+    let now = 0;
+    const data = syntheticRotation();
+    const slow = deferred();
+    const second = deferred();
+    const loadRotation = vi
+      .fn<() => Promise<RotationData>>()
+      .mockReturnValueOnce(slow.promise)
+      .mockReturnValueOnce(second.promise)
+      .mockResolvedValue(data);
+    const cache = createRotationCache({ loadRotation }, () => now);
+    const first = cache.get();
+    first.catch(() => {});
+    now += ROTATION_READ_ABANDON_MS;
+    const inFlight = cache.get();
+    slow.reject(new Error("late blip"));
+    await expect(first).rejects.toThrow("late blip");
+    const third = cache.get(); // the newer read is still the one shared
+    expect(loadRotation).toHaveBeenCalledTimes(2);
+    second.resolve(data);
+    await expect(inFlight).resolves.toBe(data);
+    await expect(third).resolves.toBe(data);
+  });
+
+  it("caches nothing from a read that was in flight when it was cleared", async () => {
+    let now = 0;
+    const older = { ...syntheticRotation(), tag: "older" } as RotationData;
+    const fresh = { ...syntheticRotation(), tag: "fresh" } as RotationData;
+    const slow = deferred();
+    const loadRotation = vi.fn<() => Promise<RotationData>>().mockReturnValueOnce(slow.promise).mockResolvedValue(fresh);
+    const cache = createRotationCache({ loadRotation }, () => now);
+    const first = cache.get();
+    cache.clear();
+    slow.resolve(older);
+    await first;
+    await expect(cache.get()).resolves.toBe(fresh);
+    expect(loadRotation).toHaveBeenCalledTimes(2);
+  });
+
+  it("gives up on a read only after several routing budgets", () => {
+    expect(ROTATION_READ_ABANDON_MS).toBeGreaterThanOrEqual(4 * ROUTING_BUDGET_MS);
+    expect(ROTATION_READ_ABANDON_MS).toBeLessThan(ROTATION_CACHE_MS);
   });
 });

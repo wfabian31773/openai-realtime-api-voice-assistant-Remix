@@ -50,6 +50,14 @@ export const POST_OP_BUDGET_MS = 1_500;
 export const ROTATION_CACHE_MS = 60_000;
 
 /**
+ * How long a rotation read may stay in flight before the next call starts a
+ * fresh one instead of waiting on it. Several calls' routing budgets
+ * (`ROUTING_BUDGET_MS`): a slow read still serves the calls behind it, and a
+ * read that never answers is given up on (review of #514, round 9).
+ */
+export const ROTATION_READ_ABANDON_MS = 15_000;
+
+/**
  * The alert text for a notable rotation answer, so the provider or director
  * rung knows why they are the one being called. PHI-free.
  */
@@ -80,26 +88,40 @@ export function createRotationCache(
 ): { get(): Promise<RotationData>; clear(): void } {
   let value: RotationData | null = null;
   let at = 0;
-  let inflight: Promise<RotationData> | null = null;
+  // Each read carries a generation. Only the newest read writes the cache or
+  // clears the read in flight, so a read that was given up on and answers
+  // late changes nothing (review of #514, round 9).
+  let generation = 0;
+  let inflight: { read: Promise<RotationData>; startedAt: number; generation: number } | null = null;
   return {
     async get() {
       if (value && now() - at < ROTATION_CACHE_MS) return value;
-      if (inflight) return inflight;
-      inflight = store
+      // A read the Hub never answers would otherwise be handed to every call
+      // for as long as the process runs, each one timing out on it, and the
+      // rotation would never be read again. Past ROTATION_READ_ABANDON_MS a
+      // fresh read starts instead.
+      if (inflight && now() - inflight.startedAt < ROTATION_READ_ABANDON_MS) return inflight.read;
+      const mine = ++generation;
+      const read = store
         .loadRotation()
         .then((r) => {
-          value = r;
-          at = now();
+          if (mine === generation) {
+            value = r;
+            at = now();
+          }
           return r;
         })
         .finally(() => {
-          inflight = null;
+          if (inflight?.generation === mine) inflight = null;
         });
-      return inflight;
+      inflight = { read, startedAt: now(), generation: mine };
+      return read;
     },
     clear() {
       value = null;
       at = 0;
+      inflight = null;
+      generation += 1;
     },
   };
 }
