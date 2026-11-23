@@ -8,10 +8,28 @@
  * argument (or the category default) and nothing checked it against what the
  * caller had actually said.
  *
- * The rule: a caller who chose a contact method (call, text or email), or who
- * asked out loud to be called, texted or emailed back, wants a follow-up. The
- * model's FALSE never outranks that. It can only be FALSE when the caller did
- * neither.
+ * The rule (v166): a caller who chose a contact method (call, text or email),
+ * or who asked out loud to be called, texted or emailed back, wants a
+ * follow-up.
+ *
+ * NARROWED IN v269 (operator, 2026-11-22: the agent says "we'll call you back"
+ * even after the caller declines a callback). The prompt asks "Would you
+ * prefer we call, text, or email you back?" on every after-hours call, so the
+ * model fills `preferred_contact` on nearly every filing, including when the
+ * caller answers "You don't need to call back." or "I'll call back." v166 let
+ * that routine field outrank the model's explicit `requires_callback: false`,
+ * so the declined callback was promised anyway and the ticket lost its
+ * `[NO CALLBACK NEEDED]` tag. Measured, no-ivr `create_ticket` calls
+ * 2026-11-15..23 (`tool_call_payloads`): 3 sent `requires_callback: false`,
+ * all 3 were overridden on `preferred_contact` alone; 2 were declines
+ * (CAc93e587d61e2905d35850a571c08ce97, CA25b3b9562772a9f881d266ab17eb1f29),
+ * the third a caller who said "Just email me" (CAb7ae17c94d5bec743b5d171646f46985),
+ * which the spoken ask below still catches.
+ *
+ * So, in order: a caller who ASKED out loud is a callback, whatever the model
+ * sent (70202); otherwise the model's explicit FALSE stands; otherwise a
+ * chosen contact method is a callback; otherwise the model's answer, else the
+ * category default.
  *
  * Reads the caller's own words only (`callerSaid`, the ledger both pipelines
  * feed). NOT `metadata.getTranscript`: the runtime supplies none, and the
@@ -61,7 +79,10 @@ export function callerAskedToBeContacted(callerWords: string | undefined): boole
  * Whether the ticket needs a callback, decided from the caller rather than
  * from the model alone.
  *
- * - The caller chose a contact method, or asked to be contacted: TRUE.
+ * - The caller asked out loud to be contacted: TRUE.
+ * - Otherwise the model's explicit FALSE: FALSE. A `preferred_contact` the
+ *   prompt asks on every call is not the caller asking (v269).
+ * - Otherwise a chosen contact method: TRUE.
  * - Otherwise the model's explicit answer, else the category default.
  */
 export function callbackNeeded(input: {
@@ -78,9 +99,10 @@ export function callbackNeeded(input: {
   /** What the caller said on this call (`callerSaid`). */
   callerWords?: string;
 }): { required: boolean; overridden: boolean } {
-  const choseAMethod = Boolean(input.preferredContact && input.preferredContact.trim()) && input.fullyAnswered !== true;
-  const callerAsked = choseAMethod || callerAskedToBeContacted(input.callerWords);
   const fromModel = input.modelSays !== undefined ? input.modelSays : input.categoryDefault;
-  if (callerAsked) return { required: true, overridden: fromModel === false };
+  if (callerAskedToBeContacted(input.callerWords)) return { required: true, overridden: fromModel === false };
+  if (input.modelSays === false) return { required: false, overridden: false };
+  const choseAMethod = Boolean(input.preferredContact && input.preferredContact.trim()) && input.fullyAnswered !== true;
+  if (choseAMethod) return { required: true, overridden: fromModel === false };
   return { required: fromModel, overridden: false };
 }

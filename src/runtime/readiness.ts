@@ -2131,9 +2131,19 @@ import { callEnvironment } from "./callRecord";
  * names when the filing names the record's doctor or office and nobody else
  * on file answers to the filed name (afterHoursFiledName.ts). Above main's
  * v265 (#513, `c2c9709f`); v245 is #488 on its open branch. No migration.
+ * On main since #512 (`c2841ff6`).
+ *
+ * v269 — A DECLINED CALLBACK IS NOT PROMISED (2026-11-23). v166 let a chosen
+ * contact method override the model's explicit requires_callback=false, and
+ * the after-hours prompt asks how to follow up on every call, so a caller who
+ * had declined a callback was still told the team would call them back (3 of 3
+ * such filings overridden, 2026-11-15..23). The model's false now outranks a
+ * chosen method; a caller who ASKED to be contacted still wins over it
+ * (callbackRequested.ts). Above main's v266 (#512, `c2841ff6`); v267 is #515,
+ * v268 is #514 and v245 is #488 on their open branches. No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v266-an-after-hours-ticket-names-the-patient-20261122";
+  "voice-runtime-v269-a-declined-callback-is-not-promised-20261123";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

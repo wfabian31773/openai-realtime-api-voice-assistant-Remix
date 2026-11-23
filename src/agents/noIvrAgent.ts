@@ -2242,9 +2242,10 @@ The ticket will include schedule context (last appointment info) automatically.`
       // Lazy import to avoid module initialization during agent bootstrap
       const { SyncAgentService } = await import("../services/syncAgentService");
       
-      // Callback requirement: the caller's own choice outranks the model's
-      // FALSE (v166, ticket 70202 — "Call, please" filed as NO CALLBACK).
-      // A chosen contact method or an explicit "call me" means a callback.
+      // Callback requirement: a caller who ASKED to be contacted outranks the
+      // model's FALSE (v166, ticket 70202 — "Call, please" filed as NO
+      // CALLBACK). A chosen contact method alone does not (v269): the prompt
+      // asks it on every call, including of a caller who declined.
       const callback = callbackNeeded({
         modelSays: params.requires_callback,
         categoryDefault: SyncAgentService.requiresCallback(params.request_category as TriageOutcome),

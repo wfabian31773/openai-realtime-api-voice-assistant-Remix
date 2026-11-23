@@ -72,9 +72,44 @@ describe('callbackNeeded', () => {
     });
   });
 
-  it('a chosen contact method alone is a callback', () => {
-    expect(callbackNeeded({ modelSays: false, categoryDefault: false, preferredContact: 'text' }).required).toBe(true);
-    expect(callbackNeeded({ modelSays: false, categoryDefault: false, preferredContact: 'email' }).required).toBe(true);
+  it('a chosen contact method is a callback when the model did not say otherwise', () => {
+    expect(callbackNeeded({ modelSays: undefined, categoryDefault: false, preferredContact: 'text' })).toEqual({
+      required: true,
+      overridden: true,
+    });
+    expect(callbackNeeded({ modelSays: true, categoryDefault: false, preferredContact: 'email' })).toEqual({
+      required: true,
+      overridden: false,
+    });
+  });
+
+  it("v269: a chosen contact method does not outrank the model's explicit FALSE", () => {
+    // The prompt asks the method question on every call, so the field is
+    // filled when the caller declined ("You don't need to call back.").
+    for (const preferredContact of ['phone', 'text', 'email']) {
+      expect(callbackNeeded({ modelSays: false, categoryDefault: true, preferredContact }), preferredContact).toEqual({
+        required: false,
+        overridden: false,
+      });
+    }
+    expect(
+      callbackNeeded({
+        modelSays: false,
+        categoryDefault: true,
+        preferredContact: 'phone',
+        callerWords: "You don't need to call back.",
+      }).required,
+    ).toBe(false);
+    expect(
+      callbackNeeded({ modelSays: false, categoryDefault: true, preferredContact: 'phone', callerWords: "Um, I'll call back." })
+        .required,
+    ).toBe(false);
+  });
+
+  it("v269: a spoken ask still outranks the model's FALSE beside a chosen method", () => {
+    expect(
+      callbackNeeded({ modelSays: false, categoryDefault: true, preferredContact: 'email', callerWords: 'Just email me.' }),
+    ).toEqual({ required: true, overridden: true });
   });
 
   it('a fully answered question keeps the model answer unless the caller ASKED', () => {
@@ -90,6 +125,11 @@ describe('callbackNeeded', () => {
         callerWords: 'Please call me back about it.',
       }).required,
     ).toBe(true);
+    // The model said nothing about a callback: a fully answered question still
+    // does not turn a chosen method into one, and the category default stands.
+    expect(
+      callbackNeeded({ modelSays: undefined, categoryDefault: false, preferredContact: 'phone', fullyAnswered: true }),
+    ).toEqual({ required: false, overridden: false });
   });
 
   it('with no caller signal, the model answer, else the category default, stands', () => {
