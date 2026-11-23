@@ -638,7 +638,9 @@ describe("one chain per call, read from the chain's own row", () => {
     const { ops, dialed } = fakeOps();
     const built = buildWiring();
     built.wiring.handoffResultWaitMs = 10;
-    built.wiring.handoffSettleMs = 40;
+    // Long enough that the second hand-off is still inside its bound when the
+    // third escalation arrives, so the guard on the late release is what decides.
+    built.wiring.handoffSettleMs = 400;
     const inner = built.wiring.runner.afterInCallTransfer;
     let calls = 0;
     let finishFirst: () => void = () => undefined;
@@ -668,7 +670,9 @@ describe("one chain per call, read from the chain's own row", () => {
     await expect(handoff()).rejects.toThrow(/^handoff_failed:CHAIN_RUNNING$/);
 
     // Past the bound the claim is released, so the next escalation routes again.
-    await vi.waitFor(() => expect(lines.some((l) => l.includes("releasing this call's chain claim"))).toBe(true));
+    await vi.waitFor(() => expect(lines.some((l) => l.includes("releasing this call's chain claim"))).toBe(true), {
+      timeout: 3_000,
+    });
     urgent();
     const second = handoff();
     await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
