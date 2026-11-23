@@ -4,6 +4,7 @@ import {
   LEVEL_RETRY_DEADLINE_MS,
   RETRY_GAP_MS,
   RING_GUARD_MS,
+  STALE_ESCALATION_MS,
   attemptNote,
   createOnCallRunner,
   exhaustedNote,
@@ -740,6 +741,83 @@ describe("what keeps the chain moving when something goes wrong", () => {
     h.store.failWrites = true;
     await h.runner.afterInCallTransfer(inCall(wedPlan(), "accepted"));
     expect(h.urgent).toHaveLength(0);
+  });
+
+  it("brings a taken transfer due when its close loses every race, and the next tick closes it without ringing", async () => {
+    const h = harness();
+    const realClose = h.store.closeEscalation.bind(h.store);
+    let losing = true;
+    h.store.closeEscalation = async (...args) => (losing ? null : realClose(...args));
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "accepted"));
+    expect(esc).toMatchObject({ status: "active" });
+    expect(esc!.nextAt!.getTime()).toBeLessThanOrEqual(h.now().getTime());
+    losing = false;
+    await h.runner.tick();
+    const warm = [...h.store.attempts.values()].find((a) => a.kind === "warm_transfer")!;
+    expect(h.escalation()).toMatchObject({ status: "accepted", acceptedBy: 1, acceptedAttemptId: warm.id, details: null });
+    expect(h.calls).toHaveLength(0);
+    expect(h.urgent).toHaveLength(0);
+  });
+
+  it("closes a taken transfer whose attempt could not be logged, and rings nobody", async () => {
+    const h = harness();
+    const realLog = h.store.logAttempt.bind(h.store);
+    h.store.logAttempt = async (a) => {
+      if (a.kind === "warm_transfer") throw new Error("fake store: attempt refused");
+      return realLog(a);
+    };
+    expect(await h.runner.afterInCallTransfer(inCall(wedPlan(), "accepted"))).toBeNull();
+    expect(h.escalation()).toMatchObject({ status: "accepted", acceptedBy: 1, acceptedAttemptId: null });
+    h.advance(24 * 3_600_000);
+    await h.runner.tick();
+    expect(h.calls).toHaveLength(0);
+    expect(h.urgent).toHaveLength(0);
+  });
+
+  it("does not bring due a taken transfer it could neither log nor close, so the provider who took it is not rung", async () => {
+    const h = harness();
+    const realLog = h.store.logAttempt.bind(h.store);
+    h.store.logAttempt = async (a) => {
+      if (a.kind === "warm_transfer") throw new Error("fake store: attempt refused");
+      return realLog(a);
+    };
+    h.store.closeEscalation = async () => null;
+    expect(await h.runner.afterInCallTransfer(inCall(wedPlan(), "accepted"))).toBeNull();
+    const row = h.escalation()!;
+    expect(row.status).toBe("active");
+    expect(row.nextAt!.getTime()).toBeGreaterThan(h.now().getTime() + STALE_ESCALATION_MS);
+    await h.runner.tick();
+    expect(h.calls).toHaveLength(0);
+  });
+
+  it("stops an escalation that comes due more than two hours after it opened, and tells the urgent number", async () => {
+    const h = harness();
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    h.at(new Date(esc!.createdAt.getTime() + STALE_ESCALATION_MS + 1));
+    await h.runner.tick();
+    expect(h.calls).toHaveLength(0);
+    expect(h.texts).toHaveLength(0);
+    expect(h.escalation()).toMatchObject({ status: "failed", details: null });
+    expect(h.urgent).toHaveLength(1);
+    expect(h.urgent[0]).toMatch(/THE ON-CALL ESCALATION STOPPED/);
+    expect(h.urgent[0]).toContain(DETAILS.reason);
+  });
+
+  it("still rings an escalation that comes due just inside two hours", async () => {
+    const h = harness();
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    h.at(new Date(esc!.createdAt.getTime() + STALE_ESCALATION_MS));
+    await h.runner.tick();
+    expect(h.calls).toHaveLength(1);
+    expect(h.escalation()).toMatchObject({ status: "active" });
+  });
+
+  it("marks a stale escalation's text as a test in test mode", async () => {
+    const h = harness({ config: TEST });
+    const esc = await h.runner.afterInCallTransfer(inCall(syntheticTestPlan(TEST), "no_answer", { mode: "test" }));
+    h.at(new Date(esc!.createdAt.getTime() + STALE_ESCALATION_MS + 1));
+    await h.runner.tick();
+    expect(h.urgent[0]).toContain("[TEST MODE] THE ON-CALL ESCALATION STOPPED");
   });
 
   it("opens one escalation per call and hands back the existing one", async () => {

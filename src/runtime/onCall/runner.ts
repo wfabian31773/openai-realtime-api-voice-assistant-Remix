@@ -59,6 +59,14 @@ export const PROVIDER_RING_SECONDS = 30;
 export const PROVIDER_CALL_LIMIT_SECONDS = 300;
 /** Calls per level, the in-call transfer counted as level 0's first. */
 export const ATTEMPTS_PER_LEVEL = 2;
+/**
+ * An escalation that comes due this long after it opened rings nobody. A
+ * full chain takes about twenty minutes; a row this old means the runner was
+ * down or a close kept failing, and a provider woken now would be hours late
+ * for a call another level may already have taken. The urgent number is told
+ * instead.
+ */
+export const STALE_ESCALATION_MS = 2 * 3_600_000;
 
 const PRESS_A_KEY =
   "Press any key on the call we are placing to you now to take this patient (that stops the escalation), then call the patient back.";
@@ -151,6 +159,13 @@ export function attemptNote(e: Pick<EscalationRow, "levelIndex" | "attemptNo" | 
   parts.push(PRESS_A_KEY);
   if (e.routing.note) parts.push(e.routing.note);
   const note = parts.join(" ");
+  return e.mode === "test" ? `[TEST MODE] ${note}` : note;
+}
+
+export function staleNote(e: Pick<EscalationRow, "mode">): string {
+  const note =
+    "THE ON-CALL ESCALATION STOPPED — it was more than two hours old when it came due, so nobody else will be called. " +
+    "If no provider has reached this patient, please call them back now.";
   return e.mode === "test" ? `[TEST MODE] ${note}` : note;
 }
 
@@ -317,6 +332,14 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
       await closeAsTaken(row.id, taken);
       return;
     }
+    if (now().getTime() - row.createdAt.getTime() > STALE_ESCALATION_MS) {
+      const closed = await store.closeEscalation(row.id, row.version, { status: "failed", nextAt: null });
+      if (closed) {
+        log(`[ON-CALL] ${row.callSid}: came due more than two hours after it opened; closed as failed, nobody rung`);
+        await notifyQuietly(textFor(row, staleNote(row)), row.callSid);
+      }
+      return;
+    }
     const level = row.plan.levels[row.levelIndex];
     if (!level) {
       await store.closeEscalation(row.id, row.version, { status: "failed", nextAt: null });
@@ -412,6 +435,49 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
     await advance(row.id, row.levelIndex, row.attemptNo);
   }
 
+  /** Bring an active row due now, so the next tick reads it. */
+  async function dueNow(escalationId: number): Promise<EscalationRow | null> {
+    for (let i = 0; i < 3; i++) {
+      const cur = await store.getEscalation(escalationId);
+      if (!cur || cur.status !== "active") return cur;
+      const due = await store.updateEscalation(cur.id, cur.version, { nextAt: now(), releaseLease: true });
+      if (due) return due;
+    }
+    return await store.getEscalation(escalationId);
+  }
+
+  /**
+   * Close an escalation whose in-call transfer was taken. With the transfer's
+   * accepted row logged, a close that cannot land brings the row due now: the
+   * next tick finds that row and closes the chain on it, instead of the row
+   * sitting active for a day. Without it, the row is closed directly, and if
+   * even that fails it is left for the stale guard, which rings nobody.
+   */
+  async function settleAccepted(
+    escalationId: number,
+    warm: AttemptRow | null,
+    fallback: { acceptedBy: number | null; acceptedAt: Date },
+  ): Promise<EscalationRow | null> {
+    if (warm) {
+      const { row } = await closeAsTaken(escalationId, warm);
+      if (row) return row;
+      log(`[ON-CALL] escalation ${escalationId}: the taken transfer's close did not land; brought due so the next tick closes it`);
+      return await dueNow(escalationId);
+    }
+    for (let i = 0; i < 3; i++) {
+      const cur = await store.getEscalation(escalationId);
+      if (!cur || cur.status !== "active") return cur;
+      const closed = await store.closeEscalation(cur.id, cur.version, {
+        status: "accepted",
+        ...fallback,
+        acceptedAttemptId: null,
+        nextAt: null,
+      });
+      if (closed) return closed;
+    }
+    return await store.getEscalation(escalationId);
+  }
+
   async function step(row: EscalationRow): Promise<void> {
     if (row.phase === "ringing") await guardExpired(row);
     else await ring(row);
@@ -422,8 +488,11 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
       if (r.plan.levels.length === 0) return null;
       const first = r.plan.levels[0];
       const accepted = r.warm.outcome === "accepted";
+      const takenBy = { acceptedBy: storedProviderId(first.providerId), acceptedAt: r.warm.endedAt };
+      let opened: EscalationRow | null = null;
+      let warm: AttemptRow | null = null;
       try {
-        const opened = await store.openEscalation({
+        opened = await store.openEscalation({
           callSid: r.callSid,
           mode: r.mode,
           routing: r.routing,
@@ -464,7 +533,7 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
             endedAt: r.preDialSms.at,
           });
         }
-        await store.logAttempt({
+        warm = await store.logAttempt({
           ...base,
           kind: "warm_transfer",
           dialedTo: r.warm.dialedTo,
@@ -477,23 +546,20 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
           log(`[ON-CALL] ${r.callSid}: the transfer was not taken (${r.warm.outcome}); the chain will carry on`);
           return opened;
         }
-        // The warm transfer's accepted row is logged above, so a close that
-        // loses its races here is finished by the first move that reads it.
-        for (let i = 0; i < 3; i++) {
-          const cur = i === 0 ? opened : await store.getEscalation(opened.id);
-          if (!cur || cur.status !== "active") return cur;
-          const closed = await store.closeEscalation(cur.id, cur.version, {
-            status: "accepted",
-            acceptedBy: storedProviderId(first.providerId),
-            acceptedAt: r.warm.endedAt,
-            nextAt: null,
-          });
-          if (closed) return closed;
-        }
-        return await store.getEscalation(opened.id);
+        return await settleAccepted(opened.id, warm, takenBy);
       } catch (err) {
         log(`[ON-CALL] ${r.callSid}: the escalation could not be recorded: ${(err as Error)?.message ?? err}`);
-        if (!accepted) {
+        if (accepted) {
+          // The provider has the patient. Close what was opened, best effort;
+          // nothing is rung either way.
+          if (opened) {
+            try {
+              await settleAccepted(opened.id, warm, takenBy);
+            } catch (again) {
+              log(`[ON-CALL] ${r.callSid}: the taken transfer's escalation is still open: ${(again as Error)?.message ?? again}`);
+            }
+          }
+        } else {
           const note =
             (r.mode === "test" ? "[TEST MODE] " : "") +
             "THE ON-CALL ESCALATION COULD NOT START — the transfer was not taken and nobody else will be called. " +
