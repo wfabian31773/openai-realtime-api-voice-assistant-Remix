@@ -54,19 +54,19 @@ describe("voice fleet MCP core", () => {
     ["+44 20 7946 0958 (1234)", "***-***-0958"],
     ["+44 20 7946 0958(1234)", "***-***-0958"],
     ["+44 20 7946 0958 (123)", "***-***-0958"],
-    ["+44 20 7946 0958 (1)", "***-***-0958 (1)"],
-    ["+44 20 7946 0958 x123", "***-***-0958 x123"],
-    ["+44 20 7946 0958x123", "***-***-0958x123"],
-    ["+44 20 7946 0958X123", "***-***-0958X123"],
-    ["+44 20 7946 0958 ext. 45", "***-***-0958 ext. 45"],
-    ["+44 20 7946 0958 #12", "***-***-0958 #12"],
+    ["+44 20 7946 0958 (1)", "***-***-0958"],
+    ["+44 20 7946 0958 x123", "***-***-0958"],
+    ["+44 20 7946 0958x123", "***-***-0958"],
+    ["+44 20 7946 0958X123", "***-***-0958"],
+    ["+44 20 7946 0958 ext. 45", "***-***-0958"],
+    ["+44 20 7946 0958 #12", "***-***-0958"],
     ["+44 20 7946 0958/12", "***-***-5812"],
-    ["+44 (20) 7946-0958 (12)", "***-***-0958 (12)"],
-    ["+1 909 555 0113 x45", "***-***-0113 x45"],
-    ["+19095550113x45", "***-***-0113x45"],
-    ["9095550113x45", "***-***-0113x45"],
-    ["+99990000 (12)", "***-***-0000 (12)"],
-    ["+999999999990000 (12)", "***-***-0000 (12)"],
+    ["+44 (20) 7946-0958 (12)", "***-***-0958"],
+    ["+1 909 555 0113 x45", "***-***-0113"],
+    ["+19095550113x45", "***-***-0113"],
+    ["9095550113x45", "***-***-0113"],
+    ["+99990000 (12)", "***-***-0000"],
+    ["+999999999990000 (12)", "***-***-0000"],
     ["+9990000", "***-***-0000"],
     ["+9999999999990000", "***-***-0000"],
     ["+99.99.99.99.99.99.00.00", "***-***-0000"],
@@ -80,7 +80,7 @@ describe("voice fleet MCP core", () => {
   it.each([
     ["555/0100", "***-***-0100"],
     ["(909)\n555-0113", "***-***-0113"],
-    ["+44\u00A020\u202F7946\u20130958 x\n123", "***-***-0958 x\n123"],
+    ["+44\u00A020\u202F7946\u20130958 x\n123", "***-***-0958"],
     ["555\\t0100", "***-***-0100"],
     ["+44 20 7946 0958 x\r12\u200B3456", "***-***-0958"],
     ["+44 20 7946 0958\n(12)\u202F(34)", "***-***-0958"],
@@ -91,19 +91,57 @@ describe("voice fleet MCP core", () => {
     ["+44 20 7946 0958 x 12345", "***-***-0958"],
     ["+44 20 7946 0958 ext.123456", "***-***-0958"],
     ["+44 20 7946 0958 (123456)", "***-***-0958"],
-    ["+44 20 7946 0958 (12)", "***-***-0958 (12)"],
+    ["+44 20 7946 0958 (12)", "***-***-0958"],
     ["+44 20 7946 0958 (1234)", "***-***-0958"],
-    ["+44 20 7946 0958 x1234", "***-***-0958 x1234"],
-    ["+44 20 7946 0958 #1234", "***-***-0958 #1234"],
+    ["+44 20 7946 0958 x1234", "***-***-0958"],
+    ["+44 20 7946 0958 #1234", "***-***-0958"],
     ["+44 20 7946 0958 x12 3456", "***-***-0958"],
     ["+44 20 7946 0958 (12) (34)", "***-***-0958"],
     ["+44 20 7946 0958 x12 #345", "***-***-0958"],
-    ["555010x12345", "***-***-5010"],
+    ["555010x12345", "***-***-2345"],
+    ["555x0100", "***-***-0100"],
+    ["5550100x12;3456789", "***-***-0100"],
+    ["5550100 ext.12,3456789", "***-***-0100"],
+    ["5550100(12);3456789", "***-***-6789"],
   ])("conservatively masks digit runs and suffixes: %s", (input, expected) => {
     expect(maskString(input)).toBe(expected);
     expect(mask({ note: input })).toEqual({ note: expected });
     for (const key of ["body", "text", "transcript", "turns"]) {
       expect(mask({ [key]: input }, "", true)).toEqual({ [key]: expected });
+    }
+  });
+
+  it.each([
+    ["＋１（２０２）５５５－０１０３", "***-***-0103"],
+    ["٢٠٢·٥٥٥·٠١٠٣", "***-***-0103"],
+    ["۲۰۲\u200D۵۵۵\u2060۰۱۰۳", "***-***-0103"],
+    ["२०२／५५५．०१०३", "***-***-0103"],
+    ["২০২\u0085৫৫৫\u200C০১০৩", "***-***-0103"],
+    ["๒๐๒\uFEFF๕๕๕\u200B๐๑๐๓", "***-***-0103"],
+    ["𝟐𝟎𝟐‐𝟓𝟓𝟓‐𝟎𝟏𝟎𝟑", "***-***-0103"],
+    ["２０２５５５０１０３ ｅｘｔ． １２３４", "***-***-0103"],
+    ["２０２５５５０１０３Ｘ१२३४५", "***-***-0103"],
+    ["２０２５５５０１０３ ＃๑๒", "***-***-0103"],
+    ["２０２５５５０１０３（১২）", "***-***-0103"],
+    ["２０２５５５０１０３（১২৩）", "***-***-0103"],
+    ["２０２５５５０１０３（১২৩৪৫）", "***-***-0103"],
+  ])("masks Unicode digits and separators without normalizing surrounding text: %s", (input, expected) => {
+    // Compatibility expansions, combining marks and astral characters exercise
+    // original UTF-16 offsets on both sides of multiple matches. An opaque id
+    // separates independent phones from a conservatively consumed extension.
+    const wrap = (phone: string) => `𝄞 ﬃ Ａ e\u0301 ${phone}; {"id":"12345678901234567890"}; ${phone} ㍿`;
+    expect(maskString(wrap(input))).toBe(wrap(expected));
+    expect(mask({ note: wrap(input) })).toEqual({ note: wrap(expected) });
+    expect(mask({ body: [{ text: wrap(input) }] }, "", true))
+      .toEqual({ body: [{ text: wrap(expected) }] });
+  });
+
+  it("masks every decimal digit set supported by the runtime with ASCII last four", () => {
+    for (let code = 0; code <= 0x10ffff; code++) {
+      if (!/\p{Nd}/u.test(String.fromCodePoint(code))) continue;
+      const digits = Array.from({ length: 10 }, (_, i) => String.fromCodePoint(code + i)).join("");
+      expect(maskString(digits), `decimal set U+${code.toString(16)}`).toBe("***-***-6789");
+      code += 9;
     }
   });
 
@@ -154,6 +192,124 @@ describe("voice fleet MCP core", () => {
     expect(elapsed).toBeLessThan(50);
   });
 
+  it("masks phones split by every combining mark, format and control character supported by the runtime", () => {
+    for (let code = 0; code <= 0x10ffff; code++) {
+      const point = String.fromCodePoint(code);
+      if (!/[\p{M}\p{Cf}\p{Cc}]/u.test(point)) continue;
+      const phone = `٥５𝟓${point}०১๐０`;
+      expect(maskString(phone), `U+${code.toString(16)}`).toBe("***-***-0100");
+      expect(mask({ body: [{ text: phone }] }, "", true)).toEqual({ body: [{ text: "***-***-0100" }] });
+    }
+  });
+
+  it.each(["a", " a ", "abc", "Ж", "字", "[]", "{}", "_", "*", "~", ",", ";", ":", "\"", "\\", "\uE000aaaaaaaa\uE001", "\uE000\uE000", "\uE000aaaaaaab\uE001"])(
+    "masks synthetic digit groups split by %s", (separator) => {
+      const input = `555${separator}0100`;
+      expect(maskString(input)).toBe("***-***-0100");
+      expect(mask({ note: input })).toEqual({ note: "***-***-0100" });
+      for (const key of ["body", "text", "transcript", "turns", "messages"]) {
+        expect(mask({ [key]: [{ nested: [input] }] }, "", true))
+          .toEqual({ [key]: [{ nested: ["***-***-0100"] }] });
+      }
+      expect(maskString(JSON.stringify({ note: input }))).toBe('{"note":"***-***-0100"}');
+    },
+  );
+
+  it.each([
+    ["⓹⓹⓹⓿❶⓿⓿", "0100"], ["❺❺❺⓿❶⓿⓿", "0100"],
+    ["➄➄➄🄋➀🄌🄋", "0100"], ["➎➎➎⓿➊⓿⓿", "0100"],
+    ["⑤⁵₅⓪¹₀０", "0100"], ["፭፭፭፩፩፩፩", "1111"],
+    ["\u{102e5}\u{102e5}\u{102e5}\u{102e1}\u{102e1}\u{102e1}\u{102e1}", "1111"],
+    ["⓫⓫⓫⓫", "1111"],
+  ])("masks enclosed and non-decimal script digits: %s", (input, tail) => {
+    expect(maskString(input)).toBe(`***-***-${tail}`);
+    expect(mask({ body: { messages: [input] } }, "", true)).toEqual({ body: { messages: [`***-***-${tail}`] } });
+  });
+
+  it("does not exempt phone-looking typed values, inline JSON, or oversized date fractions", () => {
+    for (const key of ["id", "sid", "callId", "ticketId", "createdAt", "updated_at", "timestamp"]) {
+      for (const phone of ["5550100", "2025550103", "202-555-0103", "2025550103x1234"]) {
+        const expected = phone === "5550100" ? "***-***-0100" : "***-***-0103";
+        expect(mask({ [key]: phone })).toEqual({ [key]: expected });
+        expect(mask({ body: { [key]: phone } }, "", true)).toEqual({ body: { [key]: expected } });
+        expect(maskString(JSON.stringify({ [key]: phone }))).toBe(JSON.stringify({ [key]: expected }));
+        expect(maskString(`record {"${key}":"${phone}"}`)).toBe(`record {"${key}":"${expected}"}`);
+      }
+    }
+    expect(mask({ id: "phone-2025550103" })).toEqual({ id: "phone-***-***-0103" });
+    expect(maskString('{"id":"phone-2025550103"}')).toBe('{"id":"phone-***-***-0103"}');
+    for (const input of ["555-2026-11-23-0100", "555 2026-11-23 0100", "555\u03012026-11-23\u200e0100", "555-12345678-1234-4123-8123-123456789012-0100", `555 CA${"a".repeat(32)} 0100`, "2026-11-23T10:30:00.5550100Z"]) {
+      expect(maskString(input)).toBe(input.endsWith("Z") ? "***-***-0100Z" : "***-***-0100");
+    }
+    expect(maskString("xx5550100aaaaaaaaaaaaaaaaaaaaaaaaa")).toBe("xx***-***-0100aaaaaaaaaaaaaaaaaaaaaaaaa");
+    expect(maskString("55501000-1234-9999-1111-123456789012")).toBe("***-***-9012");
+  });
+
+  it("masks escaped and repeatedly serialized JSON strings and their keys", () => {
+    for (const input of [
+      '{"note":"\\u0035\\u0035\\u0035\\u0030\\u0031\\u0030\\u0030"}',
+      '{"note":"555\\u200e0100"}',
+      '{"note":"555\\u00ad0100"}',
+      '{"note":"\\ud835\\udfd3\\ud835\\udfd3\\ud835\\udfd3\\ud835\\udfce\\ud835\\udfcf\\ud835\\udfce\\ud835\\udfce"}',
+    ]) {
+      const expected = '{"note":"***-***-0100"}';
+      expect(maskString(input)).toBe(expected);
+      expect(maskString(JSON.stringify(JSON.stringify(input)))).toBe(JSON.stringify(JSON.stringify(expected)));
+      expect(mask({ messages: [{ text: input }] }, "", true)).toEqual({ messages: [{ text: expected }] });
+    }
+    const input = { "5550100": { "202_555_0103": 2025550103 } };
+    const expected = { "***-***-0100": { "***-***-0103": "***-***-0103" } };
+    expect(mask(input)).toEqual(expected);
+    expect(mask({ body: [input] }, "", true)).toEqual({ body: [expected] });
+    expect(maskString(JSON.stringify(input))).toBe(JSON.stringify(expected));
+  });
+
+  it.each([
+    [5550100, "0100"], [2025550103, "0103"], [-2025550103, "0103"],
+    [202.5550103, "0103"], [1e21, "0000"],
+  ])("masks numeric values outside protected id fields: %s", (input, tail) => {
+    const expected = input < 0 ? `-***-***-${tail}` : `***-***-${tail}`;
+    expect(mask({ note: input })).toEqual({ note: expected });
+    expect(mask({ body: { turns: [[{ value: input }]] } }, "", true))
+      .toEqual({ body: { turns: [[{ value: expected }]] } });
+    expect(maskString(JSON.stringify({ note: input }))).toBe(JSON.stringify({ note: expected }));
+  });
+
+  it("redacts split digit arrays, including nested arrays and arrays beside prose", () => {
+    for (const input of [["555", "0100"], ["555", " ", "0100"], ["555", "_", "0100"], ["5", "5", "5", "0", "1", "0", "0"], ["555", ["0", ["1", "00"]]], ["call", "555", "0100", { note: "5550100" }]]) {
+      const output = mask({ note: input }) as { note: unknown };
+      expect(JSON.stringify(output)).not.toMatch(/\d{5}/);
+      expect(JSON.stringify(output)).not.toContain('"555"');
+      expect(JSON.stringify(output)).toContain("[redacted digits]");
+      expect(mask({ transcript: { turns: input } }, "", true)).toEqual({ transcript: { turns: output.note } });
+      expect(maskString(JSON.stringify({ note: input }))).toBe(JSON.stringify(output));
+    }
+    // Digit splitting does not change the existing standalone token exceptions.
+    const tokens = ["2026-11-23", "2026-11-23T10:30:00.123456Z", "12345678-1234-4123-8123-123456789012"];
+    expect(mask({ note: tokens })).toEqual({ note: tokens });
+  });
+
+  it.each([
+    ["operator_inbound_get", "callSid", "CA"],
+    ["operator_sms_get", "messageSid", "SM"],
+    ["operator_voicemail_get", "recordingSid", "RE"],
+  ])("masks adversarial content through %s includeContent", async (name, sidKey, prefix) => {
+    const data = {
+      body: "555\u00ad0100", text: "555\u03010100", transcript: [{ id: "5550100" }],
+      turns: [{ "5550100": ["555", "0100"] }], messages: [{ text: '{"id":"5550100"}', value: 5550100 }],
+    };
+    const expected = {
+      body: "***-***-0100", text: "***-***-0100", transcript: [{ id: "***-***-0100" }],
+      turns: [{ "***-***-0100": ["[redacted digits]", "[redacted digits]"] }],
+      messages: [{ text: '{"id":"***-***-0100"}', value: "***-***-0100" }],
+    };
+    vi.spyOn(globalThis, "fetch").mockResolvedValue(Response.json(data));
+    const reply = await create().handleMessage(call(name, { [sidKey]: prefix + "a".repeat(32), includeContent: true }));
+    const wire = JSON.parse(JSON.stringify(reply));
+    expect(wire.result.isError).toBe(false);
+    expect(JSON.parse(wire.result.content[0].text).data).toEqual(expected);
+  });
+
   it("leaves no unprotected 7+ digit run across seeded synthetic phone formats and extensions", () => {
     let seed = 0x5eed1234;
     const random = (max: number) => {
@@ -164,6 +320,7 @@ describe("voice fleet MCP core", () => {
       "", " ", "\t", "\n", "\r", "\f", "\v", ".", "-", "/", " . ", " - ",
       "\u00A0", "\u1680", ...Array.from({ length: 12 }, (_, i) => String.fromCharCode(0x2000 + i)),
       "\u202F", "\u205F", "\u3000", "\uFEFF",
+      "\u0085", "\u200C", "\u200D", "\u2060", "（", "）", "－", "．", "／", "＋", "：", "，",
       ...Array.from({ length: 6 }, (_, i) => String.fromCharCode(0x2010 + i)),
       "\u2212", "\u00B7", "\u2022", "(", ")",
     ];
@@ -178,16 +335,19 @@ describe("voice fleet MCP core", () => {
       () => "+" + mixed(["52", "55", "0000", "0000"]),
       () => mixed(["999", "000", "000", "0000"]),
     ];
-    const extensions = ["x", "X", "ext", "ext.", "extension", "#", "(", ""];
+    const extensions = ["x", "X", "ext", "ext.", "extension", "#", "(", "", "ｘ", "ｅｘｔ．", "ｅｘｔｅｎｓｉｏｎ", "＃"];
+    const digitZeros = [0x30, 0xff10, 0x660, 0x6f0, 0x966, 0x9e6, 0xe50, 0x1d7ce];
+    const mixScripts = (text: string) => text.replace(/[0-9]/g, (digit) =>
+      String.fromCodePoint(digitZeros[random(digitZeros.length)] + Number(digit)));
     const protectedTokens = ["2026-11-23T10:30:00.123Z", "12345678901234567890"];
     const assertMasked = (output: unknown) => {
       if (typeof output === "string") {
         expect(output).toContain("***-***-");
-        const unprotected = protectedTokens.reduce((text, token) => text.split(token).join(""), output).replace(/\\(?:[tnrfv]|u000[bB])/g, " ");
+        const unprotected = protectedTokens.reduce((text, token) => text.split(token).join(""), output).normalize("NFKC").replace(/\\(?:[tnrfv]|u000[bB])/g, " ");
         // Independent leak oracle: count digits across every contiguous run of
         // digits and allowed separators, including the visible mask tail.
-        for (const run of unprotected.match(/[+\d\s\u00A0\u1680\u2000-\u200B\u202F\u205F\u3000\uFEFF\u2010-\u2015\u2212\u00B7\u2022.()/\-]+/g) ?? []) {
-          expect(run.replace(/\D/g, "").length, output).toBeLessThan(7);
+        for (const run of unprotected.match(/[\p{Nd}\p{White_Space}\p{Zs}\p{Pd}\u200B-\u200D\u2060\uFEFF\u2212\u00B7\u2022.,():/+\[\]{}-]+/gu) ?? []) {
+          expect(Array.from(run.matchAll(/\p{Nd}/gu)).length, output).toBeLessThan(7);
         }
       } else if (output && typeof output === "object") {
         for (const child of Object.values(output)) assertMasked(child);
@@ -199,7 +359,7 @@ describe("voice fleet MCP core", () => {
         const digits = Array.from({ length }, () => random(10)).join("");
         const suffix = extension === "(" ? `${space}(${digits})` :
           extension ? `${space}${extension}${space}${digits}` : "";
-        const phone = format() + suffix;
+        const phone = mixScripts(format() + suffix);
         const sentence = `Synthetic call ${phone}; please respond.`;
         const json = JSON.stringify({ note: sentence, id: protectedTokens[1], createdAt: protectedTokens[0] });
         for (const input of [sentence, json]) {

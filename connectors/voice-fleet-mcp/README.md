@@ -55,14 +55,16 @@ POSTs. Other methods (`initialize`, `ping`, `tools/list`) may share a batch.
 This avoids accumulating 30-second tool calls past the gateway's roughly
 60-second timeout, losing all replies and risking duplicate writes on retry.
 Each message must be an object with `jsonrpc: "2.0"`. Requests require a string
-method and a string or finite number id; only `notifications/*` methods may omit
-the id. Id-less methods such as `tools/call` return `-32600` without dispatch.
+method and an id that is a string or safe integer (`Number.isSafeInteger`); only
+`notifications/*` methods may omit the id. Fractional and out-of-range numeric
+ids are rejected with `-32600` and `id: null`. Id-less methods such as
+`tools/call` return `-32600` without dispatch.
 Invalid envelopes (including `{}`, requests with `id: null`, and messages with
 both `method` and either `result` or `error`) return
 `-32600 Invalid Request` with `id: null`, without downstream fetches for that item.
 A single invalid message or empty batch returns HTTP 400; invalid batch members
 produce error entries alongside valid replies.
-Client responses must omit `method`, have a string or finite number id and
+Client responses must omit `method`, have a string or safe integer id and
 contain exactly one of `result` or `error`; otherwise they return `-32600` with
 `id: null`. Valid client responses and notifications produce no replies; a POST
 containing only those returns 202 with no body. Mixed batches
@@ -148,7 +150,13 @@ At the JSON-RPC boundary, tool `arguments` must be an object; omission uses `{}`
 Both transports retain the original connector's output behavior. The connector's
 `mask()` applies to the three operator SID reads and `operator_sms_send`, masking
 phones to their last four digits (`***-***-0113`) and omitting media/recording
-URL fields at every depth.
+URL fields at every depth. Runs of seven or more Unicode decimal digits are
+masked across Unicode whitespace, dash punctuation, zero-width separators,
+fullwidth phone punctuation and middle dots. Matching uses NFKC normalization;
+the visible last four digits are ASCII, while surrounding text stays unchanged.
+Short extensions (up to four digits) are retained unless they would expose a
+new seven-digit run; longer suffixes are removed. ISO dates/timestamps, UUIDs,
+SIDs and typed id values remain protected.
 By default, string content and name/DOB/email/subject fields become
 `[redacted N chars]`; emails embedded in other strings become `[email]`.
 
