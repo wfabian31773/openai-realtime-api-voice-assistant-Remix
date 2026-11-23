@@ -1516,6 +1516,29 @@ describe("one row that never answers holds no other row (review, 2026-11-23)", (
     });
   });
 
+  it("says so again when claiming pauses a second time", async () => {
+    const h = harness({ tickBudgetMs: 20 });
+    const claimDue = h.store.claimDue.bind(h.store);
+    const hung: Array<() => void> = [];
+    vi.spyOn(h.store, "claimDue").mockImplementation(async (...args) => {
+      if (hung.length < MAX_LATE_TICKS + 1) {
+        await new Promise<void>((res) => hung.push(res));
+      }
+      return claimDue(...args);
+    });
+    const pauses = () => h.log.mock.calls.map(([l]) => String(l)).filter((l) => l.includes("no new rows are claimed"));
+    for (let i = 0; i < MAX_LATE_TICKS; i++) await h.runner.tick();
+    await h.runner.tick();
+    expect(pauses()).toHaveLength(1);
+    hung[0]();
+    await vi.waitFor(async () => {
+      await h.runner.tick();
+      expect(hung).toHaveLength(MAX_LATE_TICKS + 1);
+    });
+    await h.runner.tick();
+    expect(pauses()).toHaveLength(2);
+  });
+
   it("still lets the next tick claim while fewer than three ticks are late", async () => {
     const h = harness({ tickBudgetMs: 20 });
     const claim = vi.spyOn(h.store, "claimDue").mockImplementation(() => new Promise(() => {}));
