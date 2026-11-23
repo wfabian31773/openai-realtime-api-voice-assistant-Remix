@@ -35,7 +35,9 @@ const CONTENT_KEYS = /^(body|text|transcript|transcription|transcriptionText|con
 const PHI_KEYS = /^(name|callerName|fromName|firstName|lastName|dob|dateOfBirth|email|subject)$/i;
 const URL_KEYS = /^(mediaUrl|mediaUrls|recordingUrl|url|uri|mediaUri)$/i;
 // Prefer the original NANP match so adjacent numeric text keeps its old output.
-const maskPhone = (value) => value.replace(/(?<![\w+])(?:(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?(\d{4})(?!\w)|\+\d(?:[ ().-]*\d){7,14}(?!\w|[ ().-]*\d))/g,
+// Stop at a parenthesized suffix before consuming its digits; otherwise require
+// the entire international digit run so overlong numbers retain their output.
+const maskPhone = (value) => value.replace(/(?<![\w+])(?:(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?(\d{4})(?=[xX]\d|(?!\w))|\+\d(?:[ ().-]*\d){7,14}?(?=\s*\(\d+\)(?!\w)|[xX]\d|(?!\w|[ ().-]*\d)))/g,
   (phone, lastFour) => `***-***-${lastFour ?? phone.replace(/\D/g, "").slice(-4)}`);
 
 export function maskString(value) {
