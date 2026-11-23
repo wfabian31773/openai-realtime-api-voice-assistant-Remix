@@ -79,6 +79,11 @@ describe("voice fleet MCP core", () => {
 
   it.each([
     ["555/0100", "***-***-0100"],
+    ["(909)\n555-0113", "***-***-0113"],
+    ["+44\u00A020\u202F7946\u20130958 x\n123", "***-***-0958 x\n123"],
+    ["555\\t0100", "***-***-0100"],
+    ["+44 20 7946 0958 x\r12\u200B3456", "***-***-0958"],
+    ["+44 20 7946 0958\n(12)\u202F(34)", "***-***-0958"],
     ["555\t0100", "***-***-0100"],
     ["+9990000(00)0100", "***-***-0100"],
     ["555010", "555010"],
@@ -132,8 +137,21 @@ describe("voice fleet MCP core", () => {
     expect(mask({ id: "Call 5550100", note: "12345678901234567890" }))
       .toEqual({ id: "Call ***-***-0100", note: "***-***-7890" });
     // Input cannot impersonate the internal placeholders.
+    const literal = "\uE000aaaaaaaa\uE001\uE000\uE000";
+    expect(maskString(`${literal} 5550100 2026-11-23`))
+      .toBe(`${literal} ***-***-0100 2026-11-23`);
     expect(maskString("\uE000p\uE000 5550100 2026-11-23"))
       .toBe("\uE000p\uE000 ***-***-0100 2026-11-23");
+  });
+
+  it("restores 1,000 ISO date tokens in under 50 ms", () => {
+    const input = Array.from({ length: 1000 }, (_, i) => `2026-11-${String(i % 28 + 1).padStart(2, "0")}`).join(" ");
+    maskString(input);
+    const start = performance.now();
+    const output = maskString(input);
+    const elapsed = performance.now() - start;
+    expect(output).toBe(input);
+    expect(elapsed).toBeLessThan(50);
   });
 
   it("leaves no unprotected 7+ digit run across seeded synthetic phone formats and extensions", () => {
@@ -142,7 +160,13 @@ describe("voice fleet MCP core", () => {
       seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
       return seed % max;
     };
-    const separators = ["", " ", "\t", ".", "-", "/", " . ", " - "];
+    const separators = [
+      "", " ", "\t", "\n", "\r", "\f", "\v", ".", "-", "/", " . ", " - ",
+      "\u00A0", "\u1680", ...Array.from({ length: 12 }, (_, i) => String.fromCharCode(0x2000 + i)),
+      "\u202F", "\u205F", "\u3000", "\uFEFF",
+      ...Array.from({ length: 6 }, (_, i) => String.fromCharCode(0x2010 + i)),
+      "\u2212", "\u00B7", "\u2022", "(", ")",
+    ];
     const mixed = (groups: string[]) => groups.reduce((text, group) => text + separators[random(separators.length)] + group);
     const formats = [
       () => mixed(["202", "555", `01${String(random(100)).padStart(2, "0")}`]),
@@ -159,19 +183,19 @@ describe("voice fleet MCP core", () => {
     const assertMasked = (output: unknown) => {
       if (typeof output === "string") {
         expect(output).toContain("***-***-");
-        const unprotected = protectedTokens.reduce((text, token) => text.split(token).join(""), output).replace(/\\t/g, "\t");
+        const unprotected = protectedTokens.reduce((text, token) => text.split(token).join(""), output).replace(/\\(?:[tnrfv]|u000[bB])/g, " ");
         // Independent leak oracle: count digits across every contiguous run of
         // digits and allowed separators, including the visible mask tail.
-        for (const run of unprotected.match(/[+\d \t.()/\-]+/g) ?? []) {
+        for (const run of unprotected.match(/[+\d\s\u00A0\u1680\u2000-\u200B\u202F\u205F\u3000\uFEFF\u2010-\u2015\u2212\u00B7\u2022.()/\-]+/g) ?? []) {
           expect(run.replace(/\D/g, "").length, output).toBeLessThan(7);
         }
       } else if (output && typeof output === "object") {
         for (const child of Object.values(output)) assertMasked(child);
       }
     };
-    // 8 formats x 8 suffix forms x 6 lengths x 2 whitespace modes = 768 cases.
+    // Exercise every separator around extension markers as well as digit groups.
     for (const format of formats) for (const extension of extensions) {
-      for (let length = 1; length <= 6; length++) for (const space of ["", " "]) {
+      for (let length = 1; length <= 6; length++) for (const space of ["", separators[random(separators.length)]]) {
         const digits = Array.from({ length }, () => random(10)).join("");
         const suffix = extension === "(" ? `${space}(${digits})` :
           extension ? `${space}${extension}${space}${digits}` : "";

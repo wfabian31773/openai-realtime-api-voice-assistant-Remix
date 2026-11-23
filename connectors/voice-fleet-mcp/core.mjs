@@ -36,56 +36,84 @@ const PHI_KEYS = /^(name|callerName|fromName|firstName|lastName|dob|dateOfBirth|
 const URL_KEYS = /^(mediaUrl|mediaUrls|recordingUrl|url|uri|mediaUri)$/i;
 // Hide whole protected tokens before scanning, so their numeric portions cannot
 // be mistaken for phones. Placeholders contain no digits and cannot collide with
-// input (the delimiter is chosen afresh for each call).
+// input (literal delimiters are escaped before protection).
 const maskPhone = (value, key = "") => {
-  const protectedValues = [];
-  let delimiter = "\uE000";
-  while (value.includes(delimiter)) delimiter += "\uE000";
+  const protectedValues = new Map();
+  const delimiter = "\uE000";
   const protect = (token) => {
-    const placeholder = `${delimiter}${"p".repeat(protectedValues.length + 1)}${delimiter}`;
-    protectedValues.push([placeholder, token]);
+    const index = protectedValues.size.toString(16).padStart(8, "0")
+      .replace(/[0-9a-f]/g, (digit) => String.fromCharCode(97 + parseInt(digit, 16)));
+    const placeholder = `${delimiter}${index}\uE001`;
+    protectedValues.set(placeholder, token.replace(/\uE000\uE000/g, delimiter));
     return placeholder;
   };
   const typedKey = /^(?:id|[a-z][\w]*Id|sid|[a-z][\w]*Sid|created_?at|updated_?at|(?:[a-z][\w]*)?timestamp)$/i;
   // No spaces or prose: an id key alone must not exempt a
   // sentence containing a phone. Numeric JS values already pass through mask().
   const idValue = /^-?[a-z0-9_]+(?:[-.:][a-z0-9_]+)*$/i;
-  let text = typedKey.test(key) && idValue.test(value) ? protect(value) : value;
-  // Also protect typed fields in serialized JSON passed to maskString/content.
-  text = text.replace(/("(?:[^"\\]|\\.)*"[ \t\r\n]*:[ \t\r\n]*)("(?:[^"\\]|\\.)*"|-?\d+(?:\.\d+)?)(?=[ \t\r\n]*[,}])/g,
-    (field, prefix, raw) => {
+  // Escape literal delimiters so arbitrary input cannot impersonate placeholders.
+  let text = value.replace(/\uE000/g, delimiter + delimiter);
+  if (typedKey.test(key) && idValue.test(value)) text = protect(text);
+  // Consume each quoted token, including unterminated strings, once so failed
+  // field matches cannot repeatedly scan the same string. Protect typed fields.
+  text = text.replace(/("(?:[^"\\]|\\[\s\S])*(?:"|\\?$))(?:([ \t\r\n]*:[ \t\r\n]*)("(?:[^"\\]|\\[\s\S])*(?:"|\\?$)|-?\d+(?:\.\d+)?)(?=[ \t\r\n]*[,}]))?/g,
+    (field, fieldName, colon, raw) => {
+      if (raw === undefined) return field;
       try {
-        const fieldKey = JSON.parse(prefix.slice(0, prefix.lastIndexOf(":")).trim());
+        const fieldKey = JSON.parse(fieldName);
         const fieldValue = JSON.parse(raw);
-        return typedKey.test(fieldKey) && idValue.test(String(fieldValue)) ? prefix + protect(raw) : field;
+        return typedKey.test(fieldKey) && idValue.test(String(fieldValue)) ? fieldName + colon + protect(raw) : field;
       } catch { return field; }
     });
   text = text.replace(/(?<![\w])(?:[a-z]{2}[a-f0-9]{32}|[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}|\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])(?:T[0-2]\d:[0-5]\d(?::[0-5]\d(?:\.\d+)?)?(?:Z|[+-][0-2]\d:?[0-5]\d)?)?)(?![\w])/gi, protect);
-  text = text.replace(/\+?\(?\d(?:(?:[ \t.()/-]|\\t)*\d)*\)?(?:(?:[ \t]|\\t)*(?:extension|ext\.?|x|#)(?:[ \t]|\\t)*\d(?:(?:[ \t.()/-]|\\t)*\d)*\)?)*/gi, (run) => {
+  const separator = String.raw`(?:[\s\u00A0\u1680\u2000-\u200B\u202F\u205F\u3000\uFEFF\u2010-\u2015\u2212\u00B7\u2022.()/-]|\\[tnrfv]|\\u000[bB])`;
+  const markerPattern = new RegExp(`(?:extension|ext\\.?|x|#)${separator}*(?=\\d)`, "i");
+  const onlySeparators = new RegExp(`^${separator}*$`);
+  const suffixRun = new RegExp(`^${separator}*\\d(?:${separator}*\\d){2}`);
+  const runs = new RegExp(`\\+?\\(?\\d(?:${separator}*\\d)*\\)?(?:${separator}*(?:extension|ext\\.?|x|#)${separator}*\\d(?:${separator}*\\d)*\\)?)*`, "gi");
+  text = text.replace(runs, (run) => {
     const digits = (part) => part.replace(/\D/g, "");
     if (digits(run).length < 7) return run;
-    // Separate explicit extensions and terminal parenthesized suffixes from
-    // the phone itself, preserving its own last four when keeping a suffix.
-    const marker = /(?:[ \t]|\\t)*(?:extension|ext\.?|x|#)(?:[ \t]|\\t)*(?=\d)/i.exec(run);
-    let phone = marker ? run.slice(0, marker.index) : run;
-    let suffix = marker ? run.slice(marker.index) : "";
-    for (const parens of phone.matchAll(/(?:[ \t]|\\t)*\(\d+\)/g)) {
-      if (digits(phone.slice(0, parens.index)).length >= 7 &&
-          /^(?:(?:[ \t]|\\t)*\(\d+\))+$/.test(phone.slice(parens.index))) {
-        suffix = phone.slice(parens.index) + suffix;
-        phone = phone.slice(0, parens.index);
-        break;
+    const marker = markerPattern.exec(run);
+    let markerStart = marker ? marker.index : run.length;
+    while (markerStart > 0 && marker) {
+      if (run.slice(markerStart - 2, markerStart) === "\\t") markerStart -= 2;
+      else if (onlySeparators.test(run[markerStart - 1])) markerStart--;
+      else break;
+    }
+    let phone = run.slice(0, markerStart);
+    let suffix = run.slice(markerStart);
+    // Scan disjoint gaps between parentheses once, tracking a terminal suffix
+    // whose preceding phone has at least seven digits.
+    let end = 0;
+    let digitCount = 0;
+    let suffixStart = -1;
+    for (const parens of phone.matchAll(/\(\d+\)/g)) {
+      const gap = phone.slice(end, parens.index);
+      digitCount += digits(gap).length;
+      if (!onlySeparators.test(gap)) suffixStart = -1;
+      if (suffixStart < 0 && digitCount >= 7) {
+        suffixStart = parens.index;
+        while (suffixStart > end) {
+          if (phone.slice(suffixStart - 2, suffixStart) === "\\t") suffixStart -= 2;
+          else if (onlySeparators.test(phone[suffixStart - 1])) suffixStart--;
+          else break;
+        }
       }
+      digitCount += parens[0].length - 2;
+      end = parens.index + parens[0].length;
+    }
+    if (suffixStart >= 0 && end === phone.length) {
+      suffix = phone.slice(suffixStart) + suffix;
+      phone = phone.slice(0, suffixStart);
     }
     const suffixDigits = digits(suffix).length;
-    // Parentheses/spaces are separators too: keeping 3-4 suffix digits beside
-    // the visible last four would itself leak a new 7+ digit run.
-    const keepSuffix = suffixDigits <= 4 &&
-      !/^(?:[- \t.()/]|\\t)*\d(?:(?:[- \t.()/]|\\t)*\d){2}/.test(suffix);
+    // Keeping 3-4 suffix digits beside the visible last four leaks a new run.
+    const keepSuffix = suffixDigits <= 4 && !suffixRun.test(suffix);
     return `***-***-${digits(phone).slice(-4)}${keepSuffix ? suffix : ""}`;
   });
-  for (const [placeholder, token] of protectedValues.reverse()) text = text.replace(placeholder, () => token);
-  return text;
+  return text.replace(/\uE000(?:\uE000|[a-p]{8}\uE001)/g,
+    (placeholder) => placeholder === delimiter + delimiter ? delimiter : protectedValues.get(placeholder));
 };
 
 export function maskString(value) {
