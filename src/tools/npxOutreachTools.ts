@@ -113,6 +113,7 @@ import {
   type Relaxed,
 } from './npxAvailabilitySearch';
 import { sanitizeForSms } from '../services/gsm7';
+import { AZUL_VISION_LOCATIONS } from '../config/azulVisionKnowledge';
 import type { CreateTicketParams, CreateTicketResponse } from '../../server/services/ticketingApiClient';
 import type { BookingOpening, BookingPageLane } from '../runtime/outbound/bookingPage';
 import {
@@ -788,6 +789,38 @@ export function spokenPhone(phone: string): string {
   return digits.length === 10 ? `${digits.slice(0, 3)}, ${digits.slice(3, 6)}, ${digits.slice(6)}` : phone;
 }
 
+/** A ten-digit phone written for a screen: "(555) 010-0000". */
+export function writtenPhone(phone: string): string {
+  const digits = phone.replace(/\D/g, '').replace(/^1(?=\d{10}$)/, '');
+  return digits.length === 10 ? `(${digits.slice(0, 3)}) ${digits.slice(3, 6)}-${digits.slice(6)}` : phone;
+}
+
+/**
+ * THE PHONE OF THE AZUL OFFICE THEIR APPOINTMENT IS AT (v270), said in three
+ * groups, from the practice's own office list (`AZUL_VISION_LOCATIONS`).
+ *
+ * The movable list names the office as NextGen does: most names are the
+ * list's own ("Redlands", "Upland"), four differ by spelling and are mapped
+ * here, and an Atlantis Eyecare office, or any name the list does not hold
+ * ("Montebello West"), reads nothing, so a phone is never taken from a near
+ * name. Nothing is said before the date of birth matches: only the verified
+ * answer carries it.
+ */
+const OFFICE_ALIASES: Record<string, string> = {
+  'riverside latham': 'Riverside',
+  'mission hlls': 'Mission Hills',
+  willow: 'Long Beach Willow',
+  dtla: 'Los Angeles (DTLA)',
+};
+
+export function ourOfficePhone(c: OutboundContact): string | undefined {
+  const office = field(c, 'office').trim().toLowerCase();
+  if (!office) return undefined;
+  const name = (OFFICE_ALIASES[office] ?? office).toLowerCase();
+  const loc = AZUL_VISION_LOCATIONS.find((l) => l.name.toLowerCase() === name);
+  return loc?.phone ? spokenPhone(loc.phone) : undefined;
+}
+
 /** The Pacific calendar day ("2041-02-05") an instant falls on. */
 function practiceDay(at: Date): string {
   return at.toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' });
@@ -1127,7 +1160,7 @@ registerTool({
     if (s.verified) {
       return bookedEarlier
         ? priorBookingVerified(bookedEarlier)
-        : { success: true, verified: true, current_appointment: currentAppointment(s.contact), next: afterVerified(s) };
+        : verifiedAnswer(s);
     }
     // Spent tries stay spent: a third guess must not unlock what two wrong
     // dates closed, or the limit is one more call away from meaning nothing.
@@ -1149,12 +1182,7 @@ registerTool({
     if (match) {
       s.verified = true;
       if (bookedEarlier) return priorBookingVerified(bookedEarlier);
-      return {
-        success: true,
-        verified: true,
-        current_appointment: currentAppointment(s.contact),
-        next: afterVerified(s),
-      };
+      return verifiedAnswer(s);
     }
     if (s.dobTries < MAX_DOB_TRIES) {
       const r: Refusal = {
@@ -1168,6 +1196,22 @@ registerTool({
     return notConfirmed();
   },
 });
+
+/**
+ * The verified answer: their current appointment, what to do next, and the
+ * phone of the Azul office it is at when the office list holds it (v270), so
+ * a caller who asks for our number hears that office's, never one recalled.
+ */
+function verifiedAnswer(s: OutreachSession): ToolResult {
+  const phone = ourOfficePhone(s.contact);
+  return {
+    success: true,
+    verified: true,
+    current_appointment: currentAppointment(s.contact),
+    ...(phone ? { our_office_phone: phone } : {}),
+    next: afterVerified(s),
+  };
+}
 
 /** What follows a matching date of birth. They have already said they want
  * a sooner appointment when the offer came first, so it goes straight to the
@@ -1423,6 +1467,7 @@ registerTool({
         city: cityOf(slot),
         provider: slot.providerName,
         practice: slot.partnerName,
+        ...(slot.phone ? { phone: spokenPhone(slot.phone) } : {}),
       })),
       say: choicesLine(picked, relaxed),
       overview: overviewLine(pool, !complete),
@@ -1432,7 +1477,8 @@ registerTool({
         'Say the choices as the say line does: the day, date, time and city — not the street address. ' +
         'If they want a different day or time, call this again with what they now say. If they ask what is open, use the overview. ' +
         'When they pick one, say it back with the doctor and the city, say that booking it cancels their current appointment with us, ' +
-        'and ask them to confirm; on a yes, call book_sooner_exam with that choice\'s date and time (and its city).',
+        'and ask them to confirm; on a yes, call book_sooner_exam with that choice\'s date and time (and its city). ' +
+        'If they ask for a practice\'s phone number, say that choice\'s phone exactly as written here, never any other number.',
     };
   },
 });
@@ -1475,8 +1521,14 @@ async function within<T>(p: Promise<T>, ms: number, fallback: T): Promise<T> {
  * call ends (v226), so the caller is told it will be cancelled once we hang
  * up, never that it already has been.
  */
-export function confirmation(slot: NpxSlot, cancel: AzulCancelResult | 'held', currentDay: string): string {
-  const booked = `You're booked for ${spokenSlot(slot)}. Their phone number is ${slot.phone}.`;
+export function confirmation(
+  slot: NpxSlot,
+  cancel: AzulCancelResult | 'held',
+  currentDay: string,
+  phoneAs: (phone: string) => string = spokenPhone,
+): string {
+  const phone = slot.phone ? ` Their phone number is ${phoneAs(slot.phone)}.` : '';
+  const booked = `You're booked for ${spokenSlot(slot)}.${phone}`;
   if (cancel === 'held') {
     return `${booked} Your appointment with us on ${currentDay} will be cancelled once we hang up, so there's nothing else you need to do.`;
   }
@@ -2168,7 +2220,7 @@ export const npxBookingPageLane: BookingPageLane = {
     const booked = await bookOutreachSlot({ contact, demo, slot, callRef, deadline });
     if (!booked.ok) return booked;
     const currentDay = spokenDay(field(contact, 'appointment_date'));
-    return { ok: true, bookingId: booked.bookingId, confirmation: confirmation(booked.slot, spokenCancelOf(booked.azul), currentDay) };
+    return { ok: true, bookingId: booked.bookingId, confirmation: confirmation(booked.slot, spokenCancelOf(booked.azul), currentDay, writtenPhone) };
   },
 };
 
