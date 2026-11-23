@@ -34,11 +34,59 @@ const SID = { call: /^CA[0-9a-f]{32}$/, sms: /^(SM|MM)[0-9a-f]{32}$/, rec: /^RE[
 const CONTENT_KEYS = /^(body|text|transcript|transcription|transcriptionText|content|turns|messages)$/i;
 const PHI_KEYS = /^(name|callerName|fromName|firstName|lastName|dob|dateOfBirth|email|subject)$/i;
 const URL_KEYS = /^(mediaUrl|mediaUrls|recordingUrl|url|uri|mediaUri)$/i;
-// Prefer the original NANP match so adjacent numeric text keeps its old output.
-// Stop at a parenthesized suffix before consuming its digits; otherwise require
-// the entire international digit run so overlong numbers retain their output.
-const maskPhone = (value) => value.replace(/(?<![\w+])(?:(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?(\d{4})(?=[xX]\d|(?!\w))|\+\d(?:[ ().-]*\d){7,14}?(?=\s*\(\d+\)(?!\w)|[xX]\d|(?!\w|[ ().-]*\d)))/g,
-  (phone, lastFour) => `***-***-${lastFour ?? phone.replace(/\D/g, "").slice(-4)}`);
+// Hide whole protected tokens before scanning, so their numeric portions cannot
+// be mistaken for phones. Placeholders contain no digits and cannot collide with
+// input (the delimiter is chosen afresh for each call).
+const maskPhone = (value, key = "") => {
+  const protectedValues = [];
+  let delimiter = "\uE000";
+  while (value.includes(delimiter)) delimiter += "\uE000";
+  const protect = (token) => {
+    const placeholder = `${delimiter}${"p".repeat(protectedValues.length + 1)}${delimiter}`;
+    protectedValues.push([placeholder, token]);
+    return placeholder;
+  };
+  const typedKey = /^(?:id|[a-z][\w]*Id|sid|[a-z][\w]*Sid|created_?at|updated_?at|(?:[a-z][\w]*)?timestamp)$/i;
+  // No spaces or prose: an id key alone must not exempt a
+  // sentence containing a phone. Numeric JS values already pass through mask().
+  const idValue = /^-?[a-z0-9_]+(?:[-.:][a-z0-9_]+)*$/i;
+  let text = typedKey.test(key) && idValue.test(value) ? protect(value) : value;
+  // Also protect typed fields in serialized JSON passed to maskString/content.
+  text = text.replace(/("(?:[^"\\]|\\.)*"[ \t\r\n]*:[ \t\r\n]*)("(?:[^"\\]|\\.)*"|-?\d+(?:\.\d+)?)(?=[ \t\r\n]*[,}])/g,
+    (field, prefix, raw) => {
+      try {
+        const fieldKey = JSON.parse(prefix.slice(0, prefix.lastIndexOf(":")).trim());
+        const fieldValue = JSON.parse(raw);
+        return typedKey.test(fieldKey) && idValue.test(String(fieldValue)) ? prefix + protect(raw) : field;
+      } catch { return field; }
+    });
+  text = text.replace(/(?<![\w])(?:[a-z]{2}[a-f0-9]{32}|[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}|\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])(?:T[0-2]\d:[0-5]\d(?::[0-5]\d(?:\.\d+)?)?(?:Z|[+-][0-2]\d:?[0-5]\d)?)?)(?![\w])/gi, protect);
+  text = text.replace(/\+?\(?\d(?:(?:[ \t.()/-]|\\t)*\d)*\)?(?:(?:[ \t]|\\t)*(?:extension|ext\.?|x|#)(?:[ \t]|\\t)*\d(?:(?:[ \t.()/-]|\\t)*\d)*\)?)*/gi, (run) => {
+    const digits = (part) => part.replace(/\D/g, "");
+    if (digits(run).length < 7) return run;
+    // Separate explicit extensions and terminal parenthesized suffixes from
+    // the phone itself, preserving its own last four when keeping a suffix.
+    const marker = /(?:[ \t]|\\t)*(?:extension|ext\.?|x|#)(?:[ \t]|\\t)*(?=\d)/i.exec(run);
+    let phone = marker ? run.slice(0, marker.index) : run;
+    let suffix = marker ? run.slice(marker.index) : "";
+    for (const parens of phone.matchAll(/(?:[ \t]|\\t)*\(\d+\)/g)) {
+      if (digits(phone.slice(0, parens.index)).length >= 7 &&
+          /^(?:(?:[ \t]|\\t)*\(\d+\))+$/.test(phone.slice(parens.index))) {
+        suffix = phone.slice(parens.index) + suffix;
+        phone = phone.slice(0, parens.index);
+        break;
+      }
+    }
+    const suffixDigits = digits(suffix).length;
+    // Parentheses/spaces are separators too: keeping 3-4 suffix digits beside
+    // the visible last four would itself leak a new 7+ digit run.
+    const keepSuffix = suffixDigits <= 4 &&
+      !/^(?:[- \t.()/]|\\t)*\d(?:(?:[- \t.()/]|\\t)*\d){2}/.test(suffix);
+    return `***-***-${digits(phone).slice(-4)}${keepSuffix ? suffix : ""}`;
+  });
+  for (const [placeholder, token] of protectedValues.reverse()) text = text.replace(placeholder, () => token);
+  return text;
+};
 
 export function maskString(value) {
   return maskPhone(value
@@ -57,9 +105,9 @@ export function mask(value, key = "", includeContent = false, inContent = false)
       .map(([k, v]) => [k, mask(v, k, includeContent, isContent)]));
   }
   if (typeof value !== "string") return value;
-  if (isContent) return maskPhone(value);
+  if (isContent) return maskPhone(value, key);
   if (PHI_KEYS.test(key) || CONTENT_KEYS.test(key)) return value ? `[redacted ${value.length} chars]` : value;
-  return maskPhone(value.replace(/[\w.+-]+@[\w-]+\.[\w.]+/g, "[email]"));
+  return maskPhone(value.replace(/[\w.+-]+@[\w-]+\.[\w.]+/g, "[email]"), key);
 }
 
 // Informational helper; the fleet API remains authoritative for hours/holidays.

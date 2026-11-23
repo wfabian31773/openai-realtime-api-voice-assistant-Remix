@@ -50,31 +50,141 @@ describe("voice fleet MCP core", () => {
     ["(909) 555-0113", "***-***-0113"],
     ["+19095550113", "***-***-0113"],
     ["+1 (909) 555-0113", "***-***-0113"],
-    ["+19095550113 123", "***-***-0113 123"],
-    ["+44 20 7946 0958 (1234)", "***-***-0958 (1234)"],
-    ["+44 20 7946 0958(1234)", "***-***-0958(1234)"],
-    ["+44 20 7946 0958 (123)", "***-***-0958 (123)"],
+    ["+19095550113 123", "***-***-3123"],
+    ["+44 20 7946 0958 (1234)", "***-***-0958"],
+    ["+44 20 7946 0958(1234)", "***-***-0958"],
+    ["+44 20 7946 0958 (123)", "***-***-0958"],
     ["+44 20 7946 0958 (1)", "***-***-0958 (1)"],
     ["+44 20 7946 0958 x123", "***-***-0958 x123"],
     ["+44 20 7946 0958x123", "***-***-0958x123"],
     ["+44 20 7946 0958X123", "***-***-0958X123"],
     ["+44 20 7946 0958 ext. 45", "***-***-0958 ext. 45"],
     ["+44 20 7946 0958 #12", "***-***-0958 #12"],
-    ["+44 20 7946 0958/12", "***-***-0958/12"],
+    ["+44 20 7946 0958/12", "***-***-5812"],
     ["+44 (20) 7946-0958 (12)", "***-***-0958 (12)"],
     ["+1 909 555 0113 x45", "***-***-0113 x45"],
     ["+19095550113x45", "***-***-0113x45"],
     ["9095550113x45", "***-***-0113x45"],
     ["+99990000 (12)", "***-***-0000 (12)"],
     ["+999999999990000 (12)", "***-***-0000 (12)"],
-    ["+9990000", "+9990000"],
-    ["+9999999999990000", "+9999999999990000"],
-    ["+99.99.99.99.99.99.00.00", "+99.99.99.99.99.99.00.00"],
+    ["+9990000", "***-***-0000"],
+    ["+9999999999990000", "***-***-0000"],
+    ["+99.99.99.99.99.99.00.00", "***-***-0000"],
   ])("masks synthetic phone %s to %s in strings, fields and included content", (phone, expected) => {
     expect(maskString(`Call ${phone} now`)).toBe(`Call ${expected} now`);
     expect(mask({ phone, note: `Call ${phone}` })).toEqual({ phone: expected, note: `Call ${expected}` });
     expect(mask({ phone, body: `Call ${phone}`, nested: [{ text: phone }] }, "", true))
       .toEqual({ phone: expected, body: `Call ${expected}`, nested: [{ text: expected }] });
+  });
+
+  it.each([
+    ["555/0100", "***-***-0100"],
+    ["555\t0100", "***-***-0100"],
+    ["+9990000(00)0100", "***-***-0100"],
+    ["555010", "555010"],
+    ["prefix5550100suffix", "prefix***-***-0100suffix"],
+    ["+44 20 7946 0958 x 12345", "***-***-0958"],
+    ["+44 20 7946 0958 ext.123456", "***-***-0958"],
+    ["+44 20 7946 0958 (123456)", "***-***-0958"],
+    ["+44 20 7946 0958 (12)", "***-***-0958 (12)"],
+    ["+44 20 7946 0958 (1234)", "***-***-0958"],
+    ["+44 20 7946 0958 x1234", "***-***-0958 x1234"],
+    ["+44 20 7946 0958 #1234", "***-***-0958 #1234"],
+    ["+44 20 7946 0958 x12 3456", "***-***-0958"],
+    ["+44 20 7946 0958 (12) (34)", "***-***-0958"],
+    ["+44 20 7946 0958 x12 #345", "***-***-0958"],
+    ["555010x12345", "***-***-5010"],
+  ])("conservatively masks digit runs and suffixes: %s", (input, expected) => {
+    expect(maskString(input)).toBe(expected);
+    expect(mask({ note: input })).toEqual({ note: expected });
+    for (const key of ["body", "text", "transcript", "turns"]) {
+      expect(mask({ [key]: input }, "", true)).toEqual({ [key]: expected });
+    }
+  });
+
+  it("protects complete ISO dates/timestamps, UUIDs, SIDs and typed id values before masking", () => {
+    const tokens = [
+      "2026-11-23", "2026-11-23T10:30:00Z", "2026-11-23T10:30:00.123456Z",
+      "2026-11-23T10:30:00.123-05:00", "2026-11-23T10:30:00+0530",
+      "12345678-1234-4123-8123-123456789012",
+      ...["CA", "PN", "SM", "MM", "RE", "AC"].map((prefix) => prefix + "123456789012345678901234567890ab"),
+    ];
+    const ids = {
+      id: "12345678901234567890", callId: "9876543210123456", ticketId: "ticket-1234567890",
+      customer_id: "1234567890123", sid: "123456789012345678", recordingSid: "recording_1234567890",
+      createdAt: "1795433400123", updated_at: "1795433400456", eventTimestamp: "1795433400789",
+      timestamp: 1795433400123, legacyId: "-123456789012345",
+    };
+    for (const token of tokens) {
+      const text = `Synthetic token ${token}; call 555/0100.`;
+      const expected = `Synthetic token ${token}; call ***-***-0100.`;
+      expect(maskString(text)).toBe(expected);
+      expect(mask({ note: text })).toEqual({ note: expected });
+      expect(mask({ body: text, turns: [{ text }] }, "", true)).toEqual({ body: expected, turns: [{ text: expected }] });
+    }
+    expect(mask(ids)).toEqual(ids);
+    expect(mask({ body: ids }, "", true)).toEqual({ body: ids });
+    const json = JSON.stringify({ ...ids, phone: "5550100" });
+    const expectedJson = JSON.stringify({ ...ids, phone: "***-***-0100" });
+    expect(maskString(json)).toBe(expectedJson);
+    expect(mask({ note: json })).toEqual({ note: expectedJson });
+    expect(mask({ text: json }, "", true)).toEqual({ text: expectedJson });
+    expect(mask({ id: "Call 5550100", note: "12345678901234567890" }))
+      .toEqual({ id: "Call ***-***-0100", note: "***-***-7890" });
+    // Input cannot impersonate the internal placeholders.
+    expect(maskString("\uE000p\uE000 5550100 2026-11-23"))
+      .toBe("\uE000p\uE000 ***-***-0100 2026-11-23");
+  });
+
+  it("leaves no unprotected 7+ digit run across seeded synthetic phone formats and extensions", () => {
+    let seed = 0x5eed1234;
+    const random = (max: number) => {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      return seed % max;
+    };
+    const separators = ["", " ", "\t", ".", "-", "/", " . ", " - "];
+    const mixed = (groups: string[]) => groups.reduce((text, group) => text + separators[random(separators.length)] + group);
+    const formats = [
+      () => mixed(["202", "555", `01${String(random(100)).padStart(2, "0")}`]),
+      () => "+1" + mixed(["", "202", "555", "0100"]),
+      () => `(${mixed(["202"])})${mixed(["", "555", "0101"])}`,
+      () => `+1 (202)${mixed(["", "555", "0102"])}`,
+      () => "+12025550103",
+      () => "+" + mixed(["44", "20", "7946", "0000"]),
+      () => "+" + mixed(["52", "55", "0000", "0000"]),
+      () => mixed(["999", "000", "000", "0000"]),
+    ];
+    const extensions = ["x", "X", "ext", "ext.", "extension", "#", "(", ""];
+    const protectedTokens = ["2026-11-23T10:30:00.123Z", "12345678901234567890"];
+    const assertMasked = (output: unknown) => {
+      if (typeof output === "string") {
+        expect(output).toContain("***-***-");
+        const unprotected = protectedTokens.reduce((text, token) => text.split(token).join(""), output).replace(/\\t/g, "\t");
+        // Independent leak oracle: count digits across every contiguous run of
+        // digits and allowed separators, including the visible mask tail.
+        for (const run of unprotected.match(/[+\d \t.()/\-]+/g) ?? []) {
+          expect(run.replace(/\D/g, "").length, output).toBeLessThan(7);
+        }
+      } else if (output && typeof output === "object") {
+        for (const child of Object.values(output)) assertMasked(child);
+      }
+    };
+    // 8 formats x 8 suffix forms x 6 lengths x 2 whitespace modes = 768 cases.
+    for (const format of formats) for (const extension of extensions) {
+      for (let length = 1; length <= 6; length++) for (const space of ["", " "]) {
+        const digits = Array.from({ length }, () => random(10)).join("");
+        const suffix = extension === "(" ? `${space}(${digits})` :
+          extension ? `${space}${extension}${space}${digits}` : "";
+        const phone = format() + suffix;
+        const sentence = `Synthetic call ${phone}; please respond.`;
+        const json = JSON.stringify({ note: sentence, id: protectedTokens[1], createdAt: protectedTokens[0] });
+        for (const input of [sentence, json]) {
+          assertMasked(maskString(input));
+          assertMasked(mask({ phone: input, note: input }));
+          assertMasked(mask({ body: input, text: input, transcript: [input], turns: [{ text: input, nested: { note: input } }] }, "", true));
+        }
+      }
+    }
   });
 
   it("rejects notification methods with ids and invalid request ids without dispatch", async () => {
