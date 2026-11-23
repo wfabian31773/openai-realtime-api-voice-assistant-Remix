@@ -9,6 +9,7 @@ export interface VoiceFleetMcpOptions {
   timeoutMs?: number;
 }
 
+export const SUPPORTED: readonly ["2025-06-18", "2025-03-26", "2024-11-05"];
 export function createVoiceFleetMcp(options: VoiceFleetMcpOptions): {
   handleMessage(msg: unknown): Promise<JsonRpcReply | null>;
 };

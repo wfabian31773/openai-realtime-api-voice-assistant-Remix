@@ -84,9 +84,14 @@ describe("hosted voice fleet MCP", () => {
     expect((await post(rpc("ping"))).status).toBe(200);
   });
 
-  it("preserves batch order, omits notifications, and reports invalid members", async () => {
+  it("accepts batches leniently for 2025-06-18, omits responses/notifications, and reports invalid members", async () => {
     const { post } = await boot();
-    const response = await post([rpc("ping", "last-first"), { jsonrpc: "2.0", method: "notifications/initialized" }, null, rpc("missing", 3), rpc("tools/list", 0)]);
+    const response = await post([
+      { jsonrpc: "2.0", id: "client-response", result: {} },
+      rpc("ping", "last-first"), { jsonrpc: "2.0", method: "notifications/initialized" },
+      { jsonrpc: "2.0", id: "client-error", error: { code: -32603, message: "Synthetic error" } },
+      null, rpc("missing", 3), rpc("tools/list", 0),
+    ], undefined, { "MCP-Protocol-Version": "2025-06-18" });
     expect(response.status).toBe(200);
     const replies = await response.json();
     expect(replies.map((reply: { id: unknown }) => reply.id)).toEqual(["last-first", null, 3, 0]);
@@ -98,16 +103,35 @@ describe("hosted voice fleet MCP", () => {
     expect((await empty.json()).error.code).toBe(-32600);
   });
 
-  it("returns an empty 202 for single and batch notifications without executing tools", async () => {
+  it("returns an empty 202 for responses, notifications, and batches containing only those", async () => {
     const called = vi.fn();
     const { post } = await boot((app) => app.get("/api/plugin/v1/health", called));
     const notification = { jsonrpc: "2.0", method: "tools/call", params: { name: "voice_fleet_health" } };
-    for (const payload of [notification, [notification, { jsonrpc: "2.0", method: "notifications/initialized" }]]) {
+    const result = { jsonrpc: "2.0", id: 1, result: null };
+    const error = { jsonrpc: "2.0", id: 2, error: { code: -32603, message: "Synthetic error" } };
+    for (const payload of [notification, result, error, [result, error], [notification, { jsonrpc: "2.0", method: "notifications/initialized" }], [result, notification, error]]) {
       const response = await post(payload);
       expect(response.status).toBe(202);
       expect(await response.text()).toBe("");
     }
     expect(called).not.toHaveBeenCalled();
+  });
+
+  it("accepts supported or absent protocol headers and rejects unsupported ones with JSON 400", async () => {
+    const { post } = await boot();
+    for (const version of [undefined, "2025-06-18", "2025-03-26", "2024-11-05"]) {
+      const response = await post(rpc("ping"), undefined, version === undefined ? {} : { "MCP-Protocol-Version": version });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toEqual({ jsonrpc: "2.0", id: 1, result: {} });
+    }
+    for (const version of ["2099-01-01", "2025-01-01", ""]) {
+      const response = await post(rpc("ping"), undefined, { "MCP-Protocol-Version": version });
+      expect(response.status).toBe(400);
+      expect(response.headers.get("content-type")).toContain("application/json");
+      expect(await response.json()).toEqual({ jsonrpc: "2.0", id: null, error: { code: -32600, message: "Unsupported MCP protocol version" } });
+    }
+    const init = await (await post(rpc("initialize", 2, { protocolVersion: "2099-01-01" }))).json();
+    expect(init.result.protocolVersion).toBe("2025-06-18");
   });
 
   it("uses each caller's exact bearer on loopback and ignores forwarded hosts", async () => {
@@ -126,7 +150,7 @@ describe("hosted voice fleet MCP", () => {
     expect(seen.every((request) => request.path === "/api/plugin/v1/health")).toBe(true);
   });
 
-  it("honors the explicit internal URL and masks fleet output including echoed request data", async () => {
+  it("honors the explicit internal URL and retains original output for non-operator tools", async () => {
     const target = await boot((app) => app.post("/api/plugin/v1/prepare_sms", express.json(), (req, res) => {
       expect(req.body.phone).toBe("+19095550113");
       res.json({ ...req.body, email: "synthetic@example.test", note: "Mail synthetic@example.test or +1 (909) 555-0113", dateOfBirth: "synthetic-dob", confirmToken: "c".repeat(64) });
@@ -136,9 +160,19 @@ describe("hosted voice fleet MCP", () => {
     expect(response.headers.get("cache-control")).toBe("no-store");
     const result = await response.json();
     expect(result.result.isError).toBe(false);
-    expect(data(result).data).toEqual({ phone: "***-***-0113", name: "[redacted]", first_name: "[redacted]", body: "[redacted]", email: "[redacted]", note: "Mail [email] or ***-***-0113", dateOfBirth: "[redacted]", confirmToken: "[redacted]" });
-    const text = JSON.stringify(result);
-    for (const secret of [token.plaintext, "Synthetic Person", "synthetic@example.test", "Synthetic private message", "c".repeat(64)]) expect(text).not.toContain(secret);
+    expect(data(result).data).toEqual({ phone: "+19095550113", name: "Synthetic Person", first_name: "Synthetic", body: "Synthetic private message", email: "synthetic@example.test", note: "Mail synthetic@example.test or +1 (909) 555-0113", dateOfBirth: "synthetic-dob", confirmToken: "c".repeat(64) });
+    expect(JSON.stringify(result)).not.toContain(token.plaintext);
+  });
+
+  it("preserves includeContent on hosted operator reads while always masking phones and dropping URLs", async () => {
+    const sid = "CA" + "a".repeat(32);
+    const { post } = await boot((app) => app.get(`/api/plugin/v1/operator-line/inbound/${sid}`, (_req, res) => {
+      res.json({ from: "+19095550113", name: "Synthetic Person", body: "Synthetic message", transcript: [{ name: "Synthetic Speaker", text: "Call synthetic@example.test at +19095550113", recordingUrl: "https://example.test/recording" }], mediaUrls: ["https://example.test/media"] });
+    }));
+    for (const includeContent of [false, true]) {
+      const result = data(await (await post(tool("operator_inbound_get", { callSid: sid, includeContent }))).json());
+      expect(result.data).toEqual({ from: "***-***-0113", name: "[redacted 16 chars]", body: includeContent ? "Synthetic message" : "[redacted 17 chars]", transcript: [{ name: includeContent ? "Synthetic Speaker" : "[redacted 17 chars]", text: includeContent ? "Call synthetic@example.test at ***-***-0113" : "[redacted 43 chars]" }] });
+    }
   });
 
   it("returns JSON-RPC parse errors and enforces 1 MB after auth, beyond the global 100 KB parser", async () => {

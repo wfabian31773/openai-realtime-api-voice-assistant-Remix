@@ -1,0 +1,464 @@
+[
+  {
+    "name": "voice_fleet_health",
+    "description": "Fleet plugin health and switch values.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": true
+    }
+  },
+  {
+    "name": "voice_fleet_list_agents",
+    "description": "List fleet voice agents.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": true
+    }
+  },
+  {
+    "name": "voice_fleet_agent_health",
+    "description": "Agent switch / env health.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": true
+    }
+  },
+  {
+    "name": "voice_fleet_fleet_today",
+    "description": "Per-lane counts for a day (YYYY-MM-DD, default today UTC).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "day": {
+          "type": "string",
+          "description": "YYYY-MM-DD"
+        }
+      },
+      "required": [],
+      "additionalProperties": true
+    }
+  },
+  {
+    "name": "voice_fleet_recent_outcomes",
+    "description": "Recent call outcomes (limit 1-50).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "limit": {
+          "type": "integer"
+        }
+      },
+      "required": [],
+      "additionalProperties": true
+    }
+  },
+  {
+    "name": "voice_fleet_outbound_status",
+    "description": "SI Assistant outbound status.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": true
+    }
+  },
+  {
+    "name": "voice_fleet_approval_status",
+    "description": "Status of a prepared contact request by id.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Contact request id"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "additionalProperties": true
+    }
+  },
+  {
+    "name": "voice_fleet_email_replies",
+    "description": "Recent email replies (ids only).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": true
+    }
+  },
+  {
+    "name": "voice_fleet_prepare_call",
+    "description": "Prepare an outbound call for human approval (body passed through).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": true
+    }
+  },
+  {
+    "name": "voice_fleet_prepare_text",
+    "description": "Prepare an SMS for human approval (body passed through).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": true
+    }
+  },
+  {
+    "name": "voice_fleet_prepare_email",
+    "description": "Prepare an email for human approval (body passed through).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": true
+    }
+  },
+  {
+    "name": "voice_fleet_commit",
+    "description": "Commit an approved contact. Give confirmToken, or id to fetch it via the confirm-token hand-off.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Contact request id"
+        },
+        "confirmToken": {
+          "type": "string",
+          "description": "Confirm token"
+        }
+      },
+      "required": [],
+      "additionalProperties": true
+    }
+  },
+  {
+    "name": "voice_fleet_cancel",
+    "description": "Cancel a prepared contact request.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Contact request id"
+        }
+      },
+      "required": [
+        "id"
+      ],
+      "additionalProperties": true
+    }
+  },
+  {
+    "name": "voice_fleet_capabilities",
+    "description": "Fleet capability flags.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {},
+      "required": [],
+      "additionalProperties": true
+    }
+  },
+  {
+    "name": "voice_fleet_commit_call_live",
+    "description": "Commit an approved call as a live, steerable call. Give confirmToken or id.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Contact request id"
+        },
+        "confirmToken": {
+          "type": "string",
+          "description": "Confirm token"
+        }
+      },
+      "required": [],
+      "additionalProperties": true
+    }
+  },
+  {
+    "name": "voice_fleet_live_call_status",
+    "description": "Live call status and transcript turns after index.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string",
+          "description": "Session id"
+        },
+        "after": {
+          "type": "integer"
+        }
+      },
+      "required": [
+        "sessionId"
+      ],
+      "additionalProperties": true
+    }
+  },
+  {
+    "name": "voice_fleet_live_call_instruct",
+    "description": "Send guidance text (1-2000 chars) to a live call.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string",
+          "description": "Session id"
+        },
+        "text": {
+          "type": "string",
+          "description": "Guidance"
+        }
+      },
+      "required": [
+        "sessionId",
+        "text"
+      ],
+      "additionalProperties": true
+    }
+  },
+  {
+    "name": "voice_fleet_call_direct",
+    "description": "Open-line call: dial any number now from (909) 555-0113 as a live, steerable call (needs calls:direct). No DOB/approval. Returns sessionId for live_call_status/instruct/end.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "phone": {
+          "type": "string",
+          "description": "US 10-digit or +1 E.164 number"
+        },
+        "purpose": {
+          "type": "string",
+          "description": "Instructions/persona for the agent (1-4000 chars)"
+        },
+        "name": {
+          "type": "string",
+          "description": "Optional recipient name"
+        }
+      },
+      "required": [
+        "phone",
+        "purpose"
+      ],
+      "additionalProperties": true
+    }
+  },
+  {
+    "name": "voice_fleet_operator_prepare_call",
+    "description": "Operator line: prepare a generic outbound agent call (no patient/ticket fields) for Wayne's human approval. Does not dial. Send purpose OR scenario_id (A1-A10; server fills purpose from the scenario pack). Returns approval id.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "phone": {
+          "type": "string",
+          "description": "Target E.164, e.g. +1XXXXXXXXXX"
+        },
+        "purpose": {
+          "type": "string",
+          "description": "Call purpose/instructions (1-4000 chars). Omit when scenario_id is set (server rejects a purpose that differs from the scenario goal)."
+        },
+        "scenario_id": {
+          "type": "string",
+          "pattern": "^A([1-9]|10)$",
+          "description": "Synthetic test scenario A1-A10 (docs/operator-line/scenarios)"
+        },
+        "callerScript": {
+          "type": "string",
+          "description": "Optional caller script/persona the agent follows (1-8000 chars); its first line is spoken as the opening unless openingLine is set"
+        },
+        "openingLine": {
+          "type": "string",
+          "description": "Optional exact first line the agent speaks (1-500 chars)"
+        },
+        "initiated_by": {
+          "type": "string",
+          "enum": [
+            "owner_request",
+            "bot_initiative"
+          ],
+          "description": "Optional provenance (default bot_initiative)"
+        },
+        "language": {
+          "type": "string",
+          "pattern": "^[a-z]{2,3}(?:-[A-Za-z]{2,8})?$",
+          "description": "Optional language code, e.g. en, es"
+        },
+        "maxDurationSec": {
+          "type": "integer",
+          "minimum": 30,
+          "description": "Hard stop in seconds, >=30 and <= server max (OPERATOR_LINE_MAX_CALL_MINUTES, default 3600)"
+        }
+      },
+      "required": [
+        "phone"
+      ],
+      "additionalProperties": true
+    }
+  },
+  {
+    "name": "voice_fleet_operator_commit_call",
+    "description": "Operator line: after Wayne approves, place the call live (steerable). Give id (approval id) or confirmToken. Returns sessionId.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "Approval id"
+        },
+        "confirmToken": {
+          "type": "string",
+          "description": "Confirm token"
+        }
+      },
+      "required": [],
+      "additionalProperties": true
+    }
+  },
+  {
+    "name": "voice_fleet_get_transcript",
+    "description": "Full ordered transcript of an operator-line call by sessionId (preparing token only).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string",
+          "description": "Session id"
+        }
+      },
+      "required": [
+        "sessionId"
+      ],
+      "additionalProperties": true
+    }
+  },
+  {
+    "name": "voice_fleet_live_call_end",
+    "description": "End a live call.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "sessionId": {
+          "type": "string",
+          "description": "Session id"
+        }
+      },
+      "required": [
+        "sessionId"
+      ],
+      "additionalProperties": true
+    }
+  },
+  {
+    "name": "voice_fleet_operator_inbound_get",
+    "description": "Operator line: inbound call record by Twilio CallSid (CA + 32 hex). Needs operator:call. PHI masked unless includeContent.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "includeContent": {
+          "type": "boolean",
+          "description": "Default false. true = return transcript turns / message body / voicemail transcription unredacted (phones still last-4; media/recording URLs dropped)"
+        },
+        "callSid": {
+          "type": "string",
+          "description": "Twilio CallSid, CA + 32 hex"
+        }
+      },
+      "required": [
+        "callSid"
+      ],
+      "additionalProperties": true
+    }
+  },
+  {
+    "name": "voice_fleet_operator_sms_get",
+    "description": "Operator line: inbound SMS/MMS record by MessageSid (SM|MM + 32 hex). Needs operator:call. Body redacted unless includeContent.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "includeContent": {
+          "type": "boolean",
+          "description": "Default false. true = return transcript turns / message body / voicemail transcription unredacted (phones still last-4; media/recording URLs dropped)"
+        },
+        "messageSid": {
+          "type": "string",
+          "description": "Twilio MessageSid, SM/MM + 32 hex"
+        }
+      },
+      "required": [
+        "messageSid"
+      ],
+      "additionalProperties": true
+    }
+  },
+  {
+    "name": "voice_fleet_operator_voicemail_get",
+    "description": "Operator line: voicemail record by RecordingSid (RE + 32 hex). Needs operator:call. Transcription redacted unless includeContent; URLs dropped.",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "includeContent": {
+          "type": "boolean",
+          "description": "Default false. true = return transcript turns / message body / voicemail transcription unredacted (phones still last-4; media/recording URLs dropped)"
+        },
+        "recordingSid": {
+          "type": "string",
+          "description": "Twilio RecordingSid, RE + 32 hex"
+        }
+      },
+      "required": [
+        "recordingSid"
+      ],
+      "additionalProperties": true
+    }
+  },
+  {
+    "name": "voice_fleet_operator_sms_send",
+    "description": "Operator line: send an SMS from the operator number (no hours window, no caps). To Wayne's cell (OPERATOR_OWNER_NUMBER) it sends immediately; any other number creates a pending approval. Opt-out always blocks. Same idempotency_key sends once. Needs operator:call (Remix operator-line/sms/send).",
+    "inputSchema": {
+      "type": "object",
+      "properties": {
+        "to": {
+          "type": "string",
+          "description": "Destination US phone number"
+        },
+        "body": {
+          "type": "string",
+          "description": "Message text (never logged or echoed)"
+        },
+        "idempotency_key": {
+          "type": "string",
+          "description": "1-200 chars, stable per intended text (e.g. call SID + purpose)"
+        },
+        "initiated_by": {
+          "type": "string",
+          "enum": [
+            "owner_request",
+            "bot_initiative"
+          ],
+          "description": "Optional provenance"
+        }
+      },
+      "required": [
+        "to",
+        "body",
+        "idempotency_key"
+      ],
+      "additionalProperties": true
+    }
+  }
+]

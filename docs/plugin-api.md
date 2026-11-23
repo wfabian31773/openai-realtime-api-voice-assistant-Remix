@@ -28,8 +28,17 @@ expiry and revocation). Missing or invalid credentials return 401 with
 each tool forwards the caller's exact bearer to the REST API, whose existing
 scope, ownership, approval and write gates still apply.
 
+Both transports support `2025-06-18`, `2025-03-26` and `2024-11-05`.
+`initialize` echoes a supported requested version, otherwise selects the latest
+(`2025-06-18`). HTTP accepts an absent `MCP-Protocol-Version` header and returns
+400 with a JSON error for an unsupported header value.
+
 POST accepts JSON-RPC messages or batches and returns ordinary JSON in input
-order; notifications only return 202 without a body. There are no MCP
+order. Protocol `2025-06-18` removed batching; accepting it remains a lenient
+compatibility extension. Client responses (`result`/`error` without `method`)
+and notifications are ignored; a POST containing only those returns 202
+without a body. Mixed batches answer requests and omit responses/notifications.
+There are no MCP
 sessions or SSE streams. Invalid JSON returns 400 with `-32700`; the body cap
 is 1 MB (413). Authenticated GET/DELETE return 405 with `Allow: POST`.
 The raw-body voice proxy remains before the global parsers; MCP bypasses
@@ -38,9 +47,16 @@ those parsers and authenticates before its own bounded parser runs.
 The upstream defaults to `http://127.0.0.1:${API_PORT || 5000}`, with a trusted
 `VOICE_FLEET_MCP_INTERNAL_BASE_URL` override. Request host/forwarding headers
 never select it. `VOICE_FLEET_TIMEOUT_MS` defaults to 30000. The connector
-never logs tokens or bodies, masks phones to their last four digits, and
-redacts names, DOB, bodies, transcripts, emails and tokens in tool responses.
-The legacy operator `includeContent` flag cannot bypass this redaction.
+never logs tokens or bodies. As in the original connector, operator SID reads
+and operator SMS-send replies mask phones to their last four digits, omit
+media/recording URL fields, and redact string content and name/DOB/email/subject
+fields by default. On the three operator reads, `includeContent: true` returns
+content fields and all descendants unredacted except for phone masking and URL
+removal; names/emails outside content remain masked. Other tools, including
+full transcripts and live-call status, preserve fleet JSON. Both transports
+apply the same rules. Live tools call their routes directly without a
+`/capabilities` preflight, preserving access for `calls:direct`-only tokens;
+the REST API enforces capability, scope and ownership checks.
 
 Both transports share the same 26 tools and `serverInfo.version = 4.0.0`.
 See [connector setup and tests](../connectors/voice-fleet-mcp/README.md).

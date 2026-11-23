@@ -28,9 +28,17 @@ write switches. Typical bot scopes are `fleet:read,contacts:prepare,contacts:com
 `operator:call` and `calls:direct` remain explicit grants. Do not give bots
 `contacts:approve`. No approval/rejection tool is exposed.
 
-HTTP uses POST with plain JSON replies, supports JSON-RPC batches in input
-order and returns 202 with no body for notifications only. It keeps no MCP
-session and opens no SSE stream. Invalid JSON returns 400 / `-32700`, bodies
+Both transports support protocol versions `2025-06-18`, `2025-03-26` and
+`2024-11-05`, latest first. `initialize` echoes a supported requested version;
+an absent or unsupported version selects `2025-06-18`. HTTP accepts an absent
+`MCP-Protocol-Version` header; an unsupported header returns 400 with a JSON error.
+
+HTTP uses POST with plain JSON replies. Although `2025-06-18` removed JSON-RPC
+batching, input batches remain accepted leniently and replies retain input order.
+Client responses (`result`/`error` without `method`) and notifications produce
+no replies; a POST containing only those returns 202 with no body. Mixed batches
+answer requests and omit responses/notifications. It keeps no MCP session and
+opens no SSE stream. Invalid JSON returns 400 / `-32700`, bodies
 over 1 MB return 413, and authenticated GET/DELETE return 405 with `Allow: POST`.
 Missing, invalid, expired or revoked bearers return 401 with
 `WWW-Authenticate: Bearer realm="voice-fleet-mcp"`, before body parsing.
@@ -55,7 +63,8 @@ newline-delimited JSON-RPC input/output and environment settings are retained:
 | `VOICE_FLEET_TIMEOUT_MS` | `30000` |
 
 `core.mjs` exports `createVoiceFleetMcp({ baseUrl, getToken, timeoutMs })`.
-`handleMessage(message)` returns the JSON-RPC reply, or null for notifications;
+`handleMessage(message)` returns the JSON-RPC reply, or null for notifications
+and client responses;
 it performs no stdin/stdout I/O. Masking and operator preparation helpers
 remain exported from both the core and the stdio shell.
 
@@ -82,10 +91,12 @@ local error. `approvalId` is not an argument alias; the imported offline
 fixture used that stale argument and now checks the documented `id` contract
 and the missing-both refusal explicitly.
 
-Live commit/status/instruct/end tools check `liveCalls` via capabilities
-before forwarding an action; unsupported fleets receive no commit or
-confirm-token fetch. The fleet remains authoritative for calling windows,
-holidays, opt-outs and limits. Live state remains in fleet memory.
+As in the original connector, live commit/status/instruct/end tools call their
+routes directly without probing `/capabilities`. A `calls:direct`-only token
+can control its own direct sessions even though `/capabilities` requires
+`fleet:read` and returns 403. The fleet remains authoritative for capability,
+scope, ownership, calling windows, holidays, opt-outs and limits. Live state
+remains in fleet memory.
 
 Operator reads validate Twilio SIDs locally: CA + 32 lowercase hex for
 inbound calls, SM/MM + 32 for SMS, RE + 32 for voicemail. Operator SMS send
@@ -96,29 +107,39 @@ normalizes caller_script/opening_line aliases to callerScript/openingLine.
 
 ## Masking
 
-Every tool result, including upstream error JSON, passes through the shared
-masker. Phones show only the last four digits (`***-***-0113`); names, DOB,
-bodies, transcripts, subjects, email fields and token fields are redacted.
-Emails embedded in other strings become `[email]`; credential strings are
-redacted. Media/recording URLs are omitted. Fetch errors and non-JSON upstream
-pages are replaced with generic errors.
+Both transports retain the original connector's output behavior. The three
+operator SID reads and `operator_sms_send` mask phones to their last four
+digits (`***-***-0113`) and omit media/recording URL fields at every depth.
+By default, string content and name/DOB/email/subject fields become
+`[redacted N chars]`; emails embedded in other strings become `[email]`.
 
-**v4 privacy change:** legacy `includeContent: true` is still accepted on
-operator read tools but cannot bypass masking on either transport. Fetch
-full authorized content through the underlying fleet API when needed.
+On `operator_inbound_get`, `operator_sms_get` and `operator_voicemail_get`,
+`includeContent: true` returns content fields (`body`, `text`, `transcript`,
+`transcription`, `transcriptionText`, `content`, `turns`, `messages`) and all
+their descendants unredacted except for phone masking and URL removal. Names
+and emails nested inside content are preserved; fields outside content retain
+their usual masking. Omitted or false keeps the default masking. The flag
+does not enable content on SMS-send replies.
+
+Other tools, including `get_transcript` and live-call status, return the fleet's
+JSON unchanged, as the original did. Fetch errors and non-JSON upstream pages
+are replaced with generic errors. Tokens and bodies are never logged.
 
 ## Tests
 
 From the repo root, without credentials or external network:
 
 ```sh
-npx vitest run src/plugin connectors/voice-fleet-mcp/offline.test.ts
+npx tsc -p . --noEmit
+npx vitest run src/plugin connectors
 node connectors/voice-fleet-mcp/test-offline.mjs
 node connectors/voice-fleet-mcp/test-operator-offline.mjs
 node connectors/voice-fleet-mcp/test-operator-prepare-offline.mjs
 ```
 
 The offline `.mjs` scripts mock fetch directly and are also run by Vitest.
+`tools-list-b7f9b822.json` records the original connector's full tool catalog;
+the core tests compare every name, description and input schema exactly.
 HTTP tests use a local server and an in-memory token store; no DB is loaded.
 All phone fixtures are synthetic 555 numbers.
 

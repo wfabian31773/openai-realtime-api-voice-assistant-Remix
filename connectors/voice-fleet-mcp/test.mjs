@@ -4,7 +4,8 @@ import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { mask, maskString, inCallingWindow } from './core.mjs';
 assert.equal(maskString('call +1 (909) 555-0113 now'), 'call ***-***-0113 now');
-assert.deepEqual(mask({ phone: '9095550113', firstName: 'A', nested: [{ dateOfBirth: 'x', note: 'x@y.com' }], confirmToken: 'abc' }), { phone: '***-***-0113', firstName: '[redacted]', nested: [{ dateOfBirth: '[redacted]', note: '[email]' }], confirmToken: '[redacted]' });
+assert.deepEqual(mask({ phone: '9095550113', firstName: 'A', nested: [{ dateOfBirth: 'x', note: 'x@y.com' }] }), { phone: '***-***-0113', firstName: '[redacted 1 chars]', nested: [{ dateOfBirth: '[redacted 1 chars]', note: '[email]' }] });
+assert.deepEqual(mask({ body: 'Synthetic text +19095550113', recordingUrl: 'https://example.test/recording' }, '', true), { body: 'Synthetic text ***-***-0113' });
 assert.equal(inCallingWindow(new Date('2026-10-27T16:00:00Z')), true);  // 9 AM PDT
 assert.equal(inCallingWindow(new Date('2026-10-27T15:59:00Z')), false);
 assert.equal(inCallingWindow(new Date('2026-10-28T03:00:00Z')), false); // 8 PM PDT

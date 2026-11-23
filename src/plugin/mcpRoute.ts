@@ -1,6 +1,6 @@
 /** Stateless Streamable HTTP transport; no database or production wiring here. */
 import express, { type ErrorRequestHandler, type Express, type RequestHandler } from "express";
-import { createVoiceFleetMcp } from "../../connectors/voice-fleet-mcp/core.mjs";
+import { createVoiceFleetMcp, SUPPORTED } from "../../connectors/voice-fleet-mcp/core.mjs";
 import { verifyStoredToken, type PluginStore } from "./store";
 import { parseBearerToken } from "./tokens";
 
@@ -44,6 +44,15 @@ export function mountVoiceFleetMcp(app: Express, deps: McpRouteDeps): void {
     res.status(405).json({ error: "Method not allowed" });
   };
 
+  const requireProtocolVersion: RequestHandler = (req, res, next) => {
+    const version = req.get("MCP-Protocol-Version");
+    if (version !== undefined && !SUPPORTED.some((supported) => supported === version)) {
+      res.status(400).json(errorReply(-32600, "Unsupported MCP protocol version"));
+      return;
+    }
+    next();
+  };
+
   const handle: RequestHandler = async (req, res) => {
     let message: unknown;
     try {
@@ -63,6 +72,7 @@ export function mountVoiceFleetMcp(app: Express, deps: McpRouteDeps): void {
         res.status(400).json(errorReply(-32600, "Invalid Request"));
         return;
       }
+      // 2025-06-18 removed batching; accept it leniently for older clients.
       // Sequential dispatch preserves both response order and prepare/commit ordering.
       const replies = [];
       for (const item of message) {
@@ -89,5 +99,5 @@ export function mountVoiceFleetMcp(app: Express, deps: McpRouteDeps): void {
     }
   };
 
-  app.all(VOICE_FLEET_MCP_PATH, requireAuth, postOnly, parseBody, handle, parserError);
+  app.all(VOICE_FLEET_MCP_PATH, requireAuth, postOnly, requireProtocolVersion, parseBody, handle, parserError);
 }

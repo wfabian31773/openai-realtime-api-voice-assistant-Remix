@@ -1,5 +1,6 @@
 // Shared, zero-dependency MCP implementation. Transports own I/O and credentials.
 const V1 = "/api/plugin/v1";
+export const SUPPORTED = Object.freeze(["2025-06-18", "2025-03-26", "2024-11-05"]);
 class InputError extends Error {}
 
 const enc = encodeURIComponent;
@@ -28,9 +29,10 @@ export function operatorPrepareBody(a = {}) {
 const str = (d) => ({ type: "string", description: d });
 
 const SID = { call: /^CA[0-9a-f]{32}$/, sms: /^(SM|MM)[0-9a-f]{32}$/, rec: /^RE[0-9a-f]{32}$/ };
-const CONTENT_KEYS = /^(body|text|transcript|transcription|transcriptionText|content|turns|messages|purpose|callerScript|openingLine)$/i;
-const PHI_KEYS = /^(.*name|dob|date_?of_?birth|birth(Month|Day|Year)|email|subject|.*token|secret|authorization)$/i;
+const CONTENT_KEYS = /^(body|text|transcript|transcription|transcriptionText|content|turns|messages)$/i;
+const PHI_KEYS = /^(name|callerName|fromName|firstName|lastName|dob|dateOfBirth|email|subject)$/i;
 const URL_KEYS = /^(mediaUrl|mediaUrls|recordingUrl|url|uri|mediaUri)$/i;
+const maskPhone = (value) => value.replace(/(?<![\w+])(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?(\d{4})(?!\w)/g, "***-***-$1");
 
 export function maskString(value) {
   return value
@@ -40,18 +42,19 @@ export function maskString(value) {
     .replace(/(?<![\w+])(?:\+?1[\s.-]?)?\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?(\d{4})(?!\w)/g, "***-***-$1");
 }
 
-// The legacy includeContent argument is accepted but cannot bypass redaction.
-export function mask(value, key = "", _includeContent = false) {
-  if (URL_KEYS.test(key)) return undefined;
-  if (PHI_KEYS.test(key) || CONTENT_KEYS.test(key)) {
-    return value == null || value === "" ? value : "[redacted]";
-  }
-  if (Array.isArray(value)) return value.map((item) => mask(item, key));
+// Match the box connector: content and all its descendants retain everything
+// except phone digits and media/recording URLs when includeContent is true.
+export function mask(value, key = "", includeContent = false, inContent = false) {
+  const isContent = inContent || (includeContent && CONTENT_KEYS.test(key));
+  if (Array.isArray(value)) return value.map((item) => mask(item, key, includeContent, isContent));
   if (value && typeof value === "object") {
     return Object.fromEntries(Object.entries(value).filter(([k]) => !URL_KEYS.test(k))
-      .map(([k, v]) => [k, mask(v, k)]));
+      .map(([k, v]) => [k, mask(v, k, includeContent, isContent)]));
   }
-  return typeof value === "string" ? maskString(value) : value;
+  if (typeof value !== "string") return value;
+  if (isContent) return maskPhone(value);
+  if (PHI_KEYS.test(key) || CONTENT_KEYS.test(key)) return value ? `[redacted ${value.length} chars]` : value;
+  return maskPhone(value.replace(/[\w.+-]+@[\w-]+\.[\w.]+/g, "[email]"));
 }
 
 // Informational helper; the fleet API remains authoritative for hours/holidays.
@@ -93,9 +96,10 @@ export function createVoiceFleetMcp({ baseUrl, getToken, timeoutMs = 30000 }) {
     return { token: r.data.confirmToken };
   }
 
-  async function sidGet(re, label, sid, path) {
+  async function sidGet(re, label, sid, path, includeContent) {
     if (typeof sid !== "string" || !re.test(sid)) throw new InputError(`Invalid ${label} format`);
-    return call("GET", path + enc(sid));
+    const result = await call("GET", path + enc(sid));
+    return { ...result, data: mask(result.data, "", includeContent === true) };
   }
 
   const TOOLS = [
@@ -131,18 +135,19 @@ export function createVoiceFleetMcp({ baseUrl, getToken, timeoutMs = 30000 }) {
     ["get_transcript", "Full ordered transcript of an operator-line call by sessionId (preparing token only).", obj({ sessionId: str("Session id") }, ["sessionId"]),
       (a) => call("GET", `/calls/${enc(a.sessionId)}/transcript`)],
     ["live_call_end", "End a live call.", obj({ sessionId: str("Session id") }, ["sessionId"]), (a) => call("POST", `/live_calls/${enc(a.sessionId)}/end`, {})],
-    ["operator_inbound_get", "Operator line: inbound call record by Twilio CallSid (CA + 32 hex). Needs operator:call. Sensitive content is always redacted.", obj({ includeContent: { type: "boolean", description: "Legacy flag accepted for compatibility; sensitive content is always redacted" }, callSid: str("Twilio CallSid, CA + 32 hex") }, ["callSid"]),
-      (a) => sidGet(SID.call, "callSid", a.callSid, "/operator-line/inbound/")],
-    ["operator_sms_get", "Operator line: inbound SMS/MMS record by MessageSid (SM|MM + 32 hex). Needs operator:call. Body is always redacted.", obj({ includeContent: { type: "boolean", description: "Legacy flag accepted for compatibility; sensitive content is always redacted" }, messageSid: str("Twilio MessageSid, SM/MM + 32 hex") }, ["messageSid"]),
-      (a) => sidGet(SID.sms, "messageSid", a.messageSid, "/operator-line/sms/")],
-    ["operator_voicemail_get", "Operator line: voicemail record by RecordingSid (RE + 32 hex). Needs operator:call. Transcription always redacted; URLs dropped.", obj({ includeContent: { type: "boolean", description: "Legacy flag accepted for compatibility; sensitive content is always redacted" }, recordingSid: str("Twilio RecordingSid, RE + 32 hex") }, ["recordingSid"]),
-      (a) => sidGet(SID.rec, "recordingSid", a.recordingSid, "/operator-line/voicemail/")],
+    ["operator_inbound_get", "Operator line: inbound call record by Twilio CallSid (CA + 32 hex). Needs operator:call. PHI masked unless includeContent.", obj({ includeContent: { type: "boolean", description: "Default false. true = return transcript turns / message body / voicemail transcription unredacted (phones still last-4; media/recording URLs dropped)" }, callSid: str("Twilio CallSid, CA + 32 hex") }, ["callSid"]),
+      (a) => sidGet(SID.call, "callSid", a.callSid, "/operator-line/inbound/", a.includeContent)],
+    ["operator_sms_get", "Operator line: inbound SMS/MMS record by MessageSid (SM|MM + 32 hex). Needs operator:call. Body redacted unless includeContent.", obj({ includeContent: { type: "boolean", description: "Default false. true = return transcript turns / message body / voicemail transcription unredacted (phones still last-4; media/recording URLs dropped)" }, messageSid: str("Twilio MessageSid, SM/MM + 32 hex") }, ["messageSid"]),
+      (a) => sidGet(SID.sms, "messageSid", a.messageSid, "/operator-line/sms/", a.includeContent)],
+    ["operator_voicemail_get", "Operator line: voicemail record by RecordingSid (RE + 32 hex). Needs operator:call. Transcription redacted unless includeContent; URLs dropped.", obj({ includeContent: { type: "boolean", description: "Default false. true = return transcript turns / message body / voicemail transcription unredacted (phones still last-4; media/recording URLs dropped)" }, recordingSid: str("Twilio RecordingSid, RE + 32 hex") }, ["recordingSid"]),
+      (a) => sidGet(SID.rec, "recordingSid", a.recordingSid, "/operator-line/voicemail/", a.includeContent)],
     ["operator_sms_send", "Operator line: send an SMS from the operator number (no hours window, no caps). To Wayne's cell (OPERATOR_OWNER_NUMBER) it sends immediately; any other number creates a pending approval. Opt-out always blocks. Same idempotency_key sends once. Needs operator:call (Remix operator-line/sms/send).",
       obj({ to: str("Destination US phone number"), body: str("Message text (never logged or echoed)"), idempotency_key: str("1-200 chars, stable per intended text (e.g. call SID + purpose)"), initiated_by: { type: "string", enum: ["owner_request", "bot_initiative"], description: "Optional provenance" } }, ["to", "body", "idempotency_key"]),
       async (a) => {
         if (typeof a.to !== "string" || !a.to.trim() || typeof a.body !== "string" || !a.body.trim()) return { status: 400, ok: false, data: { error: "to and body are required" } };
         if (typeof a.idempotency_key !== "string" || !a.idempotency_key.trim() || a.idempotency_key.length > 200) return { status: 400, ok: false, data: { error: "idempotency_key must contain 1 to 200 characters" } };
-        return call("POST", "/operator-line/sms/send", { to: a.to, body: a.body, idempotency_key: a.idempotency_key, ...(a.initiated_by ? { initiated_by: a.initiated_by } : {}) });
+        const result = await call("POST", "/operator-line/sms/send", { to: a.to, body: a.body, idempotency_key: a.idempotency_key, ...(a.initiated_by ? { initiated_by: a.initiated_by } : {}) });
+        return { ...result, data: mask(result.data) };
       }],
   ].map(([n, description, inputSchema, run]) => ({ name: `voice_fleet_${n}`, description, inputSchema, run }));
 
@@ -166,20 +171,22 @@ export function createVoiceFleetMcp({ baseUrl, getToken, timeoutMs = 30000 }) {
     if (["voice_fleet_commit", "voice_fleet_commit_call_live", "voice_fleet_operator_commit_call"].includes(tool.name) && !args.id && !args.confirmToken) throw new InputError("Provide confirmToken or id");
   }
 
-  const liveTools = new Set(["commit_call_live", "operator_commit_call", "live_call_status", "live_call_instruct", "live_call_end"].map((name) => `voice_fleet_${name}`));
   const rpcError = (id, code, message) => ({ jsonrpc: "2.0", id, error: { code, message } });
 
   async function handleMessage(msg) {
-    if (!msg || typeof msg !== "object" || Array.isArray(msg) || msg.jsonrpc !== "2.0" || typeof msg.method !== "string" ||
+    if (!msg || typeof msg !== "object" || Array.isArray(msg) || msg.jsonrpc !== "2.0" ||
         (Object.hasOwn(msg, "id") && msg.id !== null && typeof msg.id !== "string" && !(typeof msg.id === "number" && Number.isFinite(msg.id)))) {
       return rpcError(null, -32600, "Invalid Request");
     }
+    // Client responses are acknowledgements, not requests to dispatch.
+    if (!Object.hasOwn(msg, "method") && (Object.hasOwn(msg, "result") || Object.hasOwn(msg, "error"))) return null;
+    if (typeof msg.method !== "string") return rpcError(null, -32600, "Invalid Request");
     // MCP notifications never produce a reply or trigger tools.
     if (!Object.hasOwn(msg, "id")) return null;
     const { id, method, params } = msg;
     if (params !== undefined && (!params || typeof params !== "object" || Array.isArray(params))) return rpcError(id, -32602, "Invalid params");
     const reply = (result) => ({ jsonrpc: "2.0", id, result });
-    if (method === "initialize") return reply({ protocolVersion: params?.protocolVersion || "2024-11-05", capabilities: { tools: {} }, serverInfo: { name: "voice-fleet-mcp", version: "4.0.0" } });
+    if (method === "initialize") return reply({ protocolVersion: SUPPORTED.includes(params?.protocolVersion) ? params.protocolVersion : SUPPORTED[0], capabilities: { tools: {} }, serverInfo: { name: "voice-fleet-mcp", version: "4.0.0" } });
     if (method === "ping") return reply({});
     if (method === "tools/list") return reply({ tools: TOOLS.map(({ run, ...tool }) => tool) });
     if (method !== "tools/call") return rpcError(id, -32601, "Method not found");
@@ -188,12 +195,8 @@ export function createVoiceFleetMcp({ baseUrl, getToken, timeoutMs = 30000 }) {
     try {
       const args = params.arguments === undefined ? {} : params.arguments;
       validateArguments(tool, args);
-      if (liveTools.has(tool.name)) {
-        const capabilities = await call("GET", "/capabilities");
-        if (!capabilities.ok || capabilities.data.liveCalls !== true) throw new InputError("Fleet does not have liveCalls enabled");
-      }
       const result = await tool.run(args);
-      return reply({ content: [{ type: "text", text: JSON.stringify(mask(result), null, 2) }], isError: !result.ok });
+      return reply({ content: [{ type: "text", text: JSON.stringify(result, null, 2) }], isError: !result.ok });
     } catch (error) {
       // Never echo fetch errors: they can contain upstream bodies or credentials.
       return reply({ content: [{ type: "text", text: `Error: ${error instanceof InputError ? error.message : "Fleet request failed"}` }], isError: true });

@@ -1,10 +1,14 @@
-// Offline: operator SID validation, paths and mandatory masking. No sockets.
+// Offline: operator SID validation, paths and original includeContent behavior. No sockets.
 import assert from 'node:assert/strict';
 import { mockFleet } from './test-support.mjs';
+const content = 'Synthetic body from synthetic@example.test, phone +1 (909) 555-1234';
+const maskedContent = 'Synthetic body from synthetic@example.test, phone ***-***-1234';
+const nestedContent = [{ role: 'caller', text: content, name: 'Synthetic Speaker', email: 'synthetic@example.test', nested: { phone: '9095551234', body: content, mediaUrl: 'https://example.test/media' } }];
 const { seen, rpc, call } = mockFleet(() => [200, {
   from: '+19095551234', name: 'Synthetic Person', email: 'synthetic@example.test',
-  body: 'Synthetic body', transcript: [{ role: 'caller', text: 'Synthetic private words' }],
-  transcriptionText: 'Synthetic transcription', recordingUrl: 'https://example.test/recording', mediaUrls: ['https://example.test/media'],
+  body: content, text: content, transcript: nestedContent, turns: nestedContent,
+  transcription: content, transcriptionText: content, content: { messages: nestedContent }, messages: nestedContent,
+  empty: { body: '', text: null }, recordingUrl: 'https://example.test/recording', mediaUrls: ['https://example.test/media'],
   note: 'mail synthetic@example.test', status: 'received',
 }]);
 const names = (await rpc('tools/list')).result.tools.map((tool) => tool.name);
@@ -19,13 +23,29 @@ for (const [tool, key, good, bads, path] of [
   const before = seen.length;
   for (const bad of bads) assert((await call(tool, { [key]: bad })).isError);
   assert.equal(seen.length, before);
-  for (const includeContent of [false, true]) {
+  for (const includeContent of [undefined, false, true]) {
     const result = await call(tool, { [key]: good, includeContent });
     const text = result.content[0].text;
     assert(!result.isError, text);
     assert.equal(seen.at(-1).path, path + good);
-    assert(text.includes('***-***-1234') && text.includes('[email]') && text.includes('[redacted]'));
-    for (const privateText of ['Synthetic', '555', 'recordingUrl', 'mediaUrls', 'synthetic@example.test']) assert(!text.includes(privateText), text);
+    const data = JSON.parse(text).data;
+    assert.equal(data.from, '***-***-1234');
+    assert.equal(data.name, '[redacted 16 chars]');
+    assert.equal(data.email, '[redacted 22 chars]');
+    assert.equal(data.note, 'mail [email]');
+    assert.deepEqual(data.empty, { body: '', text: null });
+    for (const key of ['body', 'text', 'transcription', 'transcriptionText']) {
+      assert.equal(data[key], includeContent === true ? maskedContent : `[redacted ${content.length} chars]`);
+    }
+    for (const turns of [data.transcript, data.turns, data.messages, data.content.messages]) {
+      assert.equal(turns[0].text, includeContent === true ? maskedContent : `[redacted ${content.length} chars]`);
+      assert.equal(turns[0].name, includeContent === true ? 'Synthetic Speaker' : '[redacted 17 chars]');
+      assert.equal(turns[0].email, includeContent === true ? 'synthetic@example.test' : '[redacted 22 chars]');
+      assert.equal(turns[0].nested.phone, '***-***-1234');
+      assert.equal(turns[0].nested.body, includeContent === true ? maskedContent : `[redacted ${content.length} chars]`);
+    }
+    for (const privateText of ['555', 'recordingUrl', 'mediaUrls', 'mediaUrl', 'https://example.test/']) assert(!text.includes(privateText), text);
+    if (includeContent !== true) assert(!text.includes('Synthetic body') && !text.includes('synthetic@example.test'), text);
   }
 }
 assert(!(await call('operator_sms_get', { messageSid: 'SM' + hex })).isError);
