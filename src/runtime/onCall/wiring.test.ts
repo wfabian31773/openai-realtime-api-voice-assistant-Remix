@@ -11,7 +11,8 @@ import { createFakeOnCallStore } from "./store.fake";
 import { syntheticRotation } from "./testRotation";
 import { planAt } from "./routing";
 import { ON_CALL_ACK_PATH, ON_CALL_STATUS_PATH } from "./providerCall";
-import { RING_GUARD_MS, type InCallTransferResult } from "./runner";
+import { RING_GUARD_MS, SWITCHED_OFF_REASON, type InCallTransferResult } from "./runner";
+import { ABSENT_RECHECK_MS } from "./store";
 
 const HOST = "voice.example.test";
 const CALLER_ID = "+15550001111";
@@ -67,14 +68,41 @@ function noAnswer(): InCallTransferResult {
 }
 
 describe("with the rotation switched off (the default)", () => {
-  it("builds nothing and touches neither Twilio nor the database", () => {
+  it("opens no chain, and builds only a draining runner that touches neither Twilio nor the database", () => {
     const tw = fakeTwilio();
+    const hub = vi.fn(async () => ({ rows: [] as Record<string, unknown>[] }));
     for (const env of [{}, { ON_CALL_ROTATION_MODE: "off" }, { ON_CALL_ROTATION_MODE: "" }]) {
-      const w = buildOnCallWiring(env, HOST, { twilio: tw.factory });
+      const w = buildOnCallWiring(env, HOST, { twilio: tw.factory, hubQuery: hub });
       expect(w.transfer).toBeNull();
-      expect(w.runner).toBeNull();
+      expect(w.runner).not.toBeNull();
+      expect(w.runner!.draining).toBe(true);
       expect(w.health).toEqual({ mode: "off", testPhones: 0, requireKept: false, running: false });
     }
+    expect(tw.factory).not.toHaveBeenCalled();
+    expect(hub).not.toHaveBeenCalled();
+  });
+
+  it("on the default deployment asks the Hub twice, ten minutes apart, then stops for good, without the store's notice", async () => {
+    let clock = new Date(WED_NIGHT);
+    const tw = fakeTwilio();
+    const hub = vi.fn(async () => ({ rows: [] as Record<string, unknown>[] }));
+    const lines: string[] = [];
+    const w = buildOnCallWiring({}, HOST, {
+      twilio: tw.factory,
+      hubQuery: hub,
+      now: () => new Date(clock),
+      log: (l) => void lines.push(l),
+    });
+    await w.runner!.tick();
+    expect(hub).toHaveBeenCalledTimes(1);
+    clock = new Date(clock.getTime() + ABSENT_RECHECK_MS + 1);
+    await w.runner!.tick();
+    expect(hub).toHaveBeenCalledTimes(2);
+    expect(lines.filter((l) => /the rotation is off: .*; the drain stops/.test(l))).toHaveLength(1);
+    clock = new Date(clock.getTime() + 60 * 60_000);
+    await w.runner!.tick();
+    expect(hub).toHaveBeenCalledTimes(2);
+    expect(lines.some((l) => /on_call_\* tables are/.test(l))).toBe(false);
     expect(tw.factory).not.toHaveBeenCalled();
   });
 
@@ -96,18 +124,104 @@ describe("with the rotation switched off (the default)", () => {
 });
 
 describe("with no public host", () => {
-  it("does not run, and says the provider-call webhooks cannot be reached", () => {
+  it("opens no chain, says the provider-call webhooks cannot be reached, and only drains", () => {
     const tw = fakeTwilio();
+    const hub = vi.fn(async () => ({ rows: [] as Record<string, unknown>[] }));
     const env = { ON_CALL_ROTATION_MODE: "live", ON_CALL_CALLER_ID: CALLER_ID };
     for (const host of [undefined, ""]) {
-      const w = buildOnCallWiring(env, host, { twilio: tw.factory });
+      const w = buildOnCallWiring(env, host, { twilio: tw.factory, hubQuery: hub });
       expect(w.transfer).toBeNull();
-      expect(w.runner).toBeNull();
+      expect(w.runner!.draining).toBe(true);
       expect(w.health.running).toBe(false);
       expect(w.health.blockedBy).toMatch(/no public host/);
       expect(w.health.mode).toBe("live");
     }
     expect(tw.factory).not.toHaveBeenCalled();
+    expect(hub).not.toHaveBeenCalled();
+  });
+
+  it("says nothing is blocked when the rotation is simply off", () => {
+    const w = buildOnCallWiring({}, undefined, { twilio: fakeTwilio().factory });
+    expect(w.health.blockedBy).toBeUndefined();
+  });
+});
+
+describe("a chain left open when the rotation is switched off", () => {
+  const LIVE = {
+    ON_CALL_ROTATION_MODE: "live",
+    ON_CALL_CALLER_ID: CALLER_ID,
+    TWILIO_PHONE_NUMBER: "+15550000000",
+    URGENT_NOTIFICATION_NUMBER: "+15550007777",
+  };
+
+  function openThenOff(offEnv: Record<string, string>, offHost: string | undefined = HOST) {
+    let clock = new Date(WED_NIGHT);
+    const now = () => new Date(clock);
+    const tw = fakeTwilio();
+    const store = createFakeOnCallStore(syntheticRotation(), now);
+    const lines: string[] = [];
+    const live = buildOnCallWiring(LIVE, HOST, { twilio: tw.factory, store, now, log: (l) => void lines.push(l) });
+    const off = buildOnCallWiring(offEnv, offHost, { twilio: tw.factory, store, now, log: (l) => void lines.push(l) });
+    return { live, off, tw, store, lines, at: (d: Date) => void (clock = new Date(d)) };
+  }
+
+  it("is closed at its next step with one text to the urgent number, and nobody else is called", async () => {
+    const { live, off, tw, store, at } = openThenOff({
+      TWILIO_PHONE_NUMBER: "+15550000000",
+      URGENT_NOTIFICATION_NUMBER: "+15550007777",
+    });
+    const esc = await live.runner!.afterInCallTransfer(noAnswer());
+    const textsBefore = tw.texts.length;
+    at(esc!.nextAt!);
+    await off.runner!.tick();
+    expect(tw.calls).toHaveLength(0);
+    const sent = tw.texts.slice(textsBefore);
+    expect(sent).toHaveLength(1);
+    expect(sent[0].to).toBe("+15550007777");
+    expect(sent[0].from).toBe("+15550000000");
+    expect(sent[0].body).toContain(SWITCHED_OFF_REASON);
+    expect((await store.getEscalationByCall(esc!.callSid))!.status).toBe("cancelled");
+  });
+
+  it("sends that text from ON_CALL_CALLER_ID when it is still set", async () => {
+    const { live, off, tw, at } = openThenOff({
+      ON_CALL_CALLER_ID: CALLER_ID,
+      TWILIO_PHONE_NUMBER: "+15550000000",
+      URGENT_NOTIFICATION_NUMBER: "+15550007777",
+    });
+    const esc = await live.runner!.afterInCallTransfer(noAnswer());
+    const textsBefore = tw.texts.length;
+    at(esc!.nextAt!);
+    await off.runner!.tick();
+    expect(tw.texts.slice(textsBefore).map((t) => t.from)).toEqual([CALLER_ID]);
+  });
+
+  it("never sends that text from the operator line", async () => {
+    const { live, off, tw, lines, at } = openThenOff({
+      TWILIO_PHONE_NUMBER: "+15550009999",
+      OPERATOR_LINE_FROM_NUMBER: "+15550009999",
+      URGENT_NOTIFICATION_NUMBER: "+15550007777",
+    });
+    const esc = await live.runner!.afterInCallTransfer(noAnswer());
+    const textsBefore = tw.texts.length;
+    at(esc!.nextAt!);
+    await off.runner!.tick();
+    expect(tw.calls).toHaveLength(0);
+    expect(tw.texts.slice(textsBefore)).toHaveLength(0);
+    expect(tw.texts.some((t) => t.from === "+15550009999")).toBe(false);
+    expect(lines.some((l) => /'nobody took it' text was not sent: no caller ID/.test(l))).toBe(true);
+  });
+
+  it("still takes a provider's key press on a call the live runner placed", async () => {
+    const { live, off, tw, store, at } = openThenOff({ TWILIO_PHONE_NUMBER: "+15550000000" }, undefined);
+    const esc = await live.runner!.afterInCallTransfer(noAnswer());
+    at(esc!.nextAt!);
+    await live.runner!.tick();
+    expect(tw.calls).toHaveLength(1);
+    const attempt = Number(new URL(String(tw.calls[0].statusCallback)).searchParams.get("attempt"));
+    const reply = await off.runner!.onProviderAck(attempt, "1");
+    expect(reply).toBe("accepted");
+    expect((await store.getEscalationByCall(esc!.callSid))!.status).toBe("accepted");
   });
 });
 
@@ -286,9 +400,10 @@ describe("running", () => {
     expect(lines.some((l) => /'nobody took it' text was not sent/.test(l))).toBe(false);
   });
 
-  it("never sends the 'nobody took it' text from the operator line", async () => {
+  it("never runs the chain from the operator line", async () => {
     // The config refuses a caller ID that is the operator line, and with no
-    // other number the rotation does not run at all, so nothing is sent.
+    // other number the rotation does not run: the transfer gets no wiring and
+    // the runner left only drains.
     const w = buildOnCallWiring(
       {
         ON_CALL_ROTATION_MODE: "live",
@@ -299,7 +414,9 @@ describe("running", () => {
       HOST,
       { twilio: fakeTwilio().factory, store: createFakeOnCallStore(syntheticRotation(), () => new Date(WED_NIGHT)) },
     );
-    expect(w.runner).toBeNull();
+    expect(w.transfer).toBeNull();
+    expect(w.runner!.draining).toBe(true);
+    expect(await w.runner!.afterInCallTransfer(noAnswer())).toBeNull();
   });
 
   it("reads no surgery facts without the Console", () => {

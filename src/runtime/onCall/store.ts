@@ -204,6 +204,8 @@ export interface OnCallStore {
   getEscalationByCall(callSid: string): Promise<EscalationRow | null>;
   /** Active rows due now, leased to this caller for `leaseMs`. */
   claimDue(now: Date, leaseMs: number, limit: number): Promise<EscalationRow[]>;
+  /** Whether any escalation is still active (the drain stops once none is). */
+  hasActive(): Promise<boolean>;
   /** The new row, or null when someone else moved it first. */
   updateEscalation(id: number, version: number, patch: EscalationPatch): Promise<EscalationRow | null>;
   /** Terminal: the patient details and callback number are dropped from the row. */
@@ -243,7 +245,7 @@ const TABLES_SQL = `
   select table_name from information_schema.tables
    where table_schema = 'public' and table_name = any($1::text[])`;
 
-const ABSENT_RECHECK_MS = 10 * 60_000;
+export const ABSENT_RECHECK_MS = 10 * 60_000;
 
 /** Remembers present; re-checks absent or unreadable every ten minutes. */
 export function createTableCheck(
@@ -356,6 +358,8 @@ export const SQL = {
     returning *`,
   byId: `select * from on_call_escalations where id = $1::integer`,
   byCall: `select * from on_call_escalations where call_sid = $1::text`,
+  hasActive: `
+    select 1 from on_call_escalations where status = 'active' limit 1`,
   claimDue: `
     update on_call_escalations set lease_until = $2::timestamptz, version = version + 1, updated_at = now()
      where id in (
@@ -519,6 +523,10 @@ export function createPgOnCallStore(
         limit,
       ]);
       return rows.map(escalationFromRow);
+    },
+    async hasActive() {
+      const { rows } = await query(SQL.hasActive);
+      return rows.length > 0;
     },
     async updateEscalation(id, version, patch) {
       const { rows } = await query(SQL.update, updateParams(id, version, patch, false));

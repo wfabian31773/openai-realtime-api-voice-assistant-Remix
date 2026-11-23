@@ -2,10 +2,12 @@ import { describe, expect, it, vi } from "vitest";
 import {
   ATTEMPTS_PER_LEVEL,
   CLAIM_LEASE_MS,
+  DRAIN_WINDOW_MS,
   LEVEL_RETRY_DEADLINE_MS,
   RETRY_GAP_MS,
   RING_GUARD_MS,
   STALE_ESCALATION_MS,
+  SWITCHED_OFF_REASON,
   TICK_BUDGET_MS,
   MAX_LATE_TICKS,
   LATE_TICK_FORGET_MS,
@@ -21,7 +23,7 @@ import { FINAL_DIRECTOR, IE_DIRECTOR, provider, syntheticRotation } from "./test
 import { planAt, syntheticTestPlan } from "./routing";
 import type { OnCallConfig } from "./config";
 import { levelLabel, type ChainPlan } from "./rotation";
-import type { RoutingFacts } from "./store";
+import { ABSENT_RECHECK_MS, type RoutingFacts } from "./store";
 import {
   NO_TEXT_PARAM,
   ON_CALL_ACK_PATH,
@@ -2402,5 +2404,261 @@ describe("a key press after the chain ended with nobody taking the patient (revi
     const cur = h.escalation();
     await h.store.closeEscalation(cur.id, cur.version, { status: "exhausted", nextAt: null });
     expect(await h.runner.onProviderAck(call.id, "1")).toBe("too_late");
+  });
+});
+
+describe("the rotation switched off while a chain was open (review of #514, round 15)", () => {
+  /** A runner on the same store as `h` that only finishes the chains left open. */
+  function drainerFor(h: ReturnType<typeof harness>) {
+    const sendSms = vi.fn(async () => {
+      throw new Error("a draining runner sends nothing");
+    });
+    const placeCall = vi.fn(async () => {
+      throw new Error("a draining runner calls nobody");
+    });
+    const log = vi.fn();
+    const runner = createOnCallRunner({
+      store: h.store,
+      config: { mode: "off", testPhones: [], callerId: LIVE.callerId, requireKept: false },
+      host: "voice.example.test",
+      sendSms,
+      placeCall,
+      notifyUrgent: h.notifyUrgent,
+      endCall: h.endCall,
+      now: h.now,
+      log,
+      draining: true,
+    });
+    const lines = () => log.mock.calls.map((c) => String(c[0]));
+    return { runner, sendSms, placeCall, log, lines };
+  }
+  const stopped = (lines: string[]) => lines.filter((l) => /the drain stops/.test(l));
+
+  it("closes a chain that comes due instead of ringing it, and tells the urgent number once", async () => {
+    const h = harness();
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    const d = drainerFor(h);
+    h.at(esc!.nextAt!);
+    await d.runner.tick();
+    expect(d.sendSms).not.toHaveBeenCalled();
+    expect(d.placeCall).not.toHaveBeenCalled();
+    expect(h.escalation()).toMatchObject({ status: "cancelled", nextAt: null, details: null, callerNumber: null });
+    expect(h.urgent).toHaveLength(1);
+    expect(h.urgent[0]).toContain(`THE ON-CALL ESCALATION STOPPED — ${SWITCHED_OFF_REASON}`);
+    expect(h.urgent[0]).toContain(DETAILS.reason);
+    expect(h.urgentModes).toEqual(["live"]);
+    await d.runner.tick();
+    expect(h.urgent).toHaveLength(1);
+  });
+
+  it("marks a test chain's switch-off text as a test", async () => {
+    const h = harness({ config: TEST });
+    const esc = await h.runner.afterInCallTransfer(inCall(syntheticTestPlan(TEST), "no_answer", { mode: "test" }));
+    const d = drainerFor(h);
+    h.at(esc!.nextAt!);
+    await d.runner.tick();
+    expect(h.urgent[0]).toContain(`[TEST MODE] THE ON-CALL ESCALATION STOPPED — ${SWITCHED_OFF_REASON}`);
+    expect(h.urgentModes).toEqual(["test"]);
+  });
+
+  it("ends a call's attempt on its status and closes the chain instead of ringing the next level", async () => {
+    const h = harness();
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    const id = h.lastCallAttempt().id;
+    const d = drainerFor(h);
+    await d.runner.onProviderStatus(id, "no-answer");
+    expect(h.store.attempts.get(id)?.outcome).toBe("no_answer");
+    expect(h.escalation()).toMatchObject({ status: "cancelled", levelIndex: 0 });
+    expect(h.urgent).toHaveLength(1);
+    expect(h.urgent[0]).toContain(SWITCHED_OFF_REASON);
+    h.advance(RETRY_GAP_MS);
+    await d.runner.tick();
+    expect(d.placeCall).not.toHaveBeenCalled();
+    expect(h.calls).toHaveLength(1);
+  });
+
+  it("closes the chain instead of the level's second call", async () => {
+    const h = harness();
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    await h.runner.onProviderStatus(h.lastCallAttempt().id, "no-answer");
+    await h.runner.tick(); // the region director's first call
+    expect(h.escalation()).toMatchObject({ levelIndex: 1, attemptNo: 1, phase: "ringing" });
+    const d = drainerFor(h);
+    await d.runner.onProviderStatus(h.lastCallAttempt().id, "no-answer");
+    expect(h.escalation()).toMatchObject({ status: "cancelled", levelIndex: 1, attemptNo: 1 });
+    expect(h.urgent).toHaveLength(1);
+    expect(h.urgent[0]).toContain(SWITCHED_OFF_REASON);
+  });
+
+  it("still ends the last call of the last level as nobody took it", async () => {
+    const h = harness({ start: SD_WEEK_NIGHT });
+    const plan = planAt(SD_WEEK_NIGHT, syntheticRotation());
+    const esc = await h.runner.afterInCallTransfer(inCall(plan, "no_answer", {}, SD_WEEK_NIGHT));
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    await h.runner.onProviderStatus(h.lastCallAttempt().id, "no-answer");
+    await h.runner.tick();
+    await h.runner.onProviderStatus(h.lastCallAttempt().id, "no-answer");
+    h.advance(RETRY_GAP_MS);
+    await h.runner.tick();
+    expect(h.escalation()).toMatchObject({ levelIndex: 1, attemptNo: 2, phase: "ringing" });
+    const d = drainerFor(h);
+    await d.runner.onProviderStatus(h.lastCallAttempt().id, "no-answer");
+    expect(h.escalation()).toMatchObject({ status: "exhausted" });
+    expect(h.urgent).toHaveLength(1);
+    expect(h.urgent[0]).toMatch(/NOBODY TOOK THIS URGENT CALL/);
+    expect(h.urgent[0]).not.toContain(SWITCHED_OFF_REASON);
+  });
+
+  it("lets a key press on the open chain take the patient", async () => {
+    const h = harness();
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    const id = h.lastCallAttempt().id;
+    const d = drainerFor(h);
+    expect(await d.runner.onProviderAck(id, "1")).toBe("accepted");
+    expect(h.store.attempts.get(id)?.outcome).toBe("accepted");
+    expect(h.escalation()).toMatchObject({ status: "accepted", acceptedAttemptId: id });
+    expect(h.urgent).toHaveLength(0);
+    await d.runner.tick();
+    expect(d.placeCall).not.toHaveBeenCalled();
+  });
+
+  it("hangs up a call whose status never came back, and closes the chain", async () => {
+    const h = harness();
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    h.at(esc!.nextAt!);
+    await h.runner.tick();
+    const call = h.lastCallAttempt();
+    const d = drainerFor(h);
+    h.advance(RING_GUARD_MS);
+    await d.runner.tick();
+    expect(h.store.attempts.get(call.id)?.outcome).toBe("no_status");
+    expect(h.hungUp).toEqual([call.providerCallSid]);
+    expect(h.escalation()).toMatchObject({ status: "cancelled" });
+    expect(h.urgent).toHaveLength(1);
+    expect(d.placeCall).not.toHaveBeenCalled();
+  });
+
+  it("opens no chain", async () => {
+    const h = harness();
+    const d = drainerFor(h);
+    expect(await d.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"))).toBeNull();
+    expect(h.store.escalations.size).toBe(0);
+    expect(h.store.attempts.size).toBe(0);
+  });
+
+  it("stops for good once no chain is open", async () => {
+    const h = harness();
+    const d = drainerFor(h);
+    const available = vi.spyOn(h.store, "available");
+    await d.runner.tick();
+    expect(stopped(d.lines())).toEqual(["[ON-CALL] the rotation is off: no chain is still open; the drain stops"]);
+    await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    h.advance(10 * 60_000);
+    await d.runner.tick();
+    expect(available).toHaveBeenCalledTimes(1);
+    expect(h.escalation()).toMatchObject({ status: "active" });
+  });
+
+  it("keeps ticking while a chain is open, and stops once it closes", async () => {
+    const h = harness();
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    const d = drainerFor(h);
+    await d.runner.tick(); // not due yet
+    expect(stopped(d.lines())).toEqual([]);
+    expect(h.escalation()).toMatchObject({ status: "active" });
+    h.at(esc!.nextAt!);
+    await d.runner.tick();
+    expect(h.escalation()).toMatchObject({ status: "cancelled" });
+    expect(stopped(d.lines())).toEqual([]);
+    await d.runner.tick();
+    expect(stopped(d.lines())).toEqual(["[ON-CALL] the rotation is off: no chain is still open; the drain stops"]);
+  });
+
+  it("does not stop on one answer that the tables are not there, only past the store's re-check", async () => {
+    const h = harness();
+    const d = drainerFor(h);
+    h.store.tablesPresent = false;
+    await d.runner.tick();
+    expect(stopped(d.lines())).toEqual([]);
+    h.advance(ABSENT_RECHECK_MS);
+    await d.runner.tick();
+    expect(stopped(d.lines())).toEqual([]);
+    h.advance(1);
+    await d.runner.tick();
+    expect(stopped(d.lines())).toEqual([
+      "[ON-CALL] the rotation is off: the on-call tables are not on the Hub, so no chain can be open; the drain stops",
+    ]);
+  });
+
+  it("starts the re-check over when the tables answer in between", async () => {
+    const h = harness();
+    const esc = await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    const d = drainerFor(h);
+    h.store.tablesPresent = false;
+    await d.runner.tick();
+    h.advance(ABSENT_RECHECK_MS - 60_000);
+    h.store.tablesPresent = true;
+    await d.runner.tick(); // a chain is open, and not yet due
+    h.store.tablesPresent = false;
+    h.advance(2 * 60_000);
+    await d.runner.tick();
+    expect(stopped(d.lines())).toEqual([]);
+    h.store.tablesPresent = true;
+    h.at(esc!.nextAt!.getTime() > h.now().getTime() ? esc!.nextAt! : h.now());
+    await d.runner.tick();
+    expect(h.escalation()).toMatchObject({ status: "cancelled" });
+  });
+
+  it("stops after the drain window with a chain still open that nothing would move", async () => {
+    const h = harness();
+    await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    // A chain no claim can reach.
+    h.store.escalations.get(h.escalation().id)!.nextAt = null;
+    const d = drainerFor(h);
+    await d.runner.tick();
+    h.advance(DRAIN_WINDOW_MS);
+    await d.runner.tick();
+    expect(stopped(d.lines())).toEqual([]);
+    h.advance(1);
+    await d.runner.tick();
+    expect(stopped(d.lines())).toEqual([
+      "[ON-CALL] the rotation is off: a chain is still open after the drain window; nothing left would move it; the drain stops",
+    ]);
+  });
+
+  it("measures the drain window from its first tick", async () => {
+    const h = harness();
+    await h.runner.afterInCallTransfer(inCall(wedPlan(), "no_answer"));
+    h.store.escalations.get(h.escalation().id)!.nextAt = null;
+    const d = drainerFor(h);
+    h.advance(DRAIN_WINDOW_MS + 60_000);
+    await d.runner.tick();
+    expect(stopped(d.lines())).toEqual([]);
+  });
+
+  it("clears its timer when it stops, and does not start again", async () => {
+    vi.useFakeTimers();
+    try {
+      const h = harness();
+      const d = drainerFor(h);
+      const available = vi.spyOn(h.store, "available");
+      d.runner.start();
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(available).toHaveBeenCalledTimes(1);
+      expect(stopped(d.lines())).toHaveLength(1);
+      await vi.advanceTimersByTimeAsync(60_000);
+      d.runner.start();
+      await vi.advanceTimersByTimeAsync(60_000);
+      expect(available).toHaveBeenCalledTimes(1);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

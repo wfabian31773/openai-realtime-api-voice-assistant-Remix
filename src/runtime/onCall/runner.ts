@@ -33,6 +33,7 @@ import { preferredCallbackNumber } from "../../services/handoffPolicy";
 import { buildUrgentTransferSms, urgentAlertTime } from "../../services/urgentTransferAlert";
 import { NO_TEXT_PARAM, ON_CALL_ACK_PATH, ON_CALL_STATUS_PATH, providerCallTwiml, type AckReply } from "./providerCall";
 import type { OnCallConfig } from "./config";
+import { ABSENT_RECHECK_MS } from "./store";
 import { levelLabel, noNumberNote, type ChainLevel, type ChainPlan } from "./rotation";
 import type {
   AttemptOutcome,
@@ -96,6 +97,14 @@ export const ATTEMPTS_PER_LEVEL = 2;
  * instead.
  */
 export const STALE_ESCALATION_MS = 2 * 3_600_000;
+/**
+ * How long a draining runner (the rotation switched off) keeps ticking at
+ * most: past this every chain it could finish is stale, and one that is still
+ * active has nothing left that would move it.
+ */
+export const DRAIN_WINDOW_MS = STALE_ESCALATION_MS + RING_GUARD_MS + 10 * 60_000;
+/** What the urgent number is told when a draining runner stops a chain. */
+export const SWITCHED_OFF_REASON = "the on-call rotation was switched off while it was running";
 
 const PRESS_A_KEY =
   "Press any key on the call we are placing to you now to take this patient (that stops the escalation), then call the patient back.";
@@ -168,9 +177,21 @@ export interface OnCallRunnerDeps {
   tickBudgetMs?: number;
   /** For tests: how long a late tick counts. LATE_TICK_FORGET_MS. */
   lateTickForgetMs?: number;
+  /**
+   * The rotation is switched off and this runner only finishes the chains
+   * still open from before (review of #514, round 15). It opens no chain and
+   * rings or texts no provider: a key press on one of the chain's calls still
+   * takes the patient, a call's status still ends its attempt, and a chain
+   * that would ring its next level is closed instead, with one text to the
+   * urgent number saying nobody else will be called. Its timer stops once no
+   * chain is open, or after DRAIN_WINDOW_MS.
+   */
+  draining?: boolean;
 }
 
 export interface OnCallRunner {
+  /** True for the switched-off runner that only finishes chains left open. */
+  readonly draining?: boolean;
   afterInCallTransfer(r: InCallTransferResult): Promise<EscalationRow | null>;
   tick(): Promise<void>;
   onProviderAck(attemptId: number, digits: string): Promise<AckReply>;
@@ -282,6 +303,13 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
   const log = deps.log ?? ((line: string) => console.log(line));
   let running = false;
   let timer: NodeJS.Timeout | null = null;
+  // A draining runner: when its timer first started, and whether it has said it stopped.
+  let drainSince: number | null = null;
+  let drainDone = false;
+  // When a draining runner first found the tables unavailable. One answer is
+  // not taken as final: a Hub error at that moment reads the same as tables
+  // that are not there, so the drain waits for the store's own re-check.
+  let drainUnavailableSince: number | null = null;
   // The ticks still waiting past their budget, each until its work settles or
   // LATE_TICK_FORGET_MS passes, whichever is first.
   const lateTicks = new Set<symbol>();
@@ -390,6 +418,18 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
     }
   }
 
+  /**
+   * Close a chain a draining runner would otherwise ring on: cancelled, with
+   * one text to the urgent number. False when another move got there first.
+   */
+  async function closeSwitchedOff(e: EscalationRow): Promise<boolean> {
+    const closed = await store.closeEscalation(e.id, e.version, { status: "cancelled", nextAt: null });
+    if (!closed) return false;
+    log(`[ON-CALL] ${e.callSid}: the rotation is off; closed at level ${e.levelIndex}, nobody else is called`);
+    await notifyQuietly(textFor(e, stoppedNote(e, SWITCHED_OFF_REASON)), e.callSid, e.mode, e.plan);
+    return true;
+  }
+
   /** Hang up one of our calls; a failure is logged, never thrown. */
   async function hangUp(providerCallSid: string | null, callSid: string) {
     if (!providerCallSid) return;
@@ -481,7 +521,11 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
         return;
       }
       const t = now().getTime();
-      if (retryThisLevel && attemptNo < ATTEMPTS_PER_LEVEL) {
+      const retry = retryThisLevel && attemptNo < ATTEMPTS_PER_LEVEL;
+      if (deps.draining && (retry || levelIndex + 1 < e.plan.levels.length)) {
+        // The rotation is off: nobody else is rung, the urgent number is told.
+        if (await closeSwitchedOff(e)) return;
+      } else if (retry) {
         const deadline = e.levelStartedAt.getTime() + LEVEL_RETRY_DEADLINE_MS;
         const next = Math.max(t, Math.min(t + RETRY_GAP_MS, deadline));
         const patch: EscalationPatch = { attemptNo: attemptNo + 1, phase: "due", nextAt: new Date(next), releaseLease: true };
@@ -530,6 +574,10 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
     const taken = await acceptedAttempt(row);
     if (taken) {
       await closeAsTaken(row.id, taken);
+      return;
+    }
+    if (deps.draining) {
+      await closeSwitchedOff(row);
       return;
     }
     if (now().getTime() - row.createdAt.getTime() > STALE_ESCALATION_MS) {
@@ -793,8 +841,21 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
     else await ring(row);
   }
 
+  /** A draining runner has nothing left to finish: its timer stops for good. */
+  function endDrain(why: string) {
+    if (drainDone) return;
+    drainDone = true;
+    if (timer) clearInterval(timer);
+    timer = null;
+    log(`[ON-CALL] the rotation is off: ${why}; the drain stops`);
+  }
+
   const runner: OnCallRunner = {
+    draining: deps.draining === true,
     async afterInCallTransfer(r) {
+      // A runner that only finishes old chains opens none (the wiring gives
+      // the transfer no runner then; this is the belt to that).
+      if (deps.draining) return null;
       if (r.plan.levels.length === 0) return null;
       const first = r.plan.levels[0];
       const accepted = r.warm.outcome === "accepted";
@@ -958,7 +1019,10 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
     },
 
     async tick() {
-      if (running) return;
+      if (running || drainDone) return;
+      // The drain window runs from the first tick, whether the timer or a
+      // caller started it.
+      if (deps.draining && drainSince === null) drainSince = now().getTime();
       if (lateTicks.size >= MAX_LATE_TICKS) {
         if (!pauseLogged) {
           pauseLogged = true;
@@ -973,7 +1037,27 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
       // Each claimed row is stepped on its own, side by side: a row whose text
       // or call never answers does not hold the rows claimed with it.
       const work = (async () => {
-        if (!(await store.available())) return;
+        if (!(await store.available())) {
+          if (deps.draining) {
+            const t = now().getTime();
+            if (drainUnavailableSince === null) drainUnavailableSince = t;
+            else if (t - drainUnavailableSince > ABSENT_RECHECK_MS) {
+              endDrain("the on-call tables are not on the Hub, so no chain can be open");
+            }
+          }
+          return;
+        }
+        drainUnavailableSince = null;
+        if (deps.draining) {
+          if (!(await store.hasActive())) {
+            endDrain("no chain is still open");
+            return;
+          }
+          if (drainSince !== null && now().getTime() - drainSince > DRAIN_WINDOW_MS) {
+            endDrain("a chain is still open after the drain window; nothing left would move it");
+            return;
+          }
+        }
         const rows = await store.claimDue(now(), CLAIM_LEASE_MS, CLAIM_LIMIT);
         await Promise.allSettled(
           rows.map(async (row) => {
@@ -1104,7 +1188,7 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
     },
 
     start() {
-      if (timer) return;
+      if (timer || drainDone) return;
       timer = setInterval(() => void runner.tick(), TICK_MS);
       timer.unref?.();
     },

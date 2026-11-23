@@ -65,6 +65,19 @@ export const PROVIDER_ACK_FAILED_NO_TEXT_LINE =
   "We could not record that, and the text with the patient's details did not reach you. We will keep trying to reach a provider for this patient. Goodbye.";
 
 /**
+ * The ack could not be recorded while the rotation is switched off. The
+ * runner that is left only finishes open chains and calls no other provider,
+ * so "we will keep trying" would be false (review of #514, round 15).
+ */
+export const PROVIDER_ACK_FAILED_STOPPED_LINE =
+  "We could not record that, and we are no longer calling other providers for this patient. " +
+  "If you can, please call the patient from the number in the text message. Goodbye.";
+/** The same, on a call whose details text did not reach the provider. */
+export const PROVIDER_ACK_FAILED_STOPPED_NO_TEXT_LINE =
+  "We could not record that, and the text with the patient's details did not reach you. " +
+  "We are no longer calling other providers for this patient. Goodbye.";
+
+/**
  * The query flag on the ack URL that says the details text did not reach this
  * number when the call was placed. The URL is signed, so it cannot be forged,
  * and the ack webhook reads it even when the store cannot be reached.
@@ -208,6 +221,8 @@ function gate(req: WebhookRequest, env: Record<string, string | undefined>): Web
 export interface ProviderCallWebhookDeps {
   env: Record<string, string | undefined>;
   runner: {
+    /** The switched-off runner: a failed ack says nobody else is being called. */
+    readonly draining?: boolean;
     onProviderAck(attemptId: number, digits: string): Promise<AckReply>;
     onProviderStatus(attemptId: number, callStatus: string): Promise<void>;
   };
@@ -230,7 +245,16 @@ export async function handleOnCallAck(req: WebhookRequest, deps: ProviderCallWeb
     // A call placed after every text to this number failed carries
     // `texted=0` in its signed URL, so this line is right even when the store
     // is what failed (review of #514, round 12).
-    const line = textedFlagFrom(req.originalUrl) === false ? PROVIDER_ACK_FAILED_NO_TEXT_LINE : PROVIDER_ACK_FAILED_LINE;
+    // A draining runner (the rotation switched off) calls nobody else, so its
+    // line says that instead of promising to keep trying.
+    const noText = textedFlagFrom(req.originalUrl) === false;
+    const line = deps.runner.draining
+      ? noText
+        ? PROVIDER_ACK_FAILED_STOPPED_NO_TEXT_LINE
+        : PROVIDER_ACK_FAILED_STOPPED_LINE
+      : noText
+        ? PROVIDER_ACK_FAILED_NO_TEXT_LINE
+        : PROVIDER_ACK_FAILED_LINE;
     return twimlResponse(200, `${say(line)}<Hangup/>`);
   }
 }

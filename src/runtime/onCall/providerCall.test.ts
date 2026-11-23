@@ -8,6 +8,8 @@ import {
   PROVIDER_ACCEPTED_NO_NUMBER_LINE,
   PROVIDER_ACK_FAILED_LINE,
   PROVIDER_ACK_FAILED_NO_TEXT_LINE,
+  PROVIDER_ACK_FAILED_STOPPED_LINE,
+  PROVIDER_ACK_FAILED_STOPPED_NO_TEXT_LINE,
   PROVIDER_ALREADY_TAKEN_LINE,
   PROVIDER_CALL_OPENING,
   PROVIDER_CALL_OPENING_NO_TEXT,
@@ -201,6 +203,42 @@ describe("a call whose text did not send (review of #514, round 12)", () => {
     expect(PROVIDER_ACK_FAILED_LINE.indexOf("keep trying")).toBeLessThan(
       PROVIDER_ACK_FAILED_LINE.indexOf("please call the patient"),
     );
+  });
+
+  describe("when the rotation is switched off (review of #514, round 15)", () => {
+    function draining(answer: AckReply | Error) {
+      const { d, ...rest } = deps(answer);
+      return { d: { ...d, runner: { ...d.runner, draining: true } }, ...rest };
+    }
+
+    it("does not promise to keep trying when a key press cannot be recorded", async () => {
+      const { d } = draining(new Error("hub down"));
+      const out = await handleOnCallAck(req(ON_CALL_ACK_PATH, "?attempt=42", { Digits: "1" }), d);
+      expect(out.body).toContain(PROVIDER_ACK_FAILED_STOPPED_LINE);
+      expect(out.body).not.toContain("keep trying");
+    });
+
+    it("says the text did not reach them on a call with no text", async () => {
+      const { d } = draining(new Error("hub down"));
+      const out = await handleOnCallAck(req(ON_CALL_ACK_PATH, `?attempt=42&${NO_TEXT_PARAM}=0`, { Digits: "1" }), d);
+      expect(out.body.replace(/&apos;/g, "'")).toContain(PROVIDER_ACK_FAILED_STOPPED_NO_TEXT_LINE);
+      expect(out.body).not.toContain("the number in the text message");
+      expect(out.body).not.toContain("keep trying");
+    });
+
+    it("answers a key press that was recorded exactly as before", async () => {
+      const { d } = draining("accepted");
+      const out = await handleOnCallAck(req(ON_CALL_ACK_PATH, "?attempt=42", { Digits: "1" }), d);
+      expect(out.body).toContain(PROVIDER_ACCEPTED_LINE);
+    });
+
+    it("says nobody else is being called, and asks them to call if they can", () => {
+      for (const line of [PROVIDER_ACK_FAILED_STOPPED_LINE, PROVIDER_ACK_FAILED_STOPPED_NO_TEXT_LINE]) {
+        expect(line).toMatch(/no longer calling other providers for this patient/);
+        expect(line).not.toMatch(/keep trying|patient is yours|has been taken/);
+      }
+      expect(PROVIDER_ACK_FAILED_STOPPED_LINE).toMatch(/please call the patient from the number in the text message/);
+    });
   });
 
   it("refuses a request whose no-text flag was removed after signing", async () => {

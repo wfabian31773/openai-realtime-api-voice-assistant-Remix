@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { onCallHealth, readOnCallConfig, testPhoneFor } from "./config";
+import { onCallHealth, readOnCallConfig, rotationCallerId, testPhoneFor } from "./config";
 
 const BASE = { TWILIO_PHONE_NUMBER: "+15550000001" };
 
@@ -155,5 +155,38 @@ describe("test numbers and health", () => {
     const h = onCallHealth(c);
     expect(h).toEqual({ mode: "test", testPhones: 1, requireKept: false });
     expect(JSON.stringify(h)).not.toMatch(/555/);
+  });
+});
+
+describe("the caller ID a switched-off rotation finishes its chains from", () => {
+  it("is ON_CALL_CALLER_ID whatever the mode", () => {
+    for (const mode of [undefined, "off", "live", "nonsense"]) {
+      expect(
+        rotationCallerId({ ON_CALL_ROTATION_MODE: mode, ON_CALL_CALLER_ID: "(555) 000-1111", TWILIO_PHONE_NUMBER: "+15550000000" }),
+      ).toBe("+15550001111");
+    }
+  });
+
+  it("falls back to TWILIO_PHONE_NUMBER when ON_CALL_CALLER_ID is unset", () => {
+    expect(rotationCallerId({ TWILIO_PHONE_NUMBER: "+15550000000" })).toBe("+15550000000");
+    expect(rotationCallerId({ ON_CALL_CALLER_ID: "  ", TWILIO_PHONE_NUMBER: "+15550000000" })).toBe("+15550000000");
+  });
+
+  it("is none when ON_CALL_CALLER_ID is mistyped, rather than another number", () => {
+    expect(rotationCallerId({ ON_CALL_CALLER_ID: "on-call", TWILIO_PHONE_NUMBER: "+15550000000" })).toBeNull();
+  });
+
+  it("is never the Wayne Operator Line", () => {
+    expect(rotationCallerId({ TWILIO_PHONE_NUMBER: "+15550009999", OPERATOR_LINE_FROM_NUMBER: "(555) 000-9999" })).toBeNull();
+    expect(rotationCallerId({ ON_CALL_CALLER_ID: "+15550009999", OPERATOR_LINE_FROM_NUMBER: "+15550009999" })).toBeNull();
+  });
+
+  it("is none with no number at all", () => {
+    expect(rotationCallerId({})).toBeNull();
+  });
+
+  it("agrees with the running config's caller ID", () => {
+    const env = { ON_CALL_ROTATION_MODE: "live", ON_CALL_CALLER_ID: "+15550001111" };
+    expect(rotationCallerId(env)).toBe(readOnCallConfig(env).callerId);
   });
 });

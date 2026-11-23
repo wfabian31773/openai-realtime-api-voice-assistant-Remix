@@ -51,8 +51,15 @@ import { runSetupFailureFloor, type SetupFailureContext } from "./setupFailureFl
 import type { VoiceCallRecord } from "./mediaStreamBridge";
 import { buildOnCallWiring, type OnCallWiring } from "./onCall/wiring";
 import { createFakeOnCallStore } from "./onCall/store.fake";
+import type { OnCallStore } from "./onCall/store";
 import { syntheticRotation } from "./onCall/testRotation";
-import { ON_CALL_ACK_PATH, ON_CALL_STATUS_PATH, PROVIDER_ACCEPTED_LINE, PROVIDER_CLOSED_LINE } from "./onCall/providerCall";
+import {
+  ON_CALL_ACK_PATH,
+  ON_CALL_STATUS_PATH,
+  PROVIDER_ACCEPTED_LINE,
+  PROVIDER_ACK_FAILED_STOPPED_LINE,
+  PROVIDER_CLOSED_LINE,
+} from "./onCall/providerCall";
 import type { OnCallRunner } from "./onCall/runner";
 
 // v77: resolveLane binds the PIPELINE's own tools (set_spoken_language) through
@@ -299,10 +306,12 @@ async function harness(
     liveCalls?: LiveCallRegistry;
     /** The after-hours on-call chain (src/runtime/onCall/). */
     onCall?: OnCallWiring;
+    /** Mount on an app another harness already mounted on (a second mount, round 15). */
+    app?: express.Express;
   } = {},
 ): Promise<Harness> {
-  const app = express();
-  app.use(express.urlencoded({ extended: true }));
+  const app = over.app ?? express();
+  if (!over.app) app.use(express.urlencoded({ extended: true }));
   const server = http.createServer(app);
   const registry = new CallSessionRegistry();
   const transports: FakeGrokTransport[] = [];
@@ -3522,11 +3531,54 @@ describe("the after-hours on-call chain at the runtime (src/runtime/onCall/)", (
     expect(second.stopped).toBe(1);
   });
 
-  it("answers a provider's key press with the closed line when the chain is off", async () => {
-    const h = await harness();
+  /** The wiring a switched-off deployment builds, on a store this test holds. */
+  function offWiring(store: OnCallStore = createFakeOnCallStore(syntheticRotation(), () => new Date("2026-12-03T06:30:00Z"))) {
+    return buildOnCallWiring({}, ON_CALL_HOST, {
+      store,
+      twilio: async () => {
+        throw new Error("no Twilio in this test");
+      },
+      consoleQuery: null,
+      log: () => {},
+    });
+  }
+
+  it("answers a provider's key press on a call it has no record of with the closed line when the chain is off", async () => {
+    const wiring = offWiring();
+    expect(wiring.runner!.draining).toBe(true);
+    const h = await harness({ onCall: wiring });
     const out = await post(h, `${ON_CALL_ACK_PATH}?attempt=1`, { Digits: "1" });
     expect(out.status).toBe(200);
     expect(out.text).toContain(PROVIDER_CLOSED_LINE);
+  });
+
+  it("never tells a provider it will keep trying when the chain is off and their key press cannot be recorded", async () => {
+    const store = createFakeOnCallStore(syntheticRotation(), () => new Date("2026-12-03T06:30:00Z"));
+    store.getAttempt = async () => {
+      throw new Error("the Hub is not answering");
+    };
+    const h = await harness({ onCall: offWiring(store) });
+    const out = await post(h, `${ON_CALL_ACK_PATH}?attempt=1`, { Digits: "1" });
+    expect(out.status).toBe(200);
+    expect(out.text).toContain(PROVIDER_ACK_FAILED_STOPPED_LINE);
+    expect(out.text).not.toMatch(/keep trying/);
+  });
+
+  it("answers a second mount's key presses with the second mount's runner, on the same app", async () => {
+    const app = express();
+    app.use(express.urlencoded({ extended: true }));
+    const first = recordingRunner("declined");
+    const second = recordingRunner("accepted");
+    const h1 = await harness({ app, onCall: { ...offWiring(), runner: first } });
+    const h2 = await harness({ app, onCall: { ...offWiring(), runner: second } });
+    const out = await post(h2, `${ON_CALL_ACK_PATH}?attempt=7`, { Digits: "1" });
+    expect(out.text).toContain(PROVIDER_ACCEPTED_LINE);
+    expect(second.acks).toEqual([[7, "1"]]);
+    expect(first.acks).toEqual([]);
+    // The route is registered once: the first server, on the same app, reads the same slot.
+    await post(h1, `${ON_CALL_ACK_PATH}?attempt=8`, { Digits: "1" });
+    expect(second.acks).toEqual([[7, "1"], [8, "1"]]);
+    expect(first.acks).toEqual([]);
   });
 
   it("refuses a forged key press", async () => {
@@ -3544,7 +3596,7 @@ describe("the after-hours on-call chain at the runtime (src/runtime/onCall/)", (
   });
 
   it("answers the provider call's status callback with 200 when the chain is off", async () => {
-    const h = await harness();
+    const h = await harness({ onCall: offWiring() });
     const out = await post(h, `${ON_CALL_STATUS_PATH}?attempt=1`, { CallStatus: "completed" });
     expect(out.status).toBe(200);
   });

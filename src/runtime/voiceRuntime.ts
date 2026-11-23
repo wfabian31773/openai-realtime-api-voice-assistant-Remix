@@ -45,7 +45,13 @@ import {
 } from "./mediaStreamBridge";
 import { urgentAlertStatus } from "./urgentTransferAlerts";
 import { buildOnCallWiring, type OnCallWiring } from "./onCall/wiring";
-import { ON_CALL_ACK_PATH, ON_CALL_STATUS_PATH, handleOnCallAck, handleOnCallStatus } from "./onCall/providerCall";
+import {
+  ON_CALL_ACK_PATH,
+  ON_CALL_STATUS_PATH,
+  handleOnCallAck,
+  handleOnCallStatus,
+  type ProviderCallWebhookDeps,
+} from "./onCall/providerCall";
 import { CallSessionRegistry, type CallEntry } from "./sessionRegistry";
 import {
   GrokVoiceSession,
@@ -695,6 +701,18 @@ export function publicTransferDomain(
 /** The on-call runner the latest mount started (see `mountVoiceRuntime`). */
 let liveOnCallRunner: { stop(): void } | null = null;
 
+/**
+ * What an app's on-call webhooks answer with. The two routes are registered
+ * once per app and read this slot, so a second mount of the same app moves
+ * them to its runner; registering them again would leave Express answering
+ * with the first mount's, already stopped (review of #514, round 15).
+ */
+const onCallWebhookSlots = new WeakMap<object, ProviderCallWebhookDeps>();
+const CLOSED_ON_CALL_RUNNER: ProviderCallWebhookDeps["runner"] = {
+  onProviderAck: async () => "closed",
+  onProviderStatus: async () => {},
+};
+
 export function mountVoiceRuntime(
   app: Express,
   server: HttpServer,
@@ -846,7 +864,7 @@ export function mountVoiceRuntime(
     onCall: onCall.transfer ?? undefined,
   });
   console.log(
-    onCall.runner
+    onCall.transfer
       ? `[voice-runtime] on-call rotation ${onCall.config.mode.toUpperCase()}: urgent after-hours calls ring the week's on-call provider, then retry and escalate`
       : `[voice-runtime] on-call rotation off${onCall.health.disabledBecause ? ` (${onCall.health.disabledBecause})` : onCall.health.blockedBy ? ` (${onCall.health.blockedBy})` : ""} — urgent transfers ring the fixed on-call number as before`,
   );
@@ -903,18 +921,25 @@ export function mountVoiceRuntime(
   });
 
   // The calls the on-call chain places to providers: the key press and the
-  // call status. Mounted whether or not the chain is on, so a provider call
-  // still ringing when the chain is switched off hears that it is closed.
-  const onCallRunnerForWebhooks = onCall.runner ?? {
-    onProviderAck: async () => "closed" as const,
-    onProviderStatus: async () => {},
-  };
-  app.post(ON_CALL_ACK_PATH, async (req: Request, res: Response) => {
-    send(res, await handleOnCallAck(toWebhookRequest(req), { env, runner: onCallRunnerForWebhooks }));
-  });
-  app.post(ON_CALL_STATUS_PATH, async (req: Request, res: Response) => {
-    send(res, await handleOnCallStatus(toWebhookRequest(req), { env, runner: onCallRunnerForWebhooks }));
-  });
+  // call status. Mounted whether or not the chain is on: switched off, the
+  // wiring's draining runner still takes a key press and ends a ringing call's
+  // attempt on a chain that was open before (review of #514, round 15); only
+  // a wiring with no runner at all answers that the call is closed.
+  const onCallSlot: ProviderCallWebhookDeps = { env, runner: onCall.runner ?? CLOSED_ON_CALL_RUNNER };
+  const mountedSlot = onCallWebhookSlots.get(app);
+  if (mountedSlot) {
+    mountedSlot.env = onCallSlot.env;
+    mountedSlot.runner = onCallSlot.runner;
+  } else {
+    onCallWebhookSlots.set(app, onCallSlot);
+    // The slot is read at each request, so a later mount's runner answers.
+    app.post(ON_CALL_ACK_PATH, async (req: Request, res: Response) => {
+      send(res, await handleOnCallAck(toWebhookRequest(req), onCallSlot));
+    });
+    app.post(ON_CALL_STATUS_PATH, async (req: Request, res: Response) => {
+      send(res, await handleOnCallStatus(toWebhookRequest(req), onCallSlot));
+    });
+  }
 
   app.get("/voice/health", async (_req: Request, res: Response) => {
     const readiness = computeRuntimeReadiness(env);

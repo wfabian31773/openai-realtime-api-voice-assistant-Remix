@@ -80,17 +80,9 @@ export function readOnCallConfig(env: Env = process.env): OnCallConfig {
     return off("RUNTIME_TRANSFER_MODE=blind: the rotation needs the warm transfer on the after-hours line");
   }
 
-  // A caller ID the operator chose and mistyped is not replaced by another
-  // number: the rotation turns off and says why (review of #514, round 6).
-  if ((env.ON_CALL_CALLER_ID ?? "").trim() && !e164(env.ON_CALL_CALLER_ID)) {
-    return off("ON_CALL_CALLER_ID is not a phone number");
-  }
-  const callerId = e164(env.ON_CALL_CALLER_ID) ?? e164(env.TWILIO_PHONE_NUMBER);
-  if (!callerId) return off("no caller ID: set ON_CALL_CALLER_ID or TWILIO_PHONE_NUMBER");
-  const operator = e164(env.OPERATOR_LINE_FROM_NUMBER);
-  if (operator && operator === callerId) {
-    return off("the caller ID is the Wayne Operator Line, which is never used for provider calls");
-  }
+  const caller = callerIdFrom(env);
+  if (!caller.ok) return off(caller.why);
+  const callerId = caller.callerId;
 
   if (asked === "live") return { mode: "live", testPhones: [], callerId, requireKept };
 
@@ -103,6 +95,36 @@ export function readOnCallConfig(env: Env = process.env): OnCallConfig {
   // (review of #514, round 14).
   if (testPhones.includes(callerId)) return off("ON_CALL_TEST_PHONES holds the rotation's own caller ID");
   return { mode: "test", testPhones: testPhones as string[], callerId, requireKept };
+}
+
+/**
+ * The number the rotation's calls and texts come from: ON_CALL_CALLER_ID, or
+ * TWILIO_PHONE_NUMBER when that is unset, and never the Wayne Operator Line
+ * ("Never use the Wayne Operator Line number as caller ID for provider
+ * calls"). A caller ID the operator chose and mistyped is not replaced by
+ * another number (review of #514, round 6).
+ */
+function callerIdFrom(env: Env): { ok: true; callerId: string } | { ok: false; why: string } {
+  if ((env.ON_CALL_CALLER_ID ?? "").trim() && !e164(env.ON_CALL_CALLER_ID)) {
+    return { ok: false, why: "ON_CALL_CALLER_ID is not a phone number" };
+  }
+  const callerId = e164(env.ON_CALL_CALLER_ID) ?? e164(env.TWILIO_PHONE_NUMBER);
+  if (!callerId) return { ok: false, why: "no caller ID: set ON_CALL_CALLER_ID or TWILIO_PHONE_NUMBER" };
+  const operator = e164(env.OPERATOR_LINE_FROM_NUMBER);
+  if (operator && operator === callerId) {
+    return { ok: false, why: "the caller ID is the Wayne Operator Line, which is never used for provider calls" };
+  }
+  return { ok: true, callerId };
+}
+
+/**
+ * The rotation's caller ID by the same rule, whatever the mode: a runner that
+ * finishes the chains left open when the rotation was switched off still
+ * texts the urgent number from it. Null when the rule gives none.
+ */
+export function rotationCallerId(env: Env = process.env): string | null {
+  const caller = callerIdFrom(env);
+  return caller.ok ? caller.callerId : null;
 }
 
 /** The number level `index` rings in test mode. */

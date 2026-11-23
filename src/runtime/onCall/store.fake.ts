@@ -126,6 +126,10 @@ export function createFakeOnCallStore(rotation: RotationData, now: () => Date = 
       }
       return due.map(strip);
     },
+    async hasActive() {
+      for (const e of escalations.values()) if (e.status === "active") return true;
+      return false;
+    },
     async updateEscalation(id, version, patch) {
       return apply(id, version, patch, false);
     },
