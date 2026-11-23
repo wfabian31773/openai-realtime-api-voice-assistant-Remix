@@ -234,6 +234,7 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
         status: "accepted",
         acceptedBy: by.providerId,
         acceptedAt: by.endedAt ?? now(),
+        acceptedAttemptId: by.id,
         nextAt: null,
       });
       byThis = row !== null;
@@ -539,7 +540,11 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
       if (!a || a.kind !== "call") return "closed";
       const e = await store.getEscalation(a.escalationId);
       if (!e) return "closed";
-      if (e.status !== "active") return e.status === "accepted" ? "already_taken" : "closed";
+      if (e.status !== "active") {
+        if (e.status !== "accepted") return "closed";
+        // The same call's key press arriving twice is still the call that took it.
+        return e.acceptedAttemptId === a.id ? "accepted" : "already_taken";
+      }
 
       if (!digits) {
         // Picked up and pressed nothing: today's warm transfer reads that as
@@ -560,13 +565,15 @@ export function createOnCallRunner(deps: OnCallRunnerDeps): OnCallRunner {
       }
       const { row, byThis } = await closeAsTaken(e.id, by);
       if (row && row.status !== "accepted") return "closed";
-      if (row && !byThis && row.acceptedBy !== by.providerId) {
-        // Closed by someone else: by another provider's key press, or by a
-        // move that found theirs. The escalation row names who took the
-        // patient, and only that provider is told they have it. (A lower
-        // attempt id is not the winner: two key presses can each record
-        // `accepted` before either close lands, and the close that lands
-        // first is the one the row keeps.)
+      if (row && !byThis && row.acceptedAttemptId !== by.id) {
+        // Closed by someone else: by another call's key press, or by a move
+        // that found theirs. The escalation row names the call that took the
+        // patient, and only that call is told it has them. It names the CALL,
+        // not the provider: a test-mode chain's synthetic levels store no
+        // provider id, so two of them would both read null in accepted_by.
+        // (A lower attempt id is not the winner: two key presses can each
+        // record `accepted` before either close lands, and the close that
+        // lands first is the one the row keeps.)
         return "already_taken";
       }
       // Taken, whether or not the close won its race: the attempt says

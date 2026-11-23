@@ -166,13 +166,17 @@ describe("the SQL store", () => {
     const query = vi.fn<Query>(async () => ({ rows: [] }));
     const s = createPgOnCallStore(query, { log: () => {} });
     await s.updateEscalation(7, 3, { attemptNo: 3 });
-    await s.closeEscalation(7, 4, { status: "accepted", acceptedBy: 2, acceptedAt: AT });
+    await s.closeEscalation(7, 4, { status: "accepted", acceptedBy: 2, acceptedAt: AT, acceptedAttemptId: 31 });
     const [update, close] = query.mock.calls.map((c) => c[1] as unknown[]);
     expect(update[13]).toBe(false);
     expect(update[12]).toBe(false);
     expect(close[13]).toBe(true);
     expect(close[12]).toBe(true);
     expect(close.slice(9, 12)).toEqual([true, 2, AT.toISOString()]);
+    expect(close[14]).toBe(31);
+    expect(update[9]).toBe(false);
+    expect(update[14]).toBeNull();
+    expect(SQL.update).toMatch(/accepted_attempt_id = case when \$10::boolean then \$15::integer else accepted_attempt_id end/);
   });
 
   it("clears next_at only when the patch says so", async () => {
@@ -240,10 +244,11 @@ describe("the SQL store", () => {
       caller_number: null,
       accepted_by: null,
       accepted_at: null,
+      accepted_attempt_id: "12",
       version: "5",
       created_at: "2026-12-03T06:30:00Z",
     });
-    expect(e).toMatchObject({ id: 3, levelIndex: 1, version: 5, details: null, routing: { reason: "on_call" } });
+    expect(e).toMatchObject({ id: 3, levelIndex: 1, version: 5, details: null, acceptedAttemptId: 12, routing: { reason: "on_call" } });
     expect(e.nextAt).toEqual(new Date("2026-12-03T06:36:00Z"));
   });
 });

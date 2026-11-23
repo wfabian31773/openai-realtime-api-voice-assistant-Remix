@@ -105,6 +105,13 @@ export interface EscalationRow {
   callerNumber: string | null;
   acceptedBy: number | null;
   acceptedAt: Date | null;
+  /**
+   * The on_call_attempts row whose call was answered and took the patient.
+   * `acceptedBy` cannot say which call it was: a test-mode chain rings
+   * synthetic levels whose provider ids are not stored, so two levels can both
+   * read null there. The attempt id is the one fact that names the call.
+   */
+  acceptedAttemptId: number | null;
   version: number;
   createdAt: Date;
 }
@@ -169,6 +176,7 @@ export interface EscalationPatch {
   levelStartedAt?: Date;
   acceptedBy?: number | null;
   acceptedAt?: Date | null;
+  acceptedAttemptId?: number | null;
   /** Clear the lease (the runner is done with the row for now). */
   releaseLease?: boolean;
 }
@@ -280,6 +288,8 @@ export function escalationFromRow(r: any): EscalationRow {
     callerNumber: r.caller_number ?? null,
     acceptedBy: r.accepted_by === null || r.accepted_by === undefined ? null : Number(r.accepted_by),
     acceptedAt: date(r.accepted_at),
+    acceptedAttemptId:
+      r.accepted_attempt_id === null || r.accepted_attempt_id === undefined ? null : Number(r.accepted_attempt_id),
     version: Number(r.version),
     createdAt: date(r.created_at)!,
   };
@@ -341,6 +351,7 @@ export const SQL = {
       level_started_at = coalesce($9::timestamptz, level_started_at),
       accepted_by = case when $10::boolean then $11::integer else accepted_by end,
       accepted_at = case when $10::boolean then $12::timestamptz else accepted_at end,
+      accepted_attempt_id = case when $10::boolean then $15::integer else accepted_attempt_id end,
       lease_until = case when $13::boolean then null else lease_until end,
       details = case when $14::boolean then null else details end,
       caller_number = case when $14::boolean then null else caller_number end,
@@ -373,11 +384,12 @@ function updateParams(id: number, version: number, p: EscalationPatch, terminal:
     "nextAt" in p,
     p.nextAt ? p.nextAt.toISOString() : null,
     p.levelStartedAt ? p.levelStartedAt.toISOString() : null,
-    "acceptedBy" in p || "acceptedAt" in p,
+    "acceptedBy" in p || "acceptedAt" in p || "acceptedAttemptId" in p,
     p.acceptedBy ?? null,
     p.acceptedAt ? p.acceptedAt.toISOString() : null,
     Boolean(p.releaseLease),
     terminal,
+    p.acceptedAttemptId ?? null,
   ];
 }
 

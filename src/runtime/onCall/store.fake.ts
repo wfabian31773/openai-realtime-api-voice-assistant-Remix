@@ -43,9 +43,10 @@ export function createFakeOnCallStore(rotation: RotationData, now: () => Date = 
     if (p.phase !== undefined) e.phase = p.phase;
     if ("nextAt" in p) e.nextAt = p.nextAt ?? null;
     if (p.levelStartedAt) e.levelStartedAt = p.levelStartedAt;
-    if ("acceptedBy" in p || "acceptedAt" in p) {
+    if ("acceptedBy" in p || "acceptedAt" in p || "acceptedAttemptId" in p) {
       e.acceptedBy = p.acceptedBy ?? null;
       e.acceptedAt = p.acceptedAt ?? null;
+      e.acceptedAttemptId = p.acceptedAttemptId ?? null;
     }
     if (p.releaseLease || terminal) e.leaseUntil = null;
     if (terminal) {
@@ -87,6 +88,7 @@ export function createFakeOnCallStore(rotation: RotationData, now: () => Date = 
         callerNumber: n.callerNumber,
         acceptedBy: null,
         acceptedAt: null,
+        acceptedAttemptId: null,
         version: 0,
         createdAt: now(),
         leaseUntil: null,

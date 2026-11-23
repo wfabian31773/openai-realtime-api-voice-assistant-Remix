@@ -106,6 +106,11 @@ CREATE TABLE IF NOT EXISTS on_call_escalations (
   caller_number  TEXT,
   accepted_by    INTEGER REFERENCES on_call_providers(id),
   accepted_at    TIMESTAMPTZ,
+  -- The on_call_attempts row whose call took the patient. No foreign key:
+  -- on_call_attempts references this table, so the reference would be
+  -- circular. accepted_by alone cannot name the call, because a test-mode
+  -- chain's synthetic levels store no provider id.
+  accepted_attempt_id INTEGER,
   lease_until    TIMESTAMPTZ,
   version        INTEGER NOT NULL DEFAULT 0,
   created_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
