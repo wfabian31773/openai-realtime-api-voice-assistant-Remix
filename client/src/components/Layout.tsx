@@ -25,6 +25,7 @@ import {
   Target,
   Telescope,
   CalendarCheck,
+  PhoneCall,
 } from 'lucide-react'
 import { useState } from 'react'
 
@@ -47,6 +48,7 @@ const navigation = [
 ]
 
 const adminNavigation = [
+  { name: 'After-Hours On-Call', href: '/on-call', icon: PhoneCall, roles: ['admin'] },
   { name: 'Operations Monitor', href: '/operations', icon: Activity, roles: ['admin'] },
   { name: 'Twilio Config', href: '/twilio', icon: Settings2, roles: ['admin'] },
   { name: 'User Management', href: '/users', icon: Users, roles: ['admin', 'manager'] },

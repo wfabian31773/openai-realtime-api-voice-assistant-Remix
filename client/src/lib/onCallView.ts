@@ -1,0 +1,145 @@
+/**
+ * Pure helpers for the After-Hours On-Call page (/on-call). Every time on the
+ * page is shown in Pacific time and says so: the rotation is defined in
+ * Pacific (a week runs Tuesday 5:00 PM to the next Tuesday 8:00 AM PT).
+ */
+
+export const PACIFIC = 'America/Los_Angeles'
+
+const FULL = new Intl.DateTimeFormat('en-US', {
+  timeZone: PACIFIC,
+  weekday: 'short',
+  month: 'short',
+  day: 'numeric',
+  year: 'numeric',
+  hour: 'numeric',
+  minute: '2-digit',
+})
+
+const TIME = new Intl.DateTimeFormat('en-US', {
+  timeZone: PACIFIC,
+  hour: 'numeric',
+  minute: '2-digit',
+  second: '2-digit',
+})
+
+const DAY = new Intl.DateTimeFormat('en-US', { timeZone: PACIFIC, weekday: 'short', month: 'short', day: 'numeric', year: 'numeric' })
+
+/** "Fri, Dec 4, 2026, 10:00 PM PT", or a dash. */
+export function fmtPacific(iso: string | null | undefined): string {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  return Number.isNaN(d.getTime()) ? '—' : `${FULL.format(d)} PT`
+}
+
+/** "10:00:05 PM" (Pacific), for a timeline row inside one call. */
+export function fmtPacificTime(iso: string | null | undefined): string {
+  if (!iso) return '—'
+  const d = new Date(iso)
+  return Number.isNaN(d.getTime()) ? '—' : TIME.format(d)
+}
+
+/** A YYYY-MM-DD week start as "Tue, Dec 1, 2026". */
+export function fmtWeek(week: string): string {
+  return DAY.format(new Date(`${week}T20:00:00Z`))
+}
+
+/** The value a datetime-local input wants, in Pacific: "2026-12-04T22:00". */
+export function toPacificInput(d: Date): string {
+  const parts = new Intl.DateTimeFormat('en-US', {
+    timeZone: PACIFIC,
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hourCycle: 'h23',
+  }).formatToParts(d)
+  const g = (t: string) => parts.find((p) => p.type === t)?.value ?? '00'
+  return `${g('year')}-${g('month')}-${g('day')}T${g('hour')}:${g('minute')}`
+}
+
+/** "4d 3h 12m" until go-live; "live date passed" at zero. */
+export function countdown(ms: number): string {
+  if (ms <= 0) return 'go-live date passed'
+  const m = Math.floor(ms / 60_000)
+  const days = Math.floor(m / 1440)
+  const hours = Math.floor((m % 1440) / 60)
+  const mins = m % 60
+  return [days ? `${days}d` : null, days || hours ? `${hours}h` : null, `${mins}m`].filter(Boolean).join(' ')
+}
+
+/** "2m 05s" for a duration in seconds. */
+export function fmtSeconds(s: number | null | undefined): string {
+  if (s === null || s === undefined || Number.isNaN(s)) return '—'
+  const m = Math.floor(s / 60)
+  const r = Math.abs(s % 60)
+  return m ? `${m}m ${String(r).padStart(2, '0')}s` : `${r}s`
+}
+
+/** The server's refusal text, or a generic line. */
+export function apiError(e: unknown): string {
+  const any = e as { response?: { data?: { error?: string; message?: string } }; message?: string }
+  return any?.response?.data?.message ?? any?.response?.data?.error ?? any?.message ?? 'Something went wrong.'
+}
+
+export type BadgeVariant = 'default' | 'secondary' | 'destructive' | 'outline' | 'success' | 'warning' | 'info'
+
+export function chainStatusVariant(status: string | null | undefined): BadgeVariant {
+  switch (status) {
+    case 'accepted':
+      return 'success'
+    case 'active':
+      return 'info'
+    case 'exhausted':
+    case 'failed':
+      return 'destructive'
+    case 'cancelled':
+      return 'warning'
+    default:
+      return 'secondary'
+  }
+}
+
+export function timelineVariant(status: string | null | undefined): BadgeVariant {
+  switch (status) {
+    case 'ok':
+      return 'success'
+    case 'fail':
+      return 'destructive'
+    case 'warn':
+      return 'warning'
+    default:
+      return 'secondary'
+  }
+}
+
+export const SOURCE_LABELS: Record<string, string> = {
+  call_logs: 'call log',
+  transcript: 'transcript',
+  tool: 'agent tool',
+  call_events: 'call event',
+  escalation: 'on-call chain',
+  attempt: 'chain attempt',
+  ticket: 'ticket',
+  on_call_call_events: 'extra event',
+}
+
+export const WINDOW_LABELS: Record<string, string> = {
+  off_hours: 'After hours (on call)',
+  holiday_daytime: 'Holiday daytime (on call)',
+  weekday_daytime: 'Weekday daytime — NOT covered by the rotation (fixed number)',
+}
+
+export const ROLE_LABELS: Record<string, string> = {
+  on_call: 'On-call provider',
+  surgeon: 'Surgeon',
+  region_director: 'Region director',
+  final: 'Final director',
+}
+
+/** The tab a section of the per-call view says it came from, wired or not. */
+export function sectionBadge(s: { wired: boolean; present: boolean }): { label: string; variant: BadgeVariant } {
+  if (!s.wired) return { label: 'placeholder', variant: 'outline' }
+  return s.present ? { label: 'wired', variant: 'success' } : { label: 'wired · none on this call', variant: 'secondary' }
+}
