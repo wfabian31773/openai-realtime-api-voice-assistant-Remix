@@ -730,8 +730,15 @@ describe("maskCallPhones in free text", () => {
     ["a+4155550123", "a+…0123"],
     ["(415)555-0123", "…0123"],
     ["on 2026-11-24 call 415-555-0123", "on 2026-11-24 call …0123"],
-    ["10:30 555-0123", "10:30 …0123"],
-    ["11/24/2026 4155550123", "11/24/2026 …0123"],
+    // A time or date joined to a phone by separators is part of the run (round 8).
+    ["10:30 555-0123", "10:…0123"],
+    ["11/24/2026 4155550123", "11/24/…0123"],
+    ["10:30 at 555-0123", "10:30 at …0123"],
+    // Review of #520, round 8: a dash-date shape, and separator runs.
+    ["44-20-7946 0958", "…0958"],
+    ["415  555  0132", "…0132"],
+    ["415 - 555 - 0132", "…0132"],
+    ["(415)  555--0132", "…0132"],
     ["at 2026-11-24T10:30:00Z (415) 555-0123", "at 2026-11-24T10:30:00Z …0123"],
   ])("masks %j", (input, out) => {
     expect(maskCallPhones(input)).toBe(out);
@@ -752,11 +759,47 @@ describe("maskCallPhones in free text", () => {
     "CA0123456789abcdef0123456789abcdef",
     "id 550e8400-e29b-41d4-a716-446655440000",
     "order 12345",
-    "12-05-2026",
     "1 2 3",
     "555-012",
   ])("leaves %j alone", (input) => {
     expect(maskCallPhones(input)).toBe(input);
+  });
+
+  it("a date written with dashes may be masked, but never leaves 7 digits in a row", () => {
+    for (const d of ["12-05-2026", "on 12-05-2026 at noon"]) {
+      expect((maskCallPhones(d) as string).replace(/\D/g, "")).not.toMatch(/\d{7}/);
+    }
+  });
+
+  // Fuzz (seeded, deterministic): random phones split into random groups by
+  // random runs of any separator, in random text.
+  it("never leaves 7 phone digits in a row for random separator runs", () => {
+    let seed = 520;
+    const rnd = () => ((seed = (seed * 1103515245 + 12345) % 2147483648) / 2147483648);
+    const pick = <T,>(a: T[]) => a[Math.floor(rnd() * a.length)];
+    const seps = [" ", " ", " ", " ", " ", "\t", "-", "‐", "–", "—", "−", ".", ",", "(", ")"];
+    const words = ["call", "me", "at", "please", "the", "number", "is", "thanks", "ok"];
+    for (let i = 0; i < 500; i++) {
+      const n = 10 + Math.floor(rnd() * 6);
+      let digits = "";
+      for (let j = 0; j < n; j++) digits += String(Math.floor(rnd() * 10));
+      let phone = "";
+      let k = 0;
+      while (k < digits.length) {
+        const len = 1 + Math.floor(rnd() * 4);
+        if (k > 0) for (let r = 1 + Math.floor(rnd() * 3); r > 0; r--) phone += pick(seps);
+        phone += digits.slice(k, k + len);
+        k += len;
+      }
+      const prefix = pick(["", "", "+", "00"]);
+      const before = Array.from({ length: Math.floor(rnd() * 3) }, () => pick(words)).join(" ");
+      const after = Array.from({ length: Math.floor(rnd() * 3) }, () => pick(words)).join(" ");
+      const input = `${before} ${prefix}${phone} ${after}`;
+      const out = maskCallPhones(input) as string;
+      const stripped = out.normalize("NFKC").replace(/[\s.,()\p{Pd}−]/gu, "");
+      expect(stripped, `${JSON.stringify(input)} -> ${out}`).not.toMatch(/\d{7}/);
+      expect(out, JSON.stringify(input)).toContain(`…${digits.slice(-4)}`);
+    }
   });
 
   // Property: whatever phone shape goes in, no 7 consecutive digits (ignoring

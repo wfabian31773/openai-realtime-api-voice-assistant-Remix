@@ -267,51 +267,44 @@ function describe(ans: OnCallAnswer, data: RotationData, at: Date, fallbackPhone
 
 /**
  * ONE rule for a phone number written in free text (a transcript line, a
- * summary, an event message, a tool's arguments or result, a routing note),
- * replacing the format-by-format patterns three review rounds of #520 kept
- * finding holes in: a run that starts with an optional "+" or "00", then
- * digits, where neighbouring digits may be split by a single space (any
- * Unicode whitespace), dot, dash (any Unicode dash, or the minus sign), a comma (with an optional space; a number read out "4, 1, 5…") or
- * parentheses ("(415) "), with 7 or more digits in all, is masked to its
- * last four ("…0123"). Some long digit runs that are not phones are masked
- * too; that is the accepted cost of never leaking one.
+ * summary, an event message, a tool's arguments or result, a routing note):
+ * after NFKC, an optional "+" or "00", then digit groups split by any run of
+ * separators (Unicode whitespace, Unicode dashes and the minus sign, dot,
+ * comma, parentheses), with 7 or more digits in all, is masked to its last
+ * four ("…0123"). A run that starts inside a word (a SID, "VA-76222") is left
+ * alone. Some long digit runs that are not phones are masked too, dates
+ * written with dashes among them; that is the accepted cost of never leaking
+ * one (review of #520, round 8).
  *
- * Kept as written, by design: ISO dates and instants ("2026-11-24",
- * "2026-11-24T10:30:00Z"), clock times ("10:30"), and dates written with
- * slashes or as MM-DD-YYYY ("11/24/2026", "12-05-2026"); these are set aside
- * before the rule runs and put back after, so a phone written next to one is
- * still masked and the date is not. A run that starts inside a word (a SID,
- * "VA-76222") is left alone.
+ * Set aside before the rule and put back after: ISO dates and instants
+ * ("2026-11-24", "2026-11-24T10:30:00Z"), clock times ("10:30"), slash dates
+ * ("11/24/2026"), uuids and Twilio SIDs. A span is not set aside when its
+ * first or last digit is joined to more digits by separators: it is then part
+ * of a phone-like run, and the run is masked.
  */
+const SEP = String.raw`[\s.,()\p{Pd}−]`;
+const JOINED_BEFORE = new RegExp(String.raw`\d${SEP}*$`, "u");
+const JOINED_AFTER = new RegExp(String.raw`^${SEP}*\d`, "u");
 const PROTECTED_IN_TEXT = new RegExp(
   [
     // ISO date, optionally with a time and a zone.
     String.raw`\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?`,
-    // 11/24/2026, 1/2/60, 12-05-2026.
+    // 11/24/2026, 1/2/60.
     String.raw`\d{1,2}/\d{1,2}/\d{2,4}`,
-    String.raw`\d{1,2}-\d{1,2}-\d{4}`,
     // 10:30, 10:30:15.
     String.raw`\d{1,2}:\d{2}(?::\d{2})?`,
     // Identifiers the page links by: a uuid, a Twilio SID.
     String.raw`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`,
     String.raw`[A-Z]{2}[0-9a-fA-F]{32}`,
   ]
-    // Not a protected span when it continues a phone run: after a "+", or
-    // after/before a digit joined by a tight separator ("+44-20-7946-0958"
-    // must not shield "44-20-7946" as a date; review of #520, round 7).
-    .map((p) => `(?<![\\dA-Za-z+])(?<!\\d[./\\p{Pd}\\u2212])${p}(?![\\dA-Za-z])(?![./\\p{Pd}\\u2212]\\d)`)
+    .map((p) => `(?<![\\dA-Za-z+])${p}(?![\\dA-Za-z])`)
     .join("|"),
   "gu",
 );
 
 // Optional "+"/"00", an optional "(", a digit, then digits each preceded by
-// an optional separator: ")" and/or one of any Unicode whitespace (a no-break,
-// narrow, figure or thin space included), any Unicode dash or hyphen (en and
-// em dash included) or the minus sign, a dot, a comma (with optional
-// whitespace), and/or "(". A run that starts inside a word is not a phone.
-// The text is NFKC-normalised first, so full-width digits and the full-width
-// plus read as their ASCII forms (review of #520, round 7).
-const PHONE_RUN = /(?<![\p{L}\p{N}_])(?:\+|00)?\(?\d(?:\)?(?:[\s.\p{Pd}−]|,\s?)?\(?\d)*/gu;
+// any run of separators. Not a phone when it starts inside a word.
+const PHONE_RUN = new RegExp(String.raw`(?<![\p{L}\p{N}_])(?:\+|00)?\(?\d(?:${SEP}*\d)*`, "gu");
 
 /** Set-aside marker for a protected span: private-use characters, never a digit or a separator. */
 const SET_ASIDE_BASE = 0xe000;
@@ -324,7 +317,10 @@ export function maskPhonesInText(raw: string): string {
   // set aside (a date in it may be masked too); never the other way round.
   const shielded = SET_ASIDE_ANY.test(s)
     ? s
-    : s.replace(PROTECTED_IN_TEXT, (m) => {
+    : s.replace(PROTECTED_IN_TEXT, (m: string, offset: number) => {
+        // Part of a longer phone-like run: the run wins.
+        if (/^\d/.test(m) && JOINED_BEFORE.test(s.slice(0, offset))) return m;
+        if (/\d$/.test(m) && JOINED_AFTER.test(s.slice(offset + m.length))) return m;
         if (kept.length >= 0x18ff) return m;
         kept.push(m);
         return String.fromCharCode(SET_ASIDE_BASE + kept.length - 1);
