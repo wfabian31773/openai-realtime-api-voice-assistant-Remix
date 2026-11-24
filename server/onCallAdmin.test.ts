@@ -752,6 +752,16 @@ describe("maskCallPhones in free text", () => {
   it.each([
     ["call me at (415) 555-0123 please", "call me at …0123 please"],
     ["415-555-0123", "…0123"],
+    ["5555-12-34", "…1234"],
+    ["2026-13-01", "…1301"],
+    ["2026-11-32", "…1132"],
+    ["0000-00-00", "…0000"],
+    ["1899-12-31", "…1231"],
+    ["2100-01-01", "…0101"],
+    ["2026-11-24T25:00:00Z", "…1124T25:00:00Z"],
+    ["2026-11-24T10:60:00Z", "…1124T10:60:00Z"],
+    ["2026-11-24T10:30:99Z", "…1124T10:30:99Z"],
+    ["2026-11-24T10:30:00+25:00", "…1124T10:30:00+25:00"],
     ["415.555.0123", "…0123"],
     ["415 555 0123", "…0123"],
     ["4155550123", "…0123"],
@@ -796,6 +806,10 @@ describe("maskCallPhones in free text", () => {
   it.each([
     "born 03/17/1973",
     "DOB 1973-03-17",
+    "2026-11-24",
+    "1960-01-02",
+    "1900-01-01",
+    "2099-12-31",
     "on 2026-11-24",
     "at 2026-11-24T10:30:00Z",
     "at 2026-12-05T06:00:40.000Z",
@@ -803,6 +817,9 @@ describe("maskCallPhones in free text", () => {
     "at 10:30 PM",
     "11/24/2026",
     "01/02/1960",
+    "1/2/60",
+    "12/31/99",
+    "2026-11-24T23:59:59.123-05:00",
     "ticket VA-84772 and PCP-73679",
     "VA-76222",
     "CA0123456789abcdef0123456789abcdef",
@@ -958,5 +975,18 @@ describe("maskCallPhones in free text", () => {
     expect(
       maskCallPhones({ timeline: [{ text: "my number is (415) 555-0123", data: { message: "dialled 415-555-0199" } }] }),
     ).toEqual({ timeline: [{ text: "my number is …0123", data: { message: "dialled …0199" } }] });
+  });
+
+  it("masks phone numbers in object keys and their nested values", () => {
+    expect(maskCallPhones({ "+14155550123": { "call 415-555-0199": "+14155550123" }, "4155550199": 1 })).toEqual({
+      "…0123": { "call …0199": "…0123" }, "…0199": 1,
+    });
+  });
+
+  it("keeps all entries when masked keys or their suffixes collide", () => {
+    const input = { "+14155550123": 1, "415-555-0123": 2, "1-415-555-0123#2": 3, "(415) 555-0123": 4 };
+    const expected = { "…0123": 1, "…0123#2": 2, "…0123#2#2": 3, "…0123#3": 4 };
+    expect(maskCallPhones({ nested: [input] })).toEqual({ nested: [expected] });
+    expect(maskCallPhones(input)).toEqual(expected);
   });
 });

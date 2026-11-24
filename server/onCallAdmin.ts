@@ -287,10 +287,10 @@ const JOINED_BEFORE = new RegExp(String.raw`\d${SEP}*$`, "u");
 const JOINED_AFTER = new RegExp(String.raw`^${SEP}*\d`, "u");
 const PROTECTED_IN_TEXT = new RegExp(
   [
-    // ISO date, optionally with a time and a zone.
-    String.raw`\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?`,
+    // ISO date (1900–2099), optionally with a valid time and a zone.
+    String.raw`(?:19|20)\d{2}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])(?:[T ](?:[01]\d|2[0-3]):[0-5]\d(?::[0-5]\d(?:\.\d+)?)?(?:Z|[+-](?:[01]\d|2[0-3]):?[0-5]\d)?)?(?![:.]\d|[+-]\d)`,
     // 11/24/2026, 1/2/60.
-    String.raw`\d{1,2}/\d{1,2}/\d{2,4}`,
+    String.raw`(?:0?[1-9]|1[0-2])/(?:0?[1-9]|[12]\d|3[01])/(?:(?:19|20)\d{2}|\d{2})`,
     // 10:30, 10:30:15.
     String.raw`\d{1,2}:\d{2}(?::\d{2})?`,
     // Identifiers the page links by: a uuid, a Twilio SID.
@@ -337,7 +337,7 @@ export function maskPhonesInText(raw: string): string {
 /**
  * The Calls tab shows phones by their last four only (full phones live on the
  * Providers tab): every phone-named key as its last four, and every other
- * string through `maskPhonesInText`, at any depth.
+ * string and object key through `maskPhonesInText`, at any depth.
  */
 export function maskCallPhones(v: unknown): unknown {
   if (typeof v === "string") return maskPhonesInText(v);
@@ -347,8 +347,15 @@ export function maskCallPhones(v: unknown): unknown {
   if (typeof v === "number" && Number.isSafeInteger(v) && Math.abs(v) >= 1_000_000) return last4(String(v));
   if (Array.isArray(v)) return v.map(maskCallPhones);
   if (!v || typeof v !== "object") return v;
+  const keys = new Set<string>();
   return Object.fromEntries(
-    Object.entries(v as Record<string, unknown>).map(([k, x]) => [k, /phone/i.test(k) && typeof x === "string" ? last4(x) : maskCallPhones(x)]),
+    Object.entries(v as Record<string, unknown>).map(([k, x]) => {
+      const masked = maskPhonesInText(k);
+      let key = masked;
+      for (let suffix = 2; keys.has(key); suffix++) key = `${masked}#${suffix}`;
+      keys.add(key);
+      return [key, /phone/i.test(k) && typeof x === "string" ? last4(x) : maskCallPhones(x)];
+    }),
   );
 }
 
