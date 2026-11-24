@@ -427,6 +427,10 @@ load: never inside the repository, and the file readable only by you.
 npx tsx scripts/on-call-change.ts <command> [options] [--out ~/change.sql]
 ```
 
+The same changes can be made on the Operations Hub's **After-Hours On-Call**
+page (`/on-call`, admins only), which writes an audit row for each one; see
+section 9. Changes made with this script are **not** in that audit log.
+
 ### A swap for a whole week
 
 ```sh
@@ -695,3 +699,60 @@ by the switched-off deployment rather than left open (review of #514, round
 7. **A closed holiday on a Tuesday.** Its daytime hours go to the outgoing
    week's provider, because the week turns over at 5:00 PM. If the incoming
    provider should take those hours, that is an override for the day.
+
+---
+
+## 9. Admin page (`/on-call`)
+
+The Operations Hub's **After-Hours On-Call** page, in the admin section of
+the menu. Every route behind it (`/api/on-call/*`, `server/onCallAdmin.ts`)
+needs a login with the **admin** role and is never cached. Who is on call is
+computed with the runtime's own `onCallAt` and `planChain` over the same
+tables the voice agent reads, so the page and a call cannot disagree. The page
+changes no phone routing and nothing under `src/runtime/`.
+
+### Apply order
+
+1. `migrations/add_on_call_rotation.sql` (section 3), then the seed.
+2. `migrations/add_on_call_admin.sql`: the audit log (`on_call_audit_log`)
+   and the placeholder `on_call_call_events`. Not applied by the repo.
+
+Without (1) the page shows a banner and nothing else. With (1) and not (2) it
+shows everything but **refuses every change**, because each change writes its
+audit row in the same transaction and there is nowhere to write it.
+
+### Tabs
+
+| tab | what | wired? |
+|---|---|---|
+| Overview | mode, test phones, caller ID and urgent number (last four digits only), go-live countdown; who is on call now, tonight and next week, the chain a non-post-op call would ring (levels with no dialable number flagged), and a "who would be called at…" preview | wired |
+| Schedule | weeks (Tuesday 5 PM to Tuesday 8 AM PT), gaps in red, this week highlighted, overrides overlaid; swap a week, fill a gap, swap two weeks, extend (the same weeks as `on-call-change.ts extend`, with a preview), cover part of a week, cancel a cover (upcoming: deleted; running: ended now; past: kept) | wired |
+| Providers | full phone numbers (the only place they appear), add, edit, deactivate / reactivate (with the weeks, covers and director rows still pointing at them), delete only when never referenced, reorder the rotation | wired |
+| Escalation | region → director, FINAL included (the runtime reads it); the environment and the cadence, read-only; the open decisions in section 8 | wired (env and cadence read-only) |
+| Calls | every on-call chain, plus after-hours calls that asked to escalate and opened no chain; each opens a timeline merging `call_logs`, transcript lines, tool calls, `call_events`, the chain, every attempt and the call's tickets, with a link to the call details page | wired; "not captured yet" panel lists what is not recorded |
+| Audit log | every change from the page, who, when, before and after, reason; filters | wired |
+
+### Rules the page enforces (the CLI's, plus a few)
+
+- A reason is required for every change.
+- A week starts on a Tuesday. A provider given a week, a cover or a director
+  row must be active and have a dialable phone.
+- A region must already have a director unless it is marked new; `FINAL` is
+  not a region a provider works in. Phones are stored E.164 via the runtime's
+  `e164`.
+- A cover that overlaps another needs an explicit confirmation (the latest
+  start wins). A cover entirely in the past is refused.
+- `extend` matches the CLI exactly, so an active provider with no dialable
+  phone can still get a week; the page warns when that happens.
+- Reorder moves rotation places without two rows ever holding one number
+  (`rotation_order` is UNIQUE): every moving row is cleared, then placed.
+
+### Not captured yet (placeholders)
+
+`on_call_call_events` exists for per-call facts the runtime does not record
+today: Twilio SMS delivery status, the provider's key press and its timing, a
+provider's post-call note, and each change of a chain's status (only the
+current status and the row's last update are kept). **Nothing writes it yet**;
+the page reads it and labels the section "placeholder". Wiring writes from the
+runtime (`appendOnCallCallEvent` in `server/onCallAdmin/store.ts` is the
+store method) is a follow-up.
