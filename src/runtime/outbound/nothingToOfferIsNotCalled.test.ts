@@ -240,6 +240,90 @@ describe("the dialler asks the offer check last, and rings nobody it has nothing
     });
   });
 
+  it("writes today's fields onto the row before it rings, because the call reads the row", async () => {
+    // Review of #519, round 2: the offer check approved today's group, so the
+    // call must offer from today's group too.
+    const { store, createCall, deps } = dialSetup();
+    store.addContact({
+      id: "c1",
+      phone: "+15555550111",
+      externalRef: "appt-1",
+      customData: { ...OFFER_FIELDS, medical_group: "An Older Group" },
+    });
+    let groupWhenRung: unknown;
+    createCall.mockImplementation(async () => {
+      groupWhenRung = store.contacts.get("c1")!.customData.medical_group;
+      return { sid: `CA${"1".padStart(32, "0")}` };
+    });
+    const offerCheck = vi.fn(async (): Promise<OfferCheck> => "offerable");
+    const source = sourceFor([person("appt-1")]);
+    await runCampaignTick(
+      "test-lane",
+      { ...basePolicy, offerCheck, source: async () => source },
+      { ...deps, sourceRefreshedAt: new Map([["test-campaign", NOW.getTime()]]) },
+    );
+    expect(createCall).toHaveBeenCalledTimes(1);
+    expect(groupWhenRung).toBe("Synthetic Medical Group");
+  });
+
+  it("writes nothing when the row already holds today's fields", async () => {
+    const { store, createCall, deps } = dialSetup();
+    store.addContact({ id: "c1", phone: "+15555550111", externalRef: "appt-1", customData: OFFER_FIELDS });
+    const offerCheck = vi.fn(async (): Promise<OfferCheck> => "offerable");
+    const source = sourceFor([person("appt-1")]);
+    await runCampaignTick(
+      "test-lane",
+      { ...basePolicy, offerCheck, source: async () => source },
+      { ...deps, sourceRefreshedAt: new Map([["test-campaign", NOW.getTime()]]) },
+    );
+    expect(createCall).toHaveBeenCalledTimes(1);
+    expect(store.upserts).toEqual([]);
+  });
+
+  it("rings nobody when today's fields cannot be written onto the row", async () => {
+    const { store, createCall, deps } = dialSetup();
+    store.addContact({
+      id: "c1",
+      phone: "+15555550111",
+      status: "voicemail",
+      externalRef: "appt-1",
+      customData: { ...OFFER_FIELDS, medical_group: "An Older Group" },
+    });
+    store.upsertSourceContacts = async () => {
+      throw new Error("database unavailable");
+    };
+    const offerCheck = vi.fn(async (): Promise<OfferCheck> => "offerable");
+    const source = sourceFor([person("appt-1")]);
+    const r = await runCampaignTick(
+      "test-lane",
+      { ...basePolicy, offerCheck, source: async () => source },
+      { ...deps, sourceRefreshedAt: new Map([["test-campaign", NOW.getTime()]]) },
+    );
+    expect(r.held).toEqual({ source_write_failed: 1 });
+    expect(createCall).not.toHaveBeenCalled();
+    expect(store.contacts.get("c1")).toMatchObject({ status: "voicemail" });
+  });
+
+  it("reads the place-by deadline again after the offer check, and never rings a call it has missed", async () => {
+    // Review of #519, round 2: a first call due by a deadline the check outlasted.
+    let clock = NOW;
+    const { store, createCall, deps } = dialSetup();
+    store.addContact({
+      id: "c1",
+      phone: "+15555550111",
+      customData: { ...OFFER_FIELDS, place_by: new Date(NOW.getTime() + 5_000).toISOString() },
+    });
+    const offerCheck = vi.fn(async (): Promise<OfferCheck> => {
+      clock = new Date(NOW.getTime() + 8_000);
+      return "offerable";
+    });
+    const r = await runCampaignTick("test-lane", { ...basePolicy, offerCheck }, { ...deps, now: () => clock });
+    expect(offerCheck).toHaveBeenCalledTimes(1);
+    expect(r.held).toEqual({ place_by_passed: 1 });
+    expect(createCall).not.toHaveBeenCalled();
+    expect(store.contacts.get("c1")).toMatchObject({ status: "rescheduled" });
+  });
+
   it("leaves a campaign with no offer check exactly as it was", async () => {
     const { store, createCall, deps } = dialSetup();
     store.addContact({ id: "c1", phone: "+15555550111", customData: OFFER_FIELDS });

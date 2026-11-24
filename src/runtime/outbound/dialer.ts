@@ -416,6 +416,9 @@ async function dialOne(
   // The fields the offer check reads (v271): today's from the source when
   // there is one, over the row's own.
   let offerData = contact.customData;
+  // Today's record from the source when it no longer matches the row: written
+  // onto the row before the call, because the call reads the row (review of #519).
+  let changedAtSource: (SourceContact & { phone: string }) | null = null;
   if (source) {
     if (!contact.externalRef) {
       // A row the source never wrote has nothing to re-check against.
@@ -440,6 +443,10 @@ async function dialOne(
       return live.state === "off_list" ? "off_list" : "no_phone";
     }
     offerData = { ...contact.customData, ...live.contact.data };
+    const fresh = live.contact.data;
+    if (Object.keys(fresh).some((k) => JSON.stringify(fresh[k]) !== JSON.stringify(contact.customData[k]))) {
+      changedAtSource = { ...live.contact, phone: live.contact.phone };
+    }
     if (dncKey(live.contact.phone) !== dncKey(contact.phone)) {
       // Today's number from the source, before the do-not-contact check reads it.
       await deps.store.updateContactPhone(contact.id, live.contact.phone);
@@ -521,13 +528,31 @@ async function dialOne(
     return nothing ? "no_opening" : "offer_unknown";
   }
   // The offer check can take seconds, and the tick asks each candidate in turn
-  // under the one timestamp it started with: the window is read again on the
-  // clock as it is now, so nobody is rung after it has closed (review of #519).
+  // under the one timestamp it started with: the place-by deadline and the
+  // window are read again on the clock as it is now, so nobody is rung after
+  // either has passed (review of #519).
   const at = (deps.now ?? (() => new Date()))();
+  if (!dialledThisRow && placeByPassed(contact.customData, at)) {
+    await deps.store.settleContact(contact.id, "rescheduled", {
+      notes: "not placed before its place-by deadline; never rung",
+    });
+    await notPlaced("place_by_passed");
+    return "place_by_passed";
+  }
   const stillOpen = mayDialNow(at, prior, policy.window, policy.caps);
   if (!stillOpen.ok) {
     await deps.store.releaseContact(contact.id, candidate.status, nextLookAt(at, stillOpen.reason, policy));
     return stillOpen.reason;
+  }
+  // The call reads the row, so the fields the offer check approved are on the
+  // row before anybody is rung; a write that fails rings nobody.
+  if (changedAtSource) {
+    try {
+      await deps.store.upsertSourceContacts(campaignId, [changedAtSource]);
+    } catch {
+      await deps.store.releaseContact(contact.id, candidate.status, nextLookAt(at, "twilio_refused", policy));
+      return "source_write_failed";
+    }
   }
 
   const attemptId = await deps.store.startAttempt(contact.id, campaignId, prior.length + 1);
