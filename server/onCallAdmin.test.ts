@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Express, RequestHandler } from "express";
 import { requireAuth, requireRole } from "./auth";
-import { EXTEND_PLAN_CHANGED, maskCallPhones, mountOnCallAdmin, ON_CALL_API, samePlan, sameOverlapIds, storePerPool } from "./onCallAdmin";
+import { EXTEND_PLAN_CHANGED, maskAuditSnapshot, maskCallPhones, maskPhonesInText, mountOnCallAdmin, ON_CALL_API, samePlan, sameOverlapIds, storePerPool } from "./onCallAdmin";
 import { emptyFakeState, FakeOnCallAdminStore, type FakeOptions, type FakeState } from "./onCallAdmin/store.fake";
 import { pacificWallToDate } from "./onCallAdmin/logic";
 
@@ -294,6 +294,26 @@ describe("changes", () => {
     expect(r.status).toBe(500);
     expect(h.store.state.schedule.find((w) => w.week === "2026-12-08")!.providerId).toBe(2);
     expect(h.store.state.audit).toHaveLength(0);
+  });
+
+  it("masks the displayed audit reason and snapshot text without changing stored rows", async () => {
+    const state = fixture();
+    const note = "call me at 415-555-0199";
+    state.schedule.find((w) => w.week === "2026-12-08")!.note = note;
+    const h = boot({}, state);
+    const reason = "covering, cell 415 555 0142";
+    expect((await h.request("POST", `${ON_CALL_API}/schedule/assign`, "admin", { week: "2026-12-08", providerId: 3, reason })).status).toBe(200);
+    const stored = structuredClone(h.store.state.audit);
+
+    const log = await h.request("GET", `${ON_CALL_API}/audit`);
+    expect(log.status).toBe(200);
+    expect(log.body.rows[0]).toMatchObject({
+      reason: "covering, cell …0142",
+      before: { note: "call me at …0199" },
+      after: { note: "swapped to Dr. Test Gamma: covering, cell …0142" },
+    });
+    expect(h.store.state.audit).toEqual(stored);
+    expect(h.store.state.audit[0]).toMatchObject({ reason, before: { note }, after: { note: expect.stringContaining(reason) } });
   });
 
   it("fills a gap week, and refuses a non-Tuesday, an inactive provider and one with no phone", async () => {
@@ -742,6 +762,33 @@ describe("the admin store follows the database pool", () => {
     const src = readFileSync(new URL("./routes.ts", import.meta.url), "utf8");
     expect(src).toContain("storePerPool(() => pool,");
     expect(src).not.toMatch(/onCallAdminStore\s*\?\?=/);
+  });
+});
+
+describe("maskAuditSnapshot", () => {
+  it("masks phone fields and free text while preserving timestamps and ids", () => {
+    expect(maskAuditSnapshot({ phone: "+14155550123", note: "call me at 415-555-0199", startsAt: "2026-11-24T10:00:00Z", id: 12 })).toEqual({
+      phone: "…0123", note: "call me at …0199", startsAt: "2026-11-24T10:00:00Z", id: 12,
+    });
+  });
+
+  it("recurses through objects and arrays without masking keys or numbers", () => {
+    expect(maskAuditSnapshot({ nested: [{ "4155550199": { callbackPhone: "+14155550123", note: "call 415-555-0199", id: 123456789, phone: 4155550123, active: true, missing: null } }] })).toEqual({
+      nested: [{ "4155550199": { callbackPhone: "…0123", note: "call …0199", id: 123456789, phone: 4155550123, active: true, missing: null } }],
+    });
+  });
+});
+
+describe("calendar dates in free text", () => {
+  it.each(["2026-02-30", "2026-04-31", "2025-02-29", "1900-02-29", "2/30/2026"])("masks impossible date %j", (input) => {
+    const out = maskPhonesInText(input);
+    expect(out).not.toBe(input);
+    expect(out).not.toContain(input);
+    expect(out).toContain("…");
+  });
+
+  it.each(["2024-02-29", "2000-02-29", "2026-11-24", "2026-11-24T10:30:00Z", "11/24/2026", "12/31/2026"])("keeps real date %j verbatim", (input) => {
+    expect(maskPhonesInText(input)).toBe(input);
   });
 });
 

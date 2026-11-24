@@ -276,7 +276,7 @@ function describe(ans: OnCallAnswer, data: RotationData, at: Date, fallbackPhone
  * written with dashes among them; that is the accepted cost of never leaking
  * one (review of #520, round 8).
  *
- * Set aside before the rule and put back after: ISO dates and instants
+ * Set aside before the rule and put back after: real ISO dates and instants
  * ("2026-11-24", "2026-11-24T10:30:00Z"), clock times ("10:30"), slash dates
  * ("11/24/2026"), uuids and Twilio SIDs. A span is not set aside when its
  * first or last digit is joined to more digits by separators: it is then part
@@ -312,14 +312,29 @@ const PHONE_RUN = new RegExp(String.raw`(?<!\p{N})(?:\+|00)?\(?\d(?:${SEP}*\d)*`
 const SET_ASIDE_BASE = 0xe000;
 const SET_ASIDE_ANY = /[-]/;
 
+function isRealCalendarDate(y: number, m: number, d: number): boolean {
+  if (!Number.isInteger(y) || !Number.isInteger(m) || !Number.isInteger(d) || m < 1 || m > 12 || d < 1) return false;
+  const leap = y % 4 === 0 && (y % 100 !== 0 || y % 400 === 0);
+  const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return d <= days[m - 1];
+}
+
 export function maskPhonesInText(raw: string): string {
   const s = asciiDigits(raw);
   const kept: string[] = [];
+  const invalidSlashDates = new Set<string>();
   // Text that already carries private-use characters is masked with nothing
   // set aside (a date in it may be masked too); never the other way round.
   const shielded = SET_ASIDE_ANY.test(s)
     ? s
     : s.replace(PROTECTED_IN_TEXT, (m: string, offset: number) => {
+        const iso = /^(\d{4})-(\d{2})-(\d{2})/.exec(m);
+        if (iso && !isRealCalendarDate(Number(iso[1]), Number(iso[2]), Number(iso[3]))) return m;
+        const slash = /^(\d{1,2})\/(\d{1,2})\/(\d{2}|\d{4})$/.exec(m);
+        if (slash && !isRealCalendarDate(Number(slash[3]) + (slash[3].length === 2 ? 2000 : 0), Number(slash[1]), Number(slash[2]))) {
+          if (m.replace(/\D/g, "").length >= 7) invalidSlashDates.add(m);
+          return m;
+        }
         // Part of a longer phone-like run: the run wins.
         if (/^\d/.test(m) && JOINED_BEFORE.test(s.slice(0, offset))) return m;
         if (/\d$/.test(m) && JOINED_AFTER.test(s.slice(offset + m.length))) return m;
@@ -327,10 +342,12 @@ export function maskPhonesInText(raw: string): string {
         kept.push(m);
         return String.fromCharCode(SET_ASIDE_BASE + kept.length - 1);
       });
-  const masked = shielded.replace(PHONE_RUN, (m) => {
+  let masked = shielded.replace(PHONE_RUN, (m) => {
     const digits = m.replace(/\D/g, "");
     return digits.length >= 7 ? last4(digits) ?? m : m;
   });
+  // Slashes split phone runs; mask any rejected 7+ digit slash date still intact.
+  if (invalidSlashDates.size) masked = masked.replace(PROTECTED_IN_TEXT, (m) => invalidSlashDates.has(m) ? last4(m) ?? m : m);
   return kept.length === 0 ? masked : masked.replace(/[-]/g, (c) => kept[c.charCodeAt(0) - SET_ASIDE_BASE] ?? c);
 }
 
@@ -364,6 +381,16 @@ export function maskPhones(v: unknown): unknown {
   if (!v || typeof v !== "object") return v;
   return Object.fromEntries(
     Object.entries(v as Record<string, unknown>).map(([k, x]) => [k, /phone/i.test(k) && typeof x === "string" ? last4(x) : maskPhones(x)]),
+  );
+}
+
+/** Mask displayed audit values recursively, preserving object keys and numbers. */
+export function maskAuditSnapshot(v: unknown): unknown {
+  if (typeof v === "string") return maskPhonesInText(v);
+  if (Array.isArray(v)) return v.map(maskAuditSnapshot);
+  if (!v || typeof v !== "object") return v;
+  return Object.fromEntries(
+    Object.entries(v as Record<string, unknown>).map(([k, x]) => [k, /phone/i.test(k) && typeof x === "string" ? last4(x) : maskAuditSnapshot(x)]),
   );
 }
 
@@ -953,8 +980,13 @@ export function mountOnCallAdmin(app: Express, deps: OnCallAdminDeps) {
         until: date(req.query.until),
         limit,
       });
-      // The log keeps full phones (they are what was changed); the page shows the last four.
-      res.json({ applied: true, rows: rows.map((r) => ({ ...r, before: maskPhones(r.before), after: maskPhones(r.after) })) });
+      // Display phones in reasons and snapshots as last four; stored rows keep the full text.
+      res.json({ applied: true, rows: rows.map((r) => ({
+        ...r,
+        reason: typeof r.reason === "string" ? maskPhonesInText(r.reason) : r.reason,
+        before: maskAuditSnapshot(r.before),
+        after: maskAuditSnapshot(r.after),
+      })) });
     } catch (e) {
       console.error("[on-call admin] audit read failed:", (e as Error)?.message);
       res.status(500).json({ error: "The audit log could not be read." });
