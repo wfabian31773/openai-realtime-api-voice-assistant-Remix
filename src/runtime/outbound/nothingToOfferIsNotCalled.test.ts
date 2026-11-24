@@ -188,7 +188,13 @@ describe("the dialler asks the offer check last, and rings nobody it has nothing
     });
     const offerCheck = vi.fn(async (): Promise<OfferCheck> => "nothing_to_offer");
     const source = sourceFor([person("appt-1")]);
-    await runCampaignTick("test-lane", { ...basePolicy, offerCheck, source: async () => source }, deps);
+    // The queue was refreshed a moment ago, so the row still holds the older
+    // group: only the dial's own re-check carries today's.
+    await runCampaignTick(
+      "test-lane",
+      { ...basePolicy, offerCheck, source: async () => source },
+      { ...deps, sourceRefreshedAt: new Map([["test-campaign", NOW.getTime()]]) },
+    );
     expect(offerCheck).toHaveBeenCalledWith({
       id: "c1",
       customData: expect.objectContaining({ medical_group: "Synthetic Medical Group" }),
@@ -225,6 +231,11 @@ describe("askOfferCheck", () => {
 describe("tomorrowAtOpening", () => {
   it("is tomorrow at the opening hour in Pacific time", () => {
     expect(tomorrowAtOpening(NOW, 9).toISOString()).toBe(TOMORROW_9AM.toISOString());
+  });
+
+  it("is tomorrow even when asked before today's opening", () => {
+    // 6 AM Pacific: today's 9 AM has not come, and it is not the answer.
+    expect(tomorrowAtOpening(new Date("2041-03-05T14:00:00Z"), 9).toISOString()).toBe(TOMORROW_9AM.toISOString());
   });
 
   it("stays right across the spring-forward change", () => {
