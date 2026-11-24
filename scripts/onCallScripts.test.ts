@@ -7,7 +7,10 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { describe, expect, it } from "vitest";
 import { insideRepo, run as seed } from "./on-call-seed";
-import { run as change } from "./on-call-change";
+import { run as runChange } from "./on-call-change";
+
+/** A change as Wayne runs it: every command carries --reason and --actor. */
+const change = (args: string[]) => runChange([...args, "--reason", "test change", "--actor", "ops@example.test"]);
 
 const POOL = [
   "Name,Phone,Email,Region,Escalation Director,NPI",
@@ -172,5 +175,83 @@ describe("scripts/on-call-change.ts", () => {
     expect(change(["swap", "--week", "2026-12-08", "--to", "Ben Ortiz", "--out", "swap.sql"]).stderr).toMatch(
       /inside the repository/,
     );
+  });
+});
+
+describe("scripts/on-call-change.ts writes an audit row with every change", () => {
+  const COMMANDS: Array<{ args: string[]; action: string; entityType: string }> = [
+    { args: ["swap", "--week", "2026-12-08", "--to", "Ben Ortiz"], action: "schedule.swap_week", entityType: "schedule" },
+    { args: ["cover", "--from", "2026-12-10 17:00", "--to", "2026-12-11 08:00", "--by", "Ada Lin"], action: "override.create", entityType: "override" },
+    { args: ["add-provider", "--name", "Kim Ruiz", "--phone", "555-010-0012", "--region", "San Diego"], action: "provider.create", entityType: "provider" },
+    { args: ["extend", "--weeks", "4"], action: "schedule.extend", entityType: "schedule" },
+    { args: ["deactivate", "Ada Lin"], action: "provider.deactivate", entityType: "provider" },
+    { args: ["activate", "Ada Lin"], action: "provider.activate", entityType: "provider" },
+    { args: ["set-director", "--region", "FINAL", "--director", "Dan Lowe"], action: "director.set", entityType: "director" },
+  ];
+
+  for (const c of COMMANDS) {
+    it(`${c.args[0]}: one ${c.action} row in the same transaction, with the actor and the reason`, () => {
+      const r = runChange([...c.args, "--reason", "covering a family event", "--actor", "wayne@example.test"]);
+      expect(r.code).toBe(0);
+      const sql = r.stdout;
+      const begin = sql.indexOf("BEGIN;");
+      const audit = sql.indexOf("INSERT INTO on_call_audit_log");
+      const commit = sql.lastIndexOf("COMMIT;");
+      expect(begin).toBe(0);
+      expect(audit).toBeGreaterThan(begin);
+      expect(audit).toBeLessThan(commit);
+      expect(sql.match(/INSERT INTO on_call_audit_log/g)).toHaveLength(1);
+      expect(sql).toContain(`'${c.action}'`);
+      expect(sql).toContain(`'${c.entityType}'`);
+      expect(sql).toContain("'wayne@example.test (scripts/on-call-change.ts)'");
+      expect(sql).toContain("'covering a family event'");
+      // Refuses before anything is written when the audit table is not there.
+      const guard = sql.indexOf("to_regclass('on_call_audit_log') IS NULL");
+      expect(guard).toBeGreaterThan(begin);
+      expect(guard).toBeLessThan(sql.search(/UPDATE on_call_|INSERT INTO on_call_(schedule|overrides|providers|escalation)|WITH last AS/));
+      expect(sql).toContain("apply migrations/add_on_call_admin.sql first");
+    });
+  }
+
+  it("snapshots the row before and after where the SQL can read it", () => {
+    const swap = change(["swap", "--week", "2026-12-08", "--to", "Ben Ortiz"]).stdout;
+    expect(swap).toContain("SELECT to_jsonb(s) INTO prev FROM on_call_schedule s WHERE week_starts_on = '2026-12-08';");
+    expect(swap.indexOf("INTO prev")).toBeLessThan(swap.indexOf("UPDATE on_call_schedule"));
+    expect(swap.indexOf("INTO nxt")).toBeGreaterThan(swap.indexOf("UPDATE on_call_schedule"));
+    const off = change(["deactivate", "Ada Lin"]).stdout;
+    expect(off).toContain("to_jsonb(p) - 'created_at' - 'updated_at'");
+    expect(off.indexOf("INTO prev")).toBeLessThan(off.indexOf("SET active = false"));
+    const cover = change(["cover", "--from", "2026-12-10 17:00", "--to", "2026-12-11 08:00", "--by", "Ada Lin"]).stdout;
+    expect(cover).toContain("RETURNING id INTO new_id;");
+    expect(cover).toMatch(/new_id::text, NULL, nxt/);
+    const extend = change(["extend", "--weeks", "4"]).stdout;
+    expect(extend).toContain("jsonb_build_object('week', week_starts_on, 'providerId', provider_id)");
+    expect(extend).toContain("FROM added HAVING count(*) > 0");
+    const director = change(["set-director", "--region", "FINAL", "--director", "Dan Lowe"]).stdout;
+    expect(director.indexOf("INTO prev")).toBeLessThan(director.indexOf("UPDATE on_call_escalation_directors"));
+  });
+
+  it("requires a --reason, and refuses a blank one", () => {
+    const r = runChange(["swap", "--week", "2026-12-08", "--to", "Ben Ortiz", "--actor", "x"]);
+    expect(r.code).toBe(2);
+    expect(r.stderr).toMatch(/swap needs --reason/);
+    const blank = runChange(["swap", "--week", "2026-12-08", "--to", "Ben Ortiz", "--reason", "  ", "--actor", "x"]);
+    expect(blank.code).toBe(2);
+    expect(blank.stderr).toMatch(/--reason that is not blank/);
+    expect(blank.stdout).toBe("");
+  });
+
+  it("takes the OS user as the actor when --actor is not given, and refuses when there is none", () => {
+    const r = runChange(["activate", "Ada Lin", "--reason", "back from leave"], { osUser: () => "wfabian" });
+    expect(r.code).toBe(0);
+    expect(r.stdout).toContain("'wfabian (scripts/on-call-change.ts)'");
+    const none = runChange(["activate", "Ada Lin", "--reason", "back from leave"], { osUser: () => "" });
+    expect(none.code).toBe(2);
+    expect(none.stderr).toMatch(/no actor/);
+  });
+
+  it("uses the cover's --reason for the override and the audit row alike", () => {
+    const sql = change(["cover", "--from", "2026-12-10 17:00", "--to", "2026-12-11 08:00", "--by", "Ada Lin"]).stdout;
+    expect(sql.match(/'test change'/g)!.length).toBeGreaterThanOrEqual(2);
   });
 });

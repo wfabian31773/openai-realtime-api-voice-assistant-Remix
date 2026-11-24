@@ -34,8 +34,8 @@ export function AuditTab() {
   return (
     <div className="space-y-4">
       <p className="text-xs text-muted-foreground">
-        Every change made on this page, with who made it and why, written in the same transaction as the change. Changes made by hand with
-        scripts/on-call-change.ts are NOT in this log.
+        Every change made on this page, with who made it and why, written in the same transaction as the change. Changes made with
+        scripts/on-call-change.ts are logged here too from 2026-11-24, their actor marked "(scripts/on-call-change.ts)".
       </p>
       <div className="flex flex-wrap items-end gap-2">
         <div>

@@ -431,17 +431,31 @@ one provider (case and spacing aside). `--out` works as it does for the first
 load: never inside the repository, and the file readable only by you.
 
 ```sh
-npx tsx scripts/on-call-change.ts <command> [options] [--out ~/change.sql]
+npx tsx scripts/on-call-change.ts <command> [options] --reason "<why>" [--actor "<name or email>"] [--out ~/change.sql]
 ```
 
+**Every change is audited, from now on** (operator, 2026-11-24). Each command
+needs `--reason`, and takes `--actor` (your name or email; the OS user when it
+is not given). The SQL writes one `on_call_audit_log` row in the same
+transaction as the change, with the action names the admin page writes
+(`schedule.swap_week`, `override.create`, `provider.create`,
+`schedule.extend`, `provider.deactivate`, `provider.activate`,
+`director.set`), the actor as `<actor> (scripts/on-call-change.ts)`, the
+reason, and the row before and after as JSON where the SQL can read it (a new
+provider, cover or extension has no "before"). **It needs
+`migrations/add_on_call_admin.sql` applied**: without the audit table the SQL
+refuses before it changes anything. On a cover, `--reason` is also the
+cover's own reason.
+
 The same changes can be made on the Operations Hub's **After-Hours On-Call**
-page (`/on-call`, admins only), which writes an audit row for each one; see
-section 9. Changes made with this script are **not** in that audit log.
+page (`/on-call`, admins only), which writes the same audit rows; see
+section 9. Changes made with this script before 2026-11-24 are not in the
+audit log.
 
 ### A swap for a whole week
 
 ```sh
-npx tsx scripts/on-call-change.ts swap --week 2026-12-08 --to "Dr. Name" --note "traded with Dr. Other"
+npx tsx scripts/on-call-change.ts swap --week 2026-12-08 --to "Dr. Name" --note "traded with Dr. Other" --reason "traded weeks"
 ```
 
 The week is the Tuesday it starts. The whole week (Tuesday 5:00 PM to the
@@ -460,7 +474,7 @@ one entered last wins.
 
 ```sh
 npx tsx scripts/on-call-change.ts add-provider --name "Dr. Name" --phone "909-555-0100" \
-  --region "Inland Empire" --email name@example.com --npi 1234567890
+  --region "Inland Empire" --email name@example.com --npi 1234567890 --reason "new hire"
 ```
 
 A new provider goes to **the end of the rotation**. No week already on the
@@ -472,13 +486,13 @@ A name already on file is refused: a provider who comes back is `activate`.
 A new medical director who takes escalations and no weeks:
 
 ```sh
-npx tsx scripts/on-call-change.ts add-provider --name "Dr. Name" --phone "..." --region "Los Angeles" --escalation-only
+npx tsx scripts/on-call-change.ts add-provider --name "Dr. Name" --phone "..." --region "Los Angeles" --escalation-only --reason "new RMD"
 ```
 
 ### More weeks
 
 ```sh
-npx tsx scripts/on-call-change.ts extend --weeks 8
+npx tsx scripts/on-call-change.ts extend --weeks 8 --reason "schedule through March"
 ```
 
 Adds weeks after the last one on the schedule, continuing the rotation order
@@ -490,8 +504,8 @@ deactivate them, and run it again.
 ### A provider leaving, or coming back
 
 ```sh
-npx tsx scripts/on-call-change.ts deactivate "Dr. Name"
-npx tsx scripts/on-call-change.ts activate "Dr. Name"
+npx tsx scripts/on-call-change.ts deactivate "Dr. Name" --reason "left the practice"
+npx tsx scripts/on-call-change.ts activate "Dr. Name" --reason "back from leave"
 ```
 
 A deactivated provider is skipped by `extend`, and a swap or cover to them is
@@ -504,8 +518,8 @@ and the lookup and the alert say so (`override_provider_inactive` or
 ### A region's director
 
 ```sh
-npx tsx scripts/on-call-change.ts set-director --region "Orange County" --director "Dr. Name"
-npx tsx scripts/on-call-change.ts set-director --region FINAL --director "Dr. Dwayne K. Logan"
+npx tsx scripts/on-call-change.ts set-director --region "Orange County" --director "Dr. Name" --reason "new RMD"
+npx tsx scripts/on-call-change.ts set-director --region FINAL --director "Dr. Dwayne K. Logan" --reason "final director"
 ```
 
 `FINAL` is the last rung after every region's director. A region not on file
@@ -749,7 +763,8 @@ changes no phone routing and nothing under `src/runtime/`.
 
 Without (1) the page shows a banner and nothing else. With (1) and not (2) it
 shows everything but **refuses every change**, because each change writes its
-audit row in the same transaction and there is nowhere to write it.
+audit row in the same transaction and there is nowhere to write it. The SQL
+`scripts/on-call-change.ts` prints refuses the same way until (2) is applied.
 
 ### Tabs
 
@@ -760,7 +775,7 @@ audit row in the same transaction and there is nowhere to write it.
 | Providers | full phone numbers (the only place they appear), add, edit, deactivate / reactivate (with the weeks, covers and director rows still pointing at them), delete only when never referenced, reorder the rotation | wired |
 | Escalation | region → director, FINAL included (the runtime reads it); the environment and the cadence, read-only; the open decisions in section 8 | wired (env and cadence read-only) |
 | Calls | every on-call chain, plus after-hours calls that asked to escalate and opened no chain; each opens a timeline merging `call_logs`, transcript lines, tool calls, `call_events`, the chain, every attempt and the call's tickets, with a link to the call details page | wired; "not captured yet" panel lists what is not recorded |
-| Audit log | every change from the page, who, when, before and after, reason; filters | wired |
+| Audit log | every change from the page and, from 2026-11-24, from `scripts/on-call-change.ts` (actor shown as `<actor> (scripts/on-call-change.ts)`): who, when, before and after, reason; filters | wired |
 
 ### Rules the page enforces (the CLI's, plus a few)
 

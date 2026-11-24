@@ -505,6 +505,64 @@ function lookupProvider(name: string, variable: string, anyRow = false): string 
   ].join("\n");
 }
 
+// ── The audit row each change writes ────────────────────────────────────────
+//
+// Operator, 2026-11-24: changes made with scripts/on-call-change.ts are
+// audited from now on, in on_call_audit_log (migrations/add_on_call_admin.sql),
+// with the same action names the admin page writes. The row is inserted in the
+// change's own transaction, so a change without its audit row does not land.
+
+/** Who made a change and why. Both are required for an audit row. */
+export interface ChangeAudit {
+  /** A name or email; the script falls back to the OS user. */
+  actor: string;
+  reason: string;
+}
+
+/** The source the CLI's audit rows name, beside the actor. */
+export const CLI_AUDIT_SOURCE = "scripts/on-call-change.ts";
+
+function checkAudit(audit: ChangeAudit | undefined): void {
+  if (!audit) return;
+  const problems: string[] = [];
+  if (!audit.actor.trim()) problems.push("no actor: pass --actor <name or email>");
+  if (!audit.reason.trim()) problems.push("no reason: pass --reason \"<why>\"");
+  if (audit.reason.length > 1000) problems.push("the reason is longer than 1000 characters");
+  if (problems.length) throw new SeedError(problems);
+}
+
+/** Refuses, before anything is written, when the audit table is not there. */
+function auditTableCheck(audit: ChangeAudit | undefined): string[] {
+  if (!audit) return [];
+  return [
+    `DO $oncall$ BEGIN`,
+    `  IF to_regclass('on_call_audit_log') IS NULL THEN`,
+    `    RAISE EXCEPTION 'on_call_audit_log is missing: apply migrations/add_on_call_admin.sql first; nothing was changed';`,
+    `  END IF;`,
+    `END $oncall$;`,
+  ];
+}
+
+/**
+ * The INSERT of one audit row. `entityId`, `before` and `after` are SQL
+ * expressions (a variable, a subselect, or NULL).
+ */
+function auditInsert(
+  audit: ChangeAudit | undefined,
+  row: { action: string; entityType: string; entityId: string; before: string; after: string },
+  indent = "  ",
+): string[] {
+  if (!audit) return [];
+  return [
+    `${indent}INSERT INTO on_call_audit_log (actor_user_id, actor_email, action, entity_type, entity_id, before, after, reason)`,
+    `${indent}VALUES (NULL, ${lit(`${audit.actor.trim()} (${CLI_AUDIT_SOURCE})`)}, ${lit(row.action)}, ${lit(row.entityType)},`,
+    `${indent}        ${row.entityId}, ${row.before}, ${row.after}, ${lit(audit.reason.trim())});`,
+  ];
+}
+
+/** A provider row as audit JSON: every column but the timestamps. */
+const PROVIDER_JSON = (alias: string) => `to_jsonb(${alias}) - 'created_at' - 'updated_at'`;
+
 function requireDate(raw: string, what: string): string {
   const d = readDate(raw);
   if (!d) throw new SeedError([`${what}: "${raw}" is not a date`]);
@@ -533,7 +591,9 @@ export function addProviderSql(input: {
   npi?: string;
   escalationOnly?: boolean;
   newRegion?: boolean;
+  audit?: ChangeAudit;
 }): string {
+  checkAudit(input.audit);
   const problems: string[] = [];
   const phone = readPhone(input.phone);
   if (!input.name.trim()) problems.push("no name");
@@ -548,8 +608,10 @@ export function addProviderSql(input: {
   if (problems.length) throw new SeedError(problems);
   const name = lit(input.name.trim().replace(/\s+/g, " "));
   const known = `(SELECT region FROM on_call_escalation_directors WHERE ${regionIs(region)})`;
+  const named = `lower(regexp_replace(p.full_name, '\\s+', ' ', 'g')) = lower(${name})`;
   return [
     `BEGIN;`,
+    ...auditTableCheck(input.audit),
     `DO $oncall$ BEGIN`,
     `  IF EXISTS (SELECT 1 FROM on_call_providers WHERE lower(regexp_replace(full_name, '\\s+', ' ', 'g')) = lower(${name})) THEN`,
     `    RAISE EXCEPTION 'a provider named % is already on file; to bring them back use activate', ${name};`,
@@ -569,6 +631,15 @@ export function addProviderSql(input: {
     `        COALESCE(${known}, ${lit(region)}),`,
     `        ${input.escalationOnly ? "NULL" : "(SELECT COALESCE(MAX(rotation_order), 0) + 1 FROM on_call_providers)"}, true)`,
     `RETURNING id, full_name, region, rotation_order;`,
+    ...(input.audit
+      ? [
+          // The row just added: its name was refused above if already on file.
+          `INSERT INTO on_call_audit_log (actor_user_id, actor_email, action, entity_type, entity_id, before, after, reason)`,
+          `SELECT NULL, ${lit(`${input.audit.actor.trim()} (${CLI_AUDIT_SOURCE})`)}, 'provider.create', 'provider', p.id::text, NULL,`,
+          `       ${PROVIDER_JSON("p")}, ${lit(input.audit.reason.trim())}`,
+          `  FROM on_call_providers p WHERE ${named};`,
+        ]
+      : []),
     `COMMIT;`,
     ``,
   ].join("\n");
@@ -581,10 +652,11 @@ export function addProviderSql(input: {
  * the rotation). RETURNING shows what was added; ROLLBACK instead of COMMIT
  * undoes it.
  */
-export function extendScheduleSql(weeks: number): string {
+export function extendScheduleSql(weeks: number, audit?: ChangeAudit): string {
   if (!Number.isInteger(weeks) || weeks < 1 || weeks > 104) {
     throw new SeedError([`weeks must be a whole number from 1 to 104, not ${weeks}`]);
   }
+  checkAudit(audit);
   // The weeks to add, as a CTE chain ending in `planned (week, provider_id)`:
   // read once by the phone check and once by the insert, so the two cannot
   // disagree about who gets a week.
@@ -610,6 +682,7 @@ export function extendScheduleSql(weeks: number): string {
     ].map((l) => indent + l);
   return [
     `BEGIN;`,
+    ...auditTableCheck(audit),
     // Operator, 2026-11-24: an extension that would give a week to a provider
     // with no dialable phone is refused, naming them, and adds nothing.
     `DO $oncall$ DECLARE bad text; BEGIN`,
@@ -627,6 +700,20 @@ export function extendScheduleSql(weeks: number): string {
     `  SELECT week, provider_id, 'added by scripts/on-call-change.ts extend' FROM planned`,
     `  RETURNING week_starts_on, provider_id`,
     `)`,
+    ...(audit
+      ? [
+          // One audit row for the whole extension, in the admin page's shape
+          // (schedule.extend, after = [{ week, providerId }]).
+          `, audited AS (`,
+          `  INSERT INTO on_call_audit_log (actor_user_id, actor_email, action, entity_type, entity_id, before, after, reason)`,
+          `  SELECT NULL, ${lit(`${audit.actor.trim()} (${CLI_AUDIT_SOURCE})`)}, 'schedule.extend', 'schedule',`,
+          `         min(week_starts_on)::text || '..' || max(week_starts_on)::text, NULL,`,
+          `         jsonb_agg(jsonb_build_object('week', week_starts_on, 'providerId', provider_id) ORDER BY week_starts_on),`,
+          `         ${lit(audit.reason.trim())}`,
+          `    FROM added HAVING count(*) > 0`,
+          `)`,
+        ]
+      : []),
     `SELECT a.week_starts_on, p.full_name, p.region FROM added a JOIN on_call_providers p ON p.id = a.provider_id`,
     ` ORDER BY a.week_starts_on;`,
     `-- Read the weeks above. COMMIT keeps them; ROLLBACK drops them.`,
@@ -636,16 +723,21 @@ export function extendScheduleSql(weeks: number): string {
 }
 
 /** A whole week given to someone else. */
-export function swapWeekSql(input: { week: string; to: string; note?: string }): string {
+export function swapWeekSql(input: { week: string; to: string; note?: string; audit?: ChangeAudit }): string {
+  checkAudit(input.audit);
   const week = requireDate(input.week, "week");
   if (weekday(week) !== 2) throw new SeedError([`${week} is not a Tuesday (a week starts on Tuesday at 5:00 PM)`]);
   const note = input.note?.trim() || `swapped to ${input.to.trim()}`;
   return [
     `BEGIN;`,
-    `DO $oncall$ DECLARE n int; who int; BEGIN`,
+    ...auditTableCheck(input.audit),
+    `DO $oncall$ DECLARE n int; who int; prev jsonb; nxt jsonb; BEGIN`,
     lookupProvider(input.to, "who"),
+    `  SELECT to_jsonb(s) INTO prev FROM on_call_schedule s WHERE week_starts_on = '${week}';`,
     `  UPDATE on_call_schedule SET provider_id = who, note = ${lit(note)}, updated_at = now() WHERE week_starts_on = '${week}';`,
     `  IF NOT FOUND THEN RAISE EXCEPTION 'the week of % is not on the schedule', '${week}'; END IF;`,
+    ...(input.audit ? [`  SELECT to_jsonb(s) INTO nxt FROM on_call_schedule s WHERE week_starts_on = '${week}';`] : []),
+    ...auditInsert(input.audit, { action: "schedule.swap_week", entityType: "schedule", entityId: `'${week}'`, before: "prev", after: "nxt" }),
     `END $oncall$;`,
     `COMMIT;`,
     ``,
@@ -674,7 +766,8 @@ export function readPacificTime(raw: string): string | null {
  * the window and never WHETHER: daytime inside it is still not on call. Times
  * are Pacific wall-clock.
  */
-export function coverSql(input: { from: string; to: string; by: string; reason?: string }): string {
+export function coverSql(input: { from: string; to: string; by: string; reason?: string; audit?: ChangeAudit }): string {
+  checkAudit(input.audit);
   const from = readPacificTime(input.from);
   const to = readPacificTime(input.to);
   const problems: string[] = [];
@@ -685,24 +778,46 @@ export function coverSql(input: { from: string; to: string; by: string; reason?:
   const reason = input.reason?.trim() || `cover by ${input.by.trim()}`;
   return [
     `BEGIN;`,
-    `DO $oncall$ DECLARE n int; who int; BEGIN`,
+    ...auditTableCheck(input.audit),
+    `DO $oncall$ DECLARE n int; who int; new_id int; nxt jsonb; BEGIN`,
     lookupProvider(input.by, "who"),
     `  INSERT INTO on_call_overrides (starts_at, ends_at, provider_id, reason)`,
     `  VALUES (('${from}'::timestamp AT TIME ZONE 'America/Los_Angeles'),`,
-    `          ('${to}'::timestamp AT TIME ZONE 'America/Los_Angeles'), who, ${lit(reason)});`,
+    `          ('${to}'::timestamp AT TIME ZONE 'America/Los_Angeles'), who, ${lit(reason)})`,
+    `  RETURNING id INTO new_id;`,
+    ...(input.audit ? [`  SELECT to_jsonb(o) INTO nxt FROM on_call_overrides o WHERE id = new_id;`] : []),
+    ...auditInsert(input.audit, { action: "override.create", entityType: "override", entityId: "new_id::text", before: "NULL", after: "nxt" }),
     `END $oncall$;`,
     `COMMIT;`,
     ``,
   ].join("\n");
 }
 
+/** The UPDATE of a provider's `active`, with its audit row (the admin page's action names). */
+function providerActiveChange(active: boolean, audit: ChangeAudit | undefined): string[] {
+  return [
+    ...(audit ? [`  SELECT ${PROVIDER_JSON("p")} INTO prev FROM on_call_providers p WHERE id = who;`] : []),
+    `  UPDATE on_call_providers SET active = ${active}, updated_at = now() WHERE id = who;`,
+    ...(audit ? [`  SELECT ${PROVIDER_JSON("p")} INTO nxt FROM on_call_providers p WHERE id = who;`] : []),
+    ...auditInsert(audit, {
+      action: active ? "provider.activate" : "provider.deactivate",
+      entityType: "provider",
+      entityId: "who::text",
+      before: "prev",
+      after: "nxt",
+    }),
+  ];
+}
+
 /** Takes a provider off the rotation and the chain; their weeks ring only the final director until swapped. */
-export function deactivateSql(name: string): string {
+export function deactivateSql(name: string, audit?: ChangeAudit): string {
+  checkAudit(audit);
   return [
     `BEGIN;`,
-    `DO $oncall$ DECLARE n int; who int; BEGIN`,
+    ...auditTableCheck(audit),
+    `DO $oncall$ DECLARE n int; who int; prev jsonb; nxt jsonb; BEGIN`,
     lookupProvider(name, "who", true),
-    `  UPDATE on_call_providers SET active = false, updated_at = now() WHERE id = who;`,
+    ...providerActiveChange(false, audit),
     `END $oncall$;`,
     `-- Their scheduled weeks from today on (swap each with on-call-change.ts swap):`,
     `SELECT s.week_starts_on FROM on_call_schedule s JOIN on_call_providers p ON p.id = s.provider_id`,
@@ -714,12 +829,14 @@ export function deactivateSql(name: string): string {
 }
 
 /** Puts a provider taken off with `deactivateSql` back, at the place in the rotation they had. */
-export function activateSql(name: string): string {
+export function activateSql(name: string, audit?: ChangeAudit): string {
+  checkAudit(audit);
   return [
     `BEGIN;`,
-    `DO $oncall$ DECLARE n int; who int; BEGIN`,
+    ...auditTableCheck(audit),
+    `DO $oncall$ DECLARE n int; who int; prev jsonb; nxt jsonb; BEGIN`,
     lookupProvider(name, "who", true),
-    `  UPDATE on_call_providers SET active = true, updated_at = now() WHERE id = who;`,
+    ...providerActiveChange(true, audit),
     `END $oncall$;`,
     `COMMIT;`,
     ``,
@@ -731,19 +848,30 @@ export function activateSql(name: string): string {
  * region that is not on file is refused unless `newRegion`, so a misspelt
  * region cannot quietly start a second one beside the real one.
  */
-export function setDirectorSql(input: { region: string; director: string; newRegion?: boolean }): string {
+export function setDirectorSql(input: { region: string; director: string; newRegion?: boolean; audit?: ChangeAudit }): string {
+  checkAudit(input.audit);
   const region = cleanRegion(input.region);
   if (!region) throw new SeedError(["no region"]);
   return [
     `BEGIN;`,
-    `DO $oncall$ DECLARE n int; who int; BEGIN`,
+    ...auditTableCheck(input.audit),
+    `DO $oncall$ DECLARE n int; who int; prev jsonb; nxt jsonb; BEGIN`,
     lookupProvider(input.director, "who"),
+    ...(input.audit ? [`  SELECT to_jsonb(d) INTO prev FROM on_call_escalation_directors d WHERE ${regionIs(region)};`] : []),
     `  UPDATE on_call_escalation_directors SET provider_id = who, updated_at = now() WHERE ${regionIs(region)};`,
     `  IF NOT FOUND THEN`,
     ...(input.newRegion
       ? [`    INSERT INTO on_call_escalation_directors (region, provider_id) VALUES (${lit(region)}, who);`]
       : [`    RAISE EXCEPTION 'region % is not on file; check the spelling, or pass --new-region for a new region', ${lit(region)};`]),
     `  END IF;`,
+    ...(input.audit ? [`  SELECT to_jsonb(d) INTO nxt FROM on_call_escalation_directors d WHERE ${regionIs(region)};`] : []),
+    ...auditInsert(input.audit, {
+      action: "director.set",
+      entityType: "director",
+      entityId: `COALESCE(nxt->>'region', ${lit(region)})`,
+      before: "prev",
+      after: "nxt",
+    }),
     `END $oncall$;`,
     `COMMIT;`,
     ``,

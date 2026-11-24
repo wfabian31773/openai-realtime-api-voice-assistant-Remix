@@ -20,8 +20,10 @@
 --                       YET: no code under src/runtime/ inserts here. The page
 --                       reads it and labels the section "placeholder".
 --
--- Changes made with scripts/on-call-change.ts (SQL run by hand) are NOT in the
--- audit log.
+-- Changes made with scripts/on-call-change.ts (SQL run by hand) are audited
+-- here too, from 2026-11-24: its SQL inserts an on_call_audit_log row in the
+-- same transaction (actor_email "<actor> (scripts/on-call-change.ts)") and
+-- refuses to run until this file is applied.
 --
 -- Reversal (deletes the audit history):
 --   DROP TABLE IF EXISTS on_call_call_events, on_call_audit_log;

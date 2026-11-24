@@ -396,6 +396,17 @@ describe("changes after the seed", () => {
     expect(() => extendScheduleSql(104)).not.toThrow();
   });
 
+  it("writes an audit row only when told who and why, and refuses a blank actor or reason", () => {
+    expect(swapWeekSql({ week: "2026-12-08", to: "Ben Ortiz" })).not.toContain("on_call_audit_log");
+    expect(extendScheduleSql(2)).not.toContain("on_call_audit_log");
+    const audited = swapWeekSql({ week: "2026-12-08", to: "Ben Ortiz", audit: { actor: "ops", reason: "it's a trade" } });
+    expect(audited).toContain("'it''s a trade'");
+    expect(problemsOf(() => swapWeekSql({ week: "2026-12-08", to: "Ben Ortiz", audit: { actor: " ", reason: "" } }))).toEqual([
+      "no actor: pass --actor <name or email>",
+      'no reason: pass --reason "<why>"',
+    ]);
+  });
+
   it("refuses, naming them, an extension that gives a week to a provider with no dialable phone", () => {
     const sql = extendScheduleSql(4);
     const check = sql.indexOf("RAISE EXCEPTION 'extend refused:");
