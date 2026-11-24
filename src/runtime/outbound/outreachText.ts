@@ -37,8 +37,8 @@
  */
 
 import { createHash, randomBytes } from "node:crypto";
-import type { ContactSource, OutboundLanePolicy } from "./campaign";
-import { mayDialNow } from "./callingWindow";
+import { askOfferCheck, type ContactSource, type OutboundLanePolicy } from "./campaign";
+import { mayDialNow, tomorrowAtOpening } from "./callingWindow";
 import { OUTREACH_TEXT_KEY, TEXTABLE_STATUSES, dncKey, type ContactRow, type OutboundStore } from "./store";
 import { failureFromUnknown } from "../../plugin/sendFailure";
 import type { SmsSender } from "../../plugin/sms";
@@ -200,7 +200,7 @@ export async function runTextTick(
     const due = await deps.store.textableContacts(campaignId, now, perTick * 3);
     for (const candidate of due) {
       if (result.sent >= perTick) break;
-      const held = await textOne(slug, candidate, text, from, now, deps, source);
+      const held = await textOne(slug, candidate, text, from, now, deps, source, policy);
       if (held) result.held[held] = (result.held[held] ?? 0) + 1;
       else result.sent += 1;
     }
@@ -225,6 +225,7 @@ async function textOne(
   now: Date,
   deps: TextDeps,
   source: ContactSource | null,
+  policy: Pick<OutboundLanePolicy, "offerCheck" | "window" | "caps">,
 ): Promise<string | null> {
   // A row the source never wrote has nothing to re-check against.
   if (source && !candidate.externalRef) return "not_from_source";
@@ -242,6 +243,8 @@ async function textOne(
   const later = new Date(now.getTime() + TEXT_RETRY_MS).toISOString();
 
   let phone = claimed.phone;
+  // The fields the offer check reads (v271): today's from the source.
+  let offerData = claimed.customData;
   if (source && claimed.externalRef) {
     let live;
     try {
@@ -260,12 +263,47 @@ async function textOne(
       return live.state === "off_list" ? "off_list" : "no_phone";
     }
     phone = live.contact.phone;
+    offerData = { ...claimed.customData, ...live.contact.data };
   }
 
   const key = dncKey(phone);
   // An unreadable number is refused, and any do-not-contact row — a voice
   // "don't call me" or an SMS STOP — blocks a text.
   if (!key || (await deps.store.isDoNotContact(phone))) {
+    await deps.store.patchText(claimed.id, { state: "skipped", reason: "do_not_contact" });
+    return "do_not_contact";
+  }
+
+  // THE OFFER CHECK (v271): a link to a page with nothing on it is not sent.
+  // Nothing to offer waits for tomorrow's window; an answer that could not be
+  // read waits the ordinary retry.
+  const offer = await askOfferCheck(policy, { id: claimed.id, customData: offerData });
+  if (offer !== "offerable") {
+    const nothing = offer === "nothing_to_offer";
+    await deps.store.patchText(claimed.id, {
+      state: "retry",
+      retry_after: nothing ? tomorrowAtOpening(now, policy.window.startHour).toISOString() : later,
+      reason: nothing ? "no_opening" : "offer_unknown",
+    });
+    return nothing ? "no_opening" : "offer_unknown";
+  }
+  // The window again, on the clock as it is now: the tick checked it once at
+  // its start, and each offer check before this one can take seconds (review
+  // of #519). A text the window has closed on waits for tomorrow's opening.
+  const at = (deps.now ?? (() => new Date()))();
+  const stillOpen = mayDialNow(at, [], policy.window, policy.caps);
+  if (!stillOpen.ok) {
+    await deps.store.patchText(claimed.id, {
+      state: "retry",
+      retry_after: tomorrowAtOpening(at, policy.window.startHour).toISOString(),
+      reason: stillOpen.reason,
+    });
+    return stillOpen.reason;
+  }
+  // The do-not-contact list again, last: an opt-out recorded while the offer
+  // check waited on NPX is honoured before the text goes (review of #519,
+  // round 3).
+  if (await deps.store.isDoNotContact(phone)) {
     await deps.store.patchText(claimed.id, { state: "skipped", reason: "do_not_contact" });
     return "do_not_contact";
   }

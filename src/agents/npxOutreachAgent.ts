@@ -53,6 +53,7 @@ import {
   STAFF_CALLBACK_TOOL_NAME,
   npxBookingPageLane,
   npxOutreachAfterCalls,
+  npxOfferCheck,
   npxOutreachMode,
   useLaneSourceForReturnedCalls,
   warmOutreachAvailability,
@@ -215,6 +216,10 @@ export const npxOutreachPolicy: OutboundLanePolicy = {
   // v226: the held Azul cancels a call's teardown did not run (the process
   // died first), run once the call is over. The hang-up runs the rest.
   afterCalls: (ctx) => npxOutreachAfterCalls(ctx, npxOutreachPolicy.campaignKey),
+  // v271: a patient NPX has no opening for is neither rung nor texted. On
+  // 2026-11-23, 4 of 18 calls that reached the offer heard that nothing
+  // sooner was open; Valley-only patients have no credentialed partner.
+  offerCheck: (contact) => npxOfferCheck(contact, npxOutreachPolicy.campaignKey),
 };
 
 // v246: a returned call is re-checked against this lane's own source, the

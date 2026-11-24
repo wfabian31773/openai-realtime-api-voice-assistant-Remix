@@ -96,6 +96,23 @@ export function pacificParts(at: Date): PacificParts {
   };
 }
 
+/**
+ * Tomorrow, at `startHour` in Pacific time: found by stepping forward an hour
+ * at a time until the clock reads that hour on another Pacific date, so it
+ * stays right across a daylight-saving change.
+ */
+export function tomorrowAtOpening(now: Date, startHour: number): Date {
+  const hour = 60 * 60 * 1000;
+  const today = pacificParts(now).date;
+  let t = new Date(now.getTime() + hour);
+  for (let i = 0; i < 24 * 8; i++) {
+    const p = pacificParts(t);
+    if (p.date !== today && p.hour === startHour) return t;
+    t = new Date(t.getTime() + hour);
+  }
+  return new Date(now.getTime() + 24 * hour);
+}
+
 // ── Holidays ────────────────────────────────────────────────────────────────
 
 function iso(d: Date): string {

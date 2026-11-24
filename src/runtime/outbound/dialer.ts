@@ -57,12 +57,13 @@
 import type { ContactSource, NotPlacedReason, OutboundLanePolicy, SourceContact } from "./campaign";
 import {
   REFUSAL_STREAK_WINDOW_MS,
+  askOfferCheck,
   campaignEnabled,
   placeByPassed,
   resolvedInfraRetryMinutes,
   resolvedMaxConsecutiveInfraRetries,
 } from "./campaign";
-import { mayDialNow, pacificParts } from "./callingWindow";
+import { mayDialNow, tomorrowAtOpening } from "./callingWindow";
 import { NOT_PLACED, OUTREACH_TEXT_KEY, dncKey, type ContactRow, type OutboundStore } from "./store";
 import { VOICE_PATH_PREFIX } from "../voiceWebhook";
 
@@ -226,18 +227,12 @@ export function nextLookAt(now: Date, reason: string, policy: OutboundLanePolicy
     case "outside_hours":
     case "closed_day":
     case "holiday":
-    case "daily_cap": {
-      // Tomorrow, at the window's opening hour in Pacific time — computed by
-      // stepping forward an hour at a time until the window opens, so it
-      // stays right across a daylight-saving change.
-      let t = new Date(now.getTime() + hour);
-      for (let i = 0; i < 24 * 8; i++) {
-        const p = pacificParts(t);
-        if (p.date !== pacificParts(now).date && p.hour === policy.window.startHour) return t;
-        t = new Date(t.getTime() + hour);
-      }
-      return new Date(now.getTime() + 24 * hour);
-    }
+    case "daily_cap":
+    // v271: nothing to offer today. Availability changes as partners publish
+    // their schedules, so the person is looked at again tomorrow.
+    case "no_opening":
+      // Tomorrow, at the window's opening hour in Pacific time.
+      return tomorrowAtOpening(now, policy.window.startHour);
     case "weekly_cap":
       return new Date(now.getTime() + 24 * hour);
     case "twilio_refused": {
@@ -418,6 +413,12 @@ async function dialOne(
   // THE LIVE RE-CHECK (v107), holding the claim and before anything else:
   // the list the queue was refreshed from can be fifteen minutes old, and an
   // appointment cancelled since must not be the reason we ring somebody.
+  // The fields the offer check reads (v271): today's from the source when
+  // there is one, over the row's own.
+  let offerData = contact.customData;
+  // Today's record from the source when it no longer matches the row: written
+  // onto the row before the call, because the call reads the row (review of #519).
+  let changedAtSource: (SourceContact & { phone: string }) | null = null;
   if (source) {
     if (!contact.externalRef) {
       // A row the source never wrote has nothing to re-check against.
@@ -440,6 +441,11 @@ async function dialOne(
     if (live.state === "off_list" || !live.contact.phone) {
       await deps.store.releaseContact(contact.id, candidate.status, new Date(now.getTime() + source.parkMs));
       return live.state === "off_list" ? "off_list" : "no_phone";
+    }
+    offerData = { ...contact.customData, ...live.contact.data };
+    const fresh = live.contact.data;
+    if (Object.keys(fresh).some((k) => JSON.stringify(fresh[k]) !== JSON.stringify(contact.customData[k]))) {
+      changedAtSource = { ...live.contact, phone: live.contact.phone };
     }
     if (dncKey(live.contact.phone) !== dncKey(contact.phone)) {
       // Today's number from the source, before the do-not-contact check reads it.
@@ -505,6 +511,58 @@ async function dialOne(
     // has already had a voicemail left keeps saying so.
     await deps.store.releaseContact(contact.id, candidate.status, nextLookAt(now, decision.reason, policy));
     return decision.reason;
+  }
+  // THE OFFER CHECK (v271), last, so it is only asked of a person we would
+  // ring now: a person the campaign has nothing to offer is not rung. On
+  // 2026-11-23, 4 of 18 NPX calls that reached the offer told the patient
+  // nothing sooner was open. Nothing to offer waits for tomorrow's window;
+  // an answer that could not be read waits a short while.
+  const offer = await askOfferCheck(policy, { id: contact.id, customData: offerData });
+  if (offer !== "offerable") {
+    const nothing = offer === "nothing_to_offer";
+    await deps.store.releaseContact(
+      contact.id,
+      candidate.status,
+      nextLookAt(now, nothing ? "no_opening" : "twilio_refused", policy),
+    );
+    return nothing ? "no_opening" : "offer_unknown";
+  }
+  // The call reads the row, so the fields the offer check approved are on the
+  // row before anybody is rung; a write that fails rings nobody. Written
+  // before the clock is read again, so the time the write takes counts
+  // against the window and the deadline too (review of #519, round 3).
+  if (changedAtSource) {
+    try {
+      await deps.store.upsertSourceContacts(campaignId, [changedAtSource]);
+    } catch {
+      await deps.store.releaseContact(contact.id, candidate.status, nextLookAt(now, "twilio_refused", policy));
+      return "source_write_failed";
+    }
+  }
+  // The offer check can take seconds, and the tick asks each candidate in turn
+  // under the one timestamp it started with: the place-by deadline and the
+  // window are read again on the clock as it is now, so nobody is rung after
+  // either has passed (review of #519).
+  const at = (deps.now ?? (() => new Date()))();
+  if (!dialledThisRow && placeByPassed(contact.customData, at)) {
+    await deps.store.settleContact(contact.id, "rescheduled", {
+      notes: "not placed before its place-by deadline; never rung",
+    });
+    await notPlaced("place_by_passed");
+    return "place_by_passed";
+  }
+  const stillOpen = mayDialNow(at, prior, policy.window, policy.caps);
+  if (!stillOpen.ok) {
+    await deps.store.releaseContact(contact.id, candidate.status, nextLookAt(at, stillOpen.reason, policy));
+    return stillOpen.reason;
+  }
+  // The do-not-contact list again, last: an opt-out recorded while the offer
+  // check waited on NPX is honoured before anybody is rung (review of #519,
+  // round 3).
+  if (await deps.store.isDoNotContact(contact.phone)) {
+    await deps.store.settleContact(contact.id, "do_not_call");
+    await notPlaced("do_not_contact");
+    return "do_not_contact";
   }
 
   const attemptId = await deps.store.startAttempt(contact.id, campaignId, prior.length + 1);
