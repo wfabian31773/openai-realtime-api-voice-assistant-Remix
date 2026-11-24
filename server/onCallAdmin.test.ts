@@ -1,0 +1,407 @@
+import { describe, expect, it, vi } from "vitest";
+import type { Express, RequestHandler } from "express";
+import { requireAuth, requireRole } from "./auth";
+import { mountOnCallAdmin, ON_CALL_API } from "./onCallAdmin";
+import { emptyFakeState, FakeOnCallAdminStore, type FakeOptions, type FakeState } from "./onCallAdmin/store.fake";
+import { pacificWallToDate } from "./onCallAdmin/logic";
+
+vi.mock("./db", () => ({ db: {} }));
+
+// Fri Dec 4 2026, 10:00 PM Pacific: off hours, rotation week of Tue Dec 1.
+const NOW = new Date("2026-12-05T06:00:00Z");
+const SID = "CA00000000000000000000000000000001";
+
+function fixture(): FakeState {
+  const s = emptyFakeState();
+  const prov = (id: number, name: string, region: string, rotationOrder: number | null, extra: Partial<FakeState["providers"][0]> = {}) => ({
+    id,
+    fullName: name,
+    npi: null,
+    phone: `+1555555${String(100 + id).padStart(4, "0")}`,
+    email: null,
+    region,
+    rotationOrder,
+    active: true,
+    createdAt: null,
+    updatedAt: null,
+    ...extra,
+  });
+  s.providers = [
+    prov(1, "Dr. Test Alpha", "Inland Empire", 1),
+    prov(2, "Dr. Test Beta", "Los Angeles", 2),
+    prov(3, "Dr. Test Gamma", "Inland Empire", 3),
+    prov(4, "Dr. Test Inactive", "Inland Empire", 4, { active: false }),
+    prov(5, "Dr. Test NoPhone", "Inland Empire", 5, { phone: "" }),
+    prov(6, "Dr. Test Unused", "Inland Empire", null),
+    prov(10, "Dr. Test Director", "Inland Empire", null),
+    prov(11, "Dr. Test Final", "San Diego", null),
+  ];
+  s.directors = [
+    { region: "Inland Empire", providerId: 10, updatedAt: null },
+    { region: "Los Angeles", providerId: 10, updatedAt: null },
+    { region: "San Diego", providerId: 11, updatedAt: null },
+    { region: "FINAL", providerId: 11, updatedAt: null },
+  ];
+  s.schedule = [
+    { week: "2026-12-01", providerId: 1, note: null, updatedAt: null },
+    { week: "2026-12-08", providerId: 2, note: null, updatedAt: null },
+    { week: "2026-12-22", providerId: 3, note: null, updatedAt: null },
+  ];
+  s.escalations = [
+    {
+      id: 7,
+      callSid: SID,
+      mode: "test",
+      status: "exhausted",
+      levelIndex: 1,
+      attemptNo: 2,
+      routing: { reason: "on_call", window: "off_hours", weekStartsOn: "2026-12-01" },
+      plan: { levels: [{ role: "on_call", providerId: 1, name: "Dr. Test Alpha" }, { role: "final", providerId: 11, name: "Dr. Test Final" }], notes: [] },
+      acceptedBy: null,
+      acceptedAt: null,
+      acceptedAttemptId: null,
+      createdAt: new Date("2026-12-05T05:01:00Z"),
+      updatedAt: new Date("2026-12-05T05:10:00Z"),
+    },
+  ];
+  s.attempts = [
+    { id: 1, escalationId: 7, callSid: SID, levelIndex: 0, role: "on_call", providerId: 1, kind: "warm_transfer", attemptNo: 1, mode: "test", dialedTo: "+15555550101", outcome: "no_answer", routingReason: "on_call", startedAt: new Date("2026-12-05T05:00:30Z"), endedAt: new Date("2026-12-05T05:01:00Z") },
+  ];
+  return s;
+}
+
+function boot(opts: FakeOptions = {}, state: FakeState = fixture(), env: Record<string, string> = {}) {
+  const store = new FakeOnCallAdminStore(state, opts);
+  const routes: Array<{ method: string; pattern: RegExp; keys: string[]; handlers: RequestHandler[] }> = [];
+  const reg = (method: string) => (path: string, ...handlers: RequestHandler[]) => {
+    const keys: string[] = [];
+    const pattern = new RegExp(`^${path.replace(/:(\w+)/g, (_m, k) => (keys.push(k), "([^/]+)"))}$`);
+    routes.push({ method, pattern, keys, handlers });
+  };
+  const app = { get: reg("GET"), post: reg("POST"), put: reg("PUT"), patch: reg("PATCH"), delete: reg("DELETE") } as unknown as Express;
+  mountOnCallAdmin(app, {
+    authenticate: requireAuth,
+    admin: requireRole("admin"),
+    store: () => store,
+    env,
+    now: () => NOW,
+    actor: async () => ({ userId: "staff-id", email: "admin@example.test" }),
+  });
+  async function request(method: string, path: string, role: string | null = "admin", body?: unknown) {
+    const [pathname, qs] = path.split("?");
+    const chain: RequestHandler[] = [];
+    const params: Record<string, string> = {};
+    for (const r of routes.filter((x) => x.method === method)) {
+      const m = r.pattern.exec(pathname);
+      if (!m) continue;
+      r.keys.forEach((k, i) => (params[k] = decodeURIComponent(m[i + 1])));
+      chain.push(...r.handlers);
+    }
+    if (!chain.length) throw new Error(`no route ${method} ${path}`);
+    const req = {
+      session: role ? { userId: "staff-id", userRole: role } : {},
+      body,
+      params,
+      query: Object.fromEntries(new URLSearchParams(qs ?? "")),
+      headers: {},
+    };
+    const result = { status: 200, body: undefined as any, headers: new Headers() };
+    const res = {
+      status(code: number) {
+        result.status = code;
+        return res;
+      },
+      json(value: unknown) {
+        result.body = value;
+        return res;
+      },
+      setHeader(name: string, value: string) {
+        result.headers.set(name, value);
+      },
+    };
+    async function run(i: number): Promise<void> {
+      const h = chain[i];
+      if (!h) return;
+      let next: Promise<void> | undefined;
+      await h(req as never, res as never, () => {
+        next = run(i + 1);
+      });
+      await next;
+    }
+    await run(0);
+    return result;
+  }
+  return { store, routes, request };
+}
+
+describe("every on-call route is admin-only and never cached", () => {
+  it("refuses an anonymous request and a non-admin role on every route", async () => {
+    const h = boot();
+    expect(h.routes.length).toBeGreaterThan(15);
+    for (const r of h.routes) {
+      const path = r.pattern.source.slice(1, -1).replace(/\(\[\^\/\]\+\)/g, "1").replace(/\\\//g, "/");
+      expect(r.handlers[0]).toBe(requireAuth);
+      for (const role of [null, "user", "manager"]) {
+        const res = await h.request(r.method, path, role, { reason: "x" });
+        expect(res.status, `${r.method} ${path} as ${role}`).toBe(role ? 403 : 401);
+      }
+    }
+    expect(h.store.transactions).toBe(0);
+  });
+
+  it("answers no-store", async () => {
+    const h = boot();
+    expect((await h.request("GET", `${ON_CALL_API}/now`)).headers.get("Cache-Control")).toBe("no-store");
+  });
+});
+
+describe("tables not applied", () => {
+  it("reads and writes say so instead of failing; status still answers", async () => {
+    const h = boot({ rotationTables: false, adminTables: false });
+    const status = await h.request("GET", `${ON_CALL_API}/status`);
+    expect(status.status).toBe(200);
+    expect(status.body.tables.rotation).toBe(false);
+    expect(status.body.tablesMessage).toMatch(/add_on_call_rotation\.sql/);
+    for (const [m, p] of [
+      ["GET", `${ON_CALL_API}/now`],
+      ["GET", `${ON_CALL_API}/schedule`],
+      ["GET", `${ON_CALL_API}/providers`],
+      ["GET", `${ON_CALL_API}/calls`],
+      ["POST", `${ON_CALL_API}/schedule/assign`],
+    ]) {
+      const r = await h.request(m, p, "admin", { reason: "r", week: "2026-12-08", providerId: 3 });
+      expect(r.status, p).toBe(409);
+      expect(r.body.error).toBe("on_call_tables_not_applied");
+    }
+    expect((await h.request("GET", `${ON_CALL_API}/audit`)).body).toMatchObject({ applied: false, rows: [] });
+  });
+
+  it("with the rotation applied but not the audit table, reads work and every write is refused", async () => {
+    const h = boot({ adminTables: false });
+    expect((await h.request("GET", `${ON_CALL_API}/now`)).status).toBe(200);
+    const r = await h.request("POST", `${ON_CALL_API}/schedule/assign`, "admin", { reason: "r", week: "2026-12-08", providerId: 3 });
+    expect(r.status).toBe(409);
+    expect(r.body.error).toBe("on_call_audit_not_applied");
+    expect(h.store.state.schedule.find((w) => w.week === "2026-12-08")!.providerId).toBe(2);
+  });
+});
+
+describe("who is on call", () => {
+  it("is the runtime's own answer and chain, with phones as last-4", async () => {
+    const h = boot();
+    const r = await h.request("GET", `${ON_CALL_API}/now`);
+    expect(r.body.now.provider.fullName).toBe("Dr. Test Alpha");
+    expect(r.body.now.window.reason).toBe("off_hours");
+    expect(r.body.now.chain.levels.map((l: any) => [l.role, l.name])).toEqual([
+      ["on_call", "Dr. Test Alpha"],
+      ["region_director", "Dr. Test Director"],
+      ["final", "Dr. Test Final"],
+    ]);
+    expect(r.body.nextWeek.provider.fullName).toBe("Dr. Test Beta");
+    expect(JSON.stringify(r.body)).not.toMatch(/5555550\d{3}/);
+  });
+
+  it("previews any moment, and a gap week rings only the final director", async () => {
+    const h = boot();
+    const r = await h.request("GET", `${ON_CALL_API}/preview?at=2026-12-17T22:00`);
+    expect(r.body.preview.note).toBe("no_schedule_for_week");
+    expect(r.body.preview.chain.levels.map((l: any) => l.role)).toEqual(["final"]);
+    expect((await h.request("GET", `${ON_CALL_API}/preview?at=soon`)).status).toBe(400);
+  });
+});
+
+describe("changes", () => {
+  it("require a reason, and write nothing without one", async () => {
+    const h = boot();
+    const r = await h.request("POST", `${ON_CALL_API}/schedule/assign`, "admin", { week: "2026-12-08", providerId: 3, reason: "  " });
+    expect(r.status).toBe(400);
+    expect(h.store.transactions).toBe(0);
+  });
+
+  it("a week swap writes its audit row in the same transaction", async () => {
+    const h = boot();
+    const r = await h.request("POST", `${ON_CALL_API}/schedule/assign`, "admin", { week: "2026-12-08", providerId: 3, reason: "vacation" });
+    expect(r.status).toBe(200);
+    expect(h.store.state.schedule.find((w) => w.week === "2026-12-08")!.providerId).toBe(3);
+    expect(h.store.state.audit).toHaveLength(1);
+    expect(h.store.state.audit[0]).toMatchObject({
+      action: "schedule.swap_week",
+      entityType: "schedule",
+      entityId: "2026-12-08",
+      reason: "vacation",
+      actorEmail: "admin@example.test",
+      before: { providerId: 2 },
+    });
+  });
+
+  it("a failed audit insert rolls the change back", async () => {
+    const h = boot({ failAudit: true });
+    const r = await h.request("POST", `${ON_CALL_API}/schedule/assign`, "admin", { week: "2026-12-08", providerId: 3, reason: "x" });
+    expect(r.status).toBe(500);
+    expect(h.store.state.schedule.find((w) => w.week === "2026-12-08")!.providerId).toBe(2);
+    expect(h.store.state.audit).toHaveLength(0);
+  });
+
+  it("fills a gap week, and refuses a non-Tuesday, an inactive provider and one with no phone", async () => {
+    const h = boot();
+    expect((await h.request("POST", `${ON_CALL_API}/schedule/assign`, "admin", { week: "2026-12-15", providerId: 1, reason: "gap" })).status).toBe(200);
+    expect(h.store.state.audit[0].action).toBe("schedule.fill_week");
+    for (const [week, providerId, msg] of [
+      ["2026-12-16", 1, /Tuesday/],
+      ["2026-12-08", 4, /inactive/],
+      ["2026-12-08", 5, /no dialable phone/],
+      ["2026-12-08", 99, /not on file/],
+    ] as const) {
+      const r = await h.request("POST", `${ON_CALL_API}/schedule/assign`, "admin", { week, providerId, reason: "x" });
+      expect(r.status).toBe(400);
+      expect(r.body.error).toMatch(msg);
+    }
+    expect(h.store.state.audit).toHaveLength(1);
+  });
+
+  it("swaps two weeks between providers", async () => {
+    const h = boot();
+    const r = await h.request("POST", `${ON_CALL_API}/schedule/swap-weeks`, "admin", { weekA: "2026-12-08", weekB: "2026-12-22", reason: "trade" });
+    expect(r.status).toBe(200);
+    const w = (x: string) => h.store.state.schedule.find((s) => s.week === x)!.providerId;
+    expect([w("2026-12-08"), w("2026-12-22")]).toEqual([3, 2]);
+    expect((await h.request("POST", `${ON_CALL_API}/schedule/swap-weeks`, "admin", { weekA: "2026-12-08", weekB: "2026-12-15", reason: "x" })).status).toBe(400);
+  });
+
+  it("extends the schedule the way the CLI does, and a dry run writes nothing", async () => {
+    const h = boot();
+    const dry = await h.request("POST", `${ON_CALL_API}/schedule/extend`, "admin", { weeks: 2, dryRun: true });
+    // Provider 5 is active, in the rotation and has no phone: the CLI's SQL
+    // gives them a week too. The page matches it and warns.
+    expect(dry.body.weeks.map((w: any) => [w.week, w.providerId])).toEqual([
+      ["2026-12-29", 5],
+      ["2027-01-05", 1],
+    ]);
+    expect(dry.body.warnings.join(" ")).toMatch(/Dr\. Test NoPhone.*2026-12-29/);
+    expect(h.store.transactions).toBe(0);
+    const r = await h.request("POST", `${ON_CALL_API}/schedule/extend`, "admin", { weeks: 2, reason: "more weeks" });
+    expect(r.status).toBe(200);
+    expect(h.store.state.schedule.map((s) => s.week)).toContain("2027-01-05");
+    expect(h.store.state.audit[0].action).toBe("schedule.extend");
+  });
+
+  it("an override overlapping another needs confirming; a past or inverted window is refused", async () => {
+    const h = boot();
+    const body = { startsAt: "2026-12-10T17:00", endsAt: "2026-12-11T08:00", providerId: 3, reason: "cover" };
+    expect((await h.request("POST", `${ON_CALL_API}/overrides`, "admin", body)).status).toBe(200);
+    const again = await h.request("POST", `${ON_CALL_API}/overrides`, "admin", { ...body, providerId: 1 });
+    expect(again.status).toBe(409);
+    expect(again.body.overlap).toHaveLength(1);
+    expect((await h.request("POST", `${ON_CALL_API}/overrides`, "admin", { ...body, providerId: 1, confirmOverlap: true })).status).toBe(200);
+    expect(h.store.state.overrides).toHaveLength(2);
+    expect((await h.request("POST", `${ON_CALL_API}/overrides`, "admin", { ...body, endsAt: "2026-12-10T16:00" })).status).toBe(400);
+    expect((await h.request("POST", `${ON_CALL_API}/overrides`, "admin", { ...body, startsAt: "2026-12-01T17:00", endsAt: "2026-12-02T08:00" })).status).toBe(400);
+    expect(h.store.state.overrides[0].startsAt.toISOString()).toBe(pacificWallToDate("2026-12-10 17:00")!.toISOString());
+  });
+
+  it("cancelling: an upcoming override is deleted, a running one ends now, a past one is refused", async () => {
+    const h = boot();
+    const at = (s: string) => pacificWallToDate(s)!;
+    h.store.state.overrides = [
+      { id: 1, startsAt: at("2026-12-10 17:00"), endsAt: at("2026-12-11 08:00"), providerId: 3, reason: null, createdAt: null },
+      { id: 2, startsAt: at("2026-12-04 17:00"), endsAt: at("2026-12-05 08:00"), providerId: 3, reason: null, createdAt: null },
+      { id: 3, startsAt: at("2026-12-02 17:00"), endsAt: at("2026-12-03 08:00"), providerId: 3, reason: null, createdAt: null },
+    ];
+    expect((await h.request("POST", `${ON_CALL_API}/overrides/1/cancel`, "admin", { reason: "x" })).body.cancelled).toBe("deleted");
+    expect((await h.request("POST", `${ON_CALL_API}/overrides/2/cancel`, "admin", { reason: "x" })).body.cancelled).toBe("ended_now");
+    expect(h.store.state.overrides.find((o) => o.id === 2)!.endsAt).toEqual(NOW);
+    expect((await h.request("POST", `${ON_CALL_API}/overrides/3/cancel`, "admin", { reason: "x" })).status).toBe(400);
+    expect(h.store.state.audit.map((a) => a.action)).toEqual(["override.cancel", "override.end_now"]);
+  });
+});
+
+describe("providers", () => {
+  it("adds at the end of the rotation with the phone in E.164 and the region as on file", async () => {
+    const h = boot();
+    const r = await h.request("POST", `${ON_CALL_API}/providers`, "admin", {
+      fullName: "Dr. Test New",
+      phone: "555-555-0199",
+      region: "inland  empire",
+      reason: "onboarding",
+    });
+    expect(r.status).toBe(200);
+    expect(r.body.provider).toMatchObject({ phone: "+15555550199", region: "Inland Empire", rotationOrder: 6 });
+    expect(h.store.state.audit[0].action).toBe("provider.create");
+  });
+
+  it("refuses an unknown region unless new, FINAL, a bad phone, a taken name and a bad NPI", async () => {
+    const h = boot();
+    const base = { fullName: "Dr. Test New", phone: "5555550199", region: "Inland Empire", reason: "x" };
+    for (const [patch, msg] of [
+      [{ region: "Inland Empyre" }, /no escalation director/],
+      [{ region: "FINAL" }, /final escalation rung/],
+      [{ phone: "12" }, /not a phone/],
+      [{ fullName: "dr. test  alpha" }, /already on file/],
+      [{ npi: "123" }, /10 digits/],
+    ] as const) {
+      const r = await h.request("POST", `${ON_CALL_API}/providers`, "admin", { ...base, ...patch });
+      expect(r.status).toBe(400);
+      expect(r.body.error).toMatch(msg);
+    }
+    const ok = await h.request("POST", `${ON_CALL_API}/providers`, "admin", { ...base, region: "Coachella Valley", newRegion: true, inRotation: false });
+    expect(ok.body.provider).toMatchObject({ region: "Coachella Valley", rotationOrder: null });
+  });
+
+  it("deactivating warns about the weeks still scheduled", async () => {
+    const h = boot();
+    const r = await h.request("POST", `${ON_CALL_API}/providers/2/active`, "admin", { active: false, reason: "leave" });
+    expect(r.status).toBe(200);
+    expect(r.body.warnings.join(" ")).toMatch(/2026-12-08/);
+    expect(h.store.state.providers.find((p) => p.id === 2)!.active).toBe(false);
+  });
+
+  it("hard delete only when never referenced", async () => {
+    const h = boot();
+    expect((await h.request("POST", `${ON_CALL_API}/providers/1/delete`, "admin", { reason: "x" })).status).toBe(409);
+    expect((await h.request("POST", `${ON_CALL_API}/providers/6/delete`, "admin", { reason: "typo" })).status).toBe(200);
+    expect(h.store.state.providers.some((p) => p.id === 6)).toBe(false);
+  });
+
+  it("reorders the rotation without two rows ever sharing a place", async () => {
+    const h = boot();
+    const r = await h.request("POST", `${ON_CALL_API}/providers/reorder`, "admin", { orderedIds: [3, 1, 2, 4, 5], reason: "new order" });
+    expect(r.status).toBe(200);
+    const order = Object.fromEntries(h.store.state.providers.filter((p) => p.rotationOrder !== null).map((p) => [p.id, p.rotationOrder]));
+    expect(order).toEqual({ 3: 1, 1: 2, 2: 3, 4: 4, 5: 5 });
+    expect((await h.request("POST", `${ON_CALL_API}/providers/reorder`, "admin", { orderedIds: [1, 2], reason: "x" })).status).toBe(400);
+  });
+
+  it("the providers tab shows full phones; nothing else does", async () => {
+    const h = boot();
+    expect(JSON.stringify((await h.request("GET", `${ON_CALL_API}/providers`)).body)).toContain("+15555550101");
+    expect(JSON.stringify((await h.request("GET", `${ON_CALL_API}/schedule`)).body)).not.toMatch(/5555550\d{3}/);
+    expect(JSON.stringify((await h.request("GET", `${ON_CALL_API}/escalation`)).body)).not.toMatch(/5555550\d{3}/);
+  });
+});
+
+describe("directors", () => {
+  it("sets a region's director, refuses an unknown region unless new, and never deletes FINAL", async () => {
+    const h = boot();
+    expect((await h.request("PUT", `${ON_CALL_API}/directors`, "admin", { region: "los angeles", providerId: 11, reason: "x" })).status).toBe(200);
+    expect(h.store.state.directors.find((d) => d.region === "Los Angeles")!.providerId).toBe(11);
+    expect((await h.request("PUT", `${ON_CALL_API}/directors`, "admin", { region: "Orange County", providerId: 11, reason: "x" })).status).toBe(400);
+    expect((await h.request("PUT", `${ON_CALL_API}/directors`, "admin", { region: "Orange County", providerId: 11, newRegion: true, reason: "x" })).status).toBe(200);
+    expect((await h.request("POST", `${ON_CALL_API}/directors/delete`, "admin", { region: "FINAL", reason: "x" })).status).toBe(400);
+    expect((await h.request("POST", `${ON_CALL_API}/directors/delete`, "admin", { region: "Inland Empire", reason: "x" })).status).toBe(409);
+    expect((await h.request("POST", `${ON_CALL_API}/directors/delete`, "admin", { region: "Orange County", reason: "x" })).status).toBe(200);
+  });
+});
+
+describe("calls", () => {
+  it("lists the chain with its outcome, and opens a merged timeline", async () => {
+    const h = boot();
+    const list = await h.request("GET", `${ON_CALL_API}/calls`);
+    expect(list.body.calls[0]).toMatchObject({ callSid: SID, chain: { status: "exhausted", exhausted: true, calls: 1 } });
+    const one = await h.request("GET", `${ON_CALL_API}/calls/${SID}`);
+    expect(one.status).toBe(200);
+    expect(one.body.timeline.map((i: any) => i.source)).toEqual(["attempt", "escalation", "escalation"]);
+    expect(one.body.sections.extraEvents.wired).toBe(false);
+    expect(JSON.stringify(one.body)).not.toContain("5555550101");
+    expect((await h.request("GET", `${ON_CALL_API}/calls/not-a-sid`)).status).toBe(400);
+  });
+});
