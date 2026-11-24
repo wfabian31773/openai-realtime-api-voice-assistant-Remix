@@ -57,12 +57,13 @@
 import type { ContactSource, NotPlacedReason, OutboundLanePolicy, SourceContact } from "./campaign";
 import {
   REFUSAL_STREAK_WINDOW_MS,
+  askOfferCheck,
   campaignEnabled,
   placeByPassed,
   resolvedInfraRetryMinutes,
   resolvedMaxConsecutiveInfraRetries,
 } from "./campaign";
-import { mayDialNow, pacificParts } from "./callingWindow";
+import { mayDialNow, tomorrowAtOpening } from "./callingWindow";
 import { NOT_PLACED, OUTREACH_TEXT_KEY, dncKey, type ContactRow, type OutboundStore } from "./store";
 import { VOICE_PATH_PREFIX } from "../voiceWebhook";
 
@@ -226,18 +227,12 @@ export function nextLookAt(now: Date, reason: string, policy: OutboundLanePolicy
     case "outside_hours":
     case "closed_day":
     case "holiday":
-    case "daily_cap": {
-      // Tomorrow, at the window's opening hour in Pacific time — computed by
-      // stepping forward an hour at a time until the window opens, so it
-      // stays right across a daylight-saving change.
-      let t = new Date(now.getTime() + hour);
-      for (let i = 0; i < 24 * 8; i++) {
-        const p = pacificParts(t);
-        if (p.date !== pacificParts(now).date && p.hour === policy.window.startHour) return t;
-        t = new Date(t.getTime() + hour);
-      }
-      return new Date(now.getTime() + 24 * hour);
-    }
+    case "daily_cap":
+    // v271: nothing to offer today. Availability changes as partners publish
+    // their schedules, so the person is looked at again tomorrow.
+    case "no_opening":
+      // Tomorrow, at the window's opening hour in Pacific time.
+      return tomorrowAtOpening(now, policy.window.startHour);
     case "weekly_cap":
       return new Date(now.getTime() + 24 * hour);
     case "twilio_refused": {
@@ -418,6 +413,9 @@ async function dialOne(
   // THE LIVE RE-CHECK (v107), holding the claim and before anything else:
   // the list the queue was refreshed from can be fifteen minutes old, and an
   // appointment cancelled since must not be the reason we ring somebody.
+  // The fields the offer check reads (v271): today's from the source when
+  // there is one, over the row's own.
+  let offerData = contact.customData;
   if (source) {
     if (!contact.externalRef) {
       // A row the source never wrote has nothing to re-check against.
@@ -441,6 +439,7 @@ async function dialOne(
       await deps.store.releaseContact(contact.id, candidate.status, new Date(now.getTime() + source.parkMs));
       return live.state === "off_list" ? "off_list" : "no_phone";
     }
+    offerData = { ...contact.customData, ...live.contact.data };
     if (dncKey(live.contact.phone) !== dncKey(contact.phone)) {
       // Today's number from the source, before the do-not-contact check reads it.
       await deps.store.updateContactPhone(contact.id, live.contact.phone);
@@ -505,6 +504,21 @@ async function dialOne(
     // has already had a voicemail left keeps saying so.
     await deps.store.releaseContact(contact.id, candidate.status, nextLookAt(now, decision.reason, policy));
     return decision.reason;
+  }
+  // THE OFFER CHECK (v271), last, so it is only asked of a person we would
+  // ring now: a person the campaign has nothing to offer is not rung. On
+  // 2026-11-23, 4 of 18 NPX calls that reached the offer told the patient
+  // nothing sooner was open. Nothing to offer waits for tomorrow's window;
+  // an answer that could not be read waits a short while.
+  const offer = await askOfferCheck(policy, { id: contact.id, customData: offerData });
+  if (offer !== "offerable") {
+    const nothing = offer === "nothing_to_offer";
+    await deps.store.releaseContact(
+      contact.id,
+      candidate.status,
+      nextLookAt(now, nothing ? "no_opening" : "twilio_refused", policy),
+    );
+    return nothing ? "no_opening" : "offer_unknown";
   }
 
   const attemptId = await deps.store.startAttempt(contact.id, campaignId, prior.length + 1);

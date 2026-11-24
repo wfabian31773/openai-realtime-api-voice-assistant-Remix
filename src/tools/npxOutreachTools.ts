@@ -72,7 +72,7 @@ import { readDobQuietly } from './dobParts';
 import { spokenDobFor } from './spokenDob';
 import { callbackSessionFor } from './outboundTools';
 import { dobOnFile } from '../runtime/outbound/callback';
-import type { ContactSource, OutboundContact, SourceRecheck } from '../runtime/outbound/campaign';
+import type { ContactSource, OfferCheck, OutboundContact, SourceRecheck } from '../runtime/outbound/campaign';
 import type { OutboundStore } from '../runtime/outbound/store';
 import {
   createNpxOutreachClient,
@@ -582,6 +582,38 @@ export function warmOutreachAvailability(contact: OutboundContact | undefined, c
   const demo = isDemoNpxCall(contact, campaignKey);
   if (!offerAsk(contact)) return;
   void loadAvailability(contact, demo).catch(() => undefined);
+}
+
+/** The NPX read the dialler and the text tick give a person (v271): under the
+ * outbound layer's own OFFER_CHECK_TIMEOUT_MS. */
+export const OFFER_CHECK_BUDGET_MS = 8_000;
+
+/**
+ * Whether NPX has an opening to offer this person (v271), asked by the dialler
+ * before it rings them and by the text tick before it texts them. The same
+ * read the call makes (`loadAvailability`, the same cache), so the call that
+ * follows reads it back instead of asking NPX again. No opening, or a record
+ * the offer cannot be asked for, is nothing to offer; a read that fails or
+ * runs out of time is unknown, and nobody is rung on it. Sends NPX only what
+ * the call would: the medical group, the practices in reach and the date.
+ */
+export async function npxOfferCheck(
+  contact: { id: string; customData: Record<string, unknown> },
+  campaignKey: string,
+): Promise<OfferCheck> {
+  const c: OutboundContact = {
+    contactId: contact.id,
+    campaignId: '',
+    attemptId: '',
+    phone: '',
+    firstName: null,
+    lastName: null,
+    data: contact.customData,
+  };
+  if (!offerAsk(c)) return 'nothing_to_offer';
+  const load = await loadAvailability(c, isDemoNpxCall(c, campaignKey), false, Date.now() + OFFER_CHECK_BUDGET_MS);
+  if ('error' in load) return load.error === 'record_incomplete' ? 'nothing_to_offer' : 'unknown';
+  return load.slots.length > 0 ? 'offerable' : 'nothing_to_offer';
 }
 
 /** A taken slot leaves the call's list, so it is never offered again. */

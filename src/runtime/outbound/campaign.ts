@@ -155,6 +155,48 @@ export interface OutboundLanePolicy {
    * Optional: a campaign with nothing held leaves it out.
    */
   afterCalls?: (ctx: AfterCallsContext) => Promise<Record<string, number>>;
+  /**
+   * Whether the campaign has anything to offer this person right now (v271),
+   * asked last before a dial and before a text, once every other check has
+   * passed. "nothing_to_offer" holds the row until the window opens
+   * tomorrow, and rings or texts nobody; "unknown" (the
+   * answer could not be read) holds it a short while, as an unreachable
+   * source does. A throw counts as "unknown". Optional: a campaign that
+   * always has something to say leaves it out.
+   */
+  offerCheck?: (contact: { id: string; customData: Record<string, unknown> }) => Promise<OfferCheck>;
+}
+
+/** What a campaign has to offer one person right now (v271). */
+export type OfferCheck = "offerable" | "nothing_to_offer" | "unknown";
+
+/** The longest the dialler or the text tick waits on a campaign's offer
+ * check before treating it as unknown (v271). */
+export const OFFER_CHECK_TIMEOUT_MS = 10_000;
+
+/**
+ * The policy's offer check, for the dialler and the text tick alike: a
+ * campaign with none is always offerable; a throw, a non-answer or a wait past
+ * OFFER_CHECK_TIMEOUT_MS is unknown. Never throws.
+ */
+export async function askOfferCheck(
+  policy: Pick<OutboundLanePolicy, "offerCheck">,
+  contact: { id: string; customData: Record<string, unknown> },
+): Promise<OfferCheck> {
+  const check = policy.offerCheck;
+  if (!check) return "offerable";
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const answer = await Promise.race([
+      Promise.resolve().then(() => check(contact)),
+      new Promise<OfferCheck>((resolve) => (timer = setTimeout(() => resolve("unknown"), OFFER_CHECK_TIMEOUT_MS))),
+    ]);
+    return answer === "offerable" || answer === "nothing_to_offer" ? answer : "unknown";
+  } catch {
+    return "unknown";
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 /** What a campaign's `afterCalls` is handed by the scheduler (v226). */
