@@ -527,6 +527,18 @@ async function dialOne(
     );
     return nothing ? "no_opening" : "offer_unknown";
   }
+  // The call reads the row, so the fields the offer check approved are on the
+  // row before anybody is rung; a write that fails rings nobody. Written
+  // before the clock is read again, so the time the write takes counts
+  // against the window and the deadline too (review of #519, round 3).
+  if (changedAtSource) {
+    try {
+      await deps.store.upsertSourceContacts(campaignId, [changedAtSource]);
+    } catch {
+      await deps.store.releaseContact(contact.id, candidate.status, nextLookAt(now, "twilio_refused", policy));
+      return "source_write_failed";
+    }
+  }
   // The offer check can take seconds, and the tick asks each candidate in turn
   // under the one timestamp it started with: the place-by deadline and the
   // window are read again on the clock as it is now, so nobody is rung after
@@ -544,15 +556,13 @@ async function dialOne(
     await deps.store.releaseContact(contact.id, candidate.status, nextLookAt(at, stillOpen.reason, policy));
     return stillOpen.reason;
   }
-  // The call reads the row, so the fields the offer check approved are on the
-  // row before anybody is rung; a write that fails rings nobody.
-  if (changedAtSource) {
-    try {
-      await deps.store.upsertSourceContacts(campaignId, [changedAtSource]);
-    } catch {
-      await deps.store.releaseContact(contact.id, candidate.status, nextLookAt(at, "twilio_refused", policy));
-      return "source_write_failed";
-    }
+  // The do-not-contact list again, last: an opt-out recorded while the offer
+  // check waited on NPX is honoured before anybody is rung (review of #519,
+  // round 3).
+  if (await deps.store.isDoNotContact(contact.phone)) {
+    await deps.store.settleContact(contact.id, "do_not_call");
+    await notPlaced("do_not_contact");
+    return "do_not_contact";
   }
 
   const attemptId = await deps.store.startAttempt(contact.id, campaignId, prior.length + 1);

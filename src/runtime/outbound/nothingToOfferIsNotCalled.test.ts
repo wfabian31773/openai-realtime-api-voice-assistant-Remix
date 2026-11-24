@@ -324,6 +324,51 @@ describe("the dialler asks the offer check last, and rings nobody it has nothing
     expect(store.contacts.get("c1")).toMatchObject({ status: "rescheduled" });
   });
 
+  it("honours an opt-out recorded while the offer check waited, and rings nobody", async () => {
+    // Review of #519, round 3: the do-not-contact list is read again after the
+    // offer check, which can wait seconds on NPX.
+    const { store, createCall, deps } = dialSetup();
+    store.addContact({ id: "c1", phone: "+15555550111", status: "voicemail", customData: OFFER_FIELDS });
+    const offerCheck = vi.fn(async (): Promise<OfferCheck> => {
+      await store.stampDoNotContact("+15555550111", SMS_DNC_SOURCE);
+      return "offerable";
+    });
+    const r = await runCampaignTick("test-lane", { ...basePolicy, offerCheck }, deps);
+    expect(offerCheck).toHaveBeenCalledTimes(1);
+    expect(r.held).toEqual({ do_not_contact: 1 });
+    expect(createCall).not.toHaveBeenCalled();
+    expect(store.attempts.length).toBe(0);
+    expect(store.contacts.get("c1")).toMatchObject({ status: "do_not_call" });
+  });
+
+  it("writes today's fields before it reads the clock again, so a write that crosses closing rings nobody", async () => {
+    // Review of #519, round 3: the time the write takes counts against the window.
+    let clock = new Date("2041-03-06T03:59:58Z");
+    const { store, createCall, deps } = dialSetup();
+    store.addContact({
+      id: "c1",
+      phone: "+15555550111",
+      status: "voicemail",
+      externalRef: "appt-1",
+      customData: { ...OFFER_FIELDS, medical_group: "An Older Group" },
+    });
+    const write = store.upsertSourceContacts.bind(store);
+    store.upsertSourceContacts = async (...args: Parameters<typeof write>) => {
+      clock = new Date("2041-03-06T04:00:05Z");
+      return write(...args);
+    };
+    const offerCheck = vi.fn(async (): Promise<OfferCheck> => "offerable");
+    const source = sourceFor([person("appt-1")]);
+    const r = await runCampaignTick(
+      "test-lane",
+      { ...basePolicy, offerCheck, source: async () => source },
+      { ...deps, now: () => clock, sourceRefreshedAt: new Map([["test-campaign", clock.getTime()]]) },
+    );
+    expect(r.held).toEqual({ outside_hours: 1 });
+    expect(createCall).not.toHaveBeenCalled();
+    expect(store.contacts.get("c1")!.customData.medical_group).toBe("Synthetic Medical Group");
+  });
+
   it("leaves a campaign with no offer check exactly as it was", async () => {
     const { store, createCall, deps } = dialSetup();
     store.addContact({ id: "c1", phone: "+15555550111", customData: OFFER_FIELDS });
@@ -447,6 +492,20 @@ describe("the text tick asks the offer check before it sends", () => {
       reason: "outside_hours",
       retry_after: "2041-03-06T17:00:05.000Z",
     });
+  });
+
+  it("honours an opt-out recorded while the offer check waited, and sends nothing", async () => {
+    // Review of #519, round 3, the text tick's half.
+    let stamp: (() => Promise<void>) | null = null;
+    const { store, sent, deps, policy } = textSetup(async () => {
+      await stamp?.();
+      return "offerable";
+    });
+    stamp = () => store.stampDoNotContact("+15555550111", SMS_DNC_SOURCE);
+    store.addContact({ id: "c1", phone: "+15555550111", customData: OFFER_FIELDS });
+    expect((await runTextTick("test-lane", policy, deps)).held).toEqual({ do_not_contact: 1 });
+    expect(sent).toEqual([]);
+    expect(textRecordOf(store.contacts.get("c1")!.customData)).toMatchObject({ state: "skipped", reason: "do_not_contact" });
   });
 
   it("does not ask about a number on the do-not-contact list", async () => {

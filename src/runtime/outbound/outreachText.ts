@@ -300,6 +300,13 @@ async function textOne(
     });
     return stillOpen.reason;
   }
+  // The do-not-contact list again, last: an opt-out recorded while the offer
+  // check waited on NPX is honoured before the text goes (review of #519,
+  // round 3).
+  if (await deps.store.isDoNotContact(phone)) {
+    await deps.store.patchText(claimed.id, { state: "skipped", reason: "do_not_contact" });
+    return "do_not_contact";
+  }
 
   const sender = await deps.sms();
   if (!sender) {
