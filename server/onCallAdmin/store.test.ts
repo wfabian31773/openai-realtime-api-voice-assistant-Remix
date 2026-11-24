@@ -114,13 +114,24 @@ describe("the Postgres admin store", () => {
     expect(ADMIN_SQL.callEvents).toMatch(/order by \(call_events\.at at time zone 'UTC'\), id/);
   });
 
-  // Review of #520: a refused escalate_to_human is not an urgent call. Only an
-  // outcome that dialled (success, or handoffFailed) counts.
-  it("lists only escalations that proceeded, never a bare escalate_to_human event", () => {
+  // Review of #520: only an escalate_to_human that placed a dial counts. A
+  // refusal records neither flag; an UNAVAILABLE handoff records handoffFailed
+  // and dialAttempted false, so handoffFailed alone is not a dial.
+  it("lists only escalations that placed a dial, read from dialAttempted", () => {
     const sql = ADMIN_SQL.urgentWithoutChain;
     expect(sql).not.toContain(`'[{"tool":"escalate_to_human"}]'`);
-    expect(sql).toContain(`'[{"tool":"escalate_to_human","outcome":{"success":true}}]'::jsonb`);
-    expect(sql).toContain(`'[{"tool":"escalate_to_human","outcome":{"handoffFailed":true}}]'::jsonb`);
+    expect(sql).toContain(`'[{"tool":"escalate_to_human","outcome":{"dialAttempted":true}}]'::jsonb`);
+    expect(sql).not.toContain(`"handoffFailed":true`);
+    expect(sql).not.toContain(`"success":true`);
+  });
+
+  // Review of #520: a queued or SMS-only chain is not a dialled call, and the
+  // filter sits before the limit so it cannot crowd dialled calls out.
+  it("lists only chains with a call attempt, filtered before the limit", () => {
+    const sql = ADMIN_SQL.escalations.replace(/\s+/g, " ");
+    expect(sql).toMatch(
+      /where .* and exists \(select 1 from on_call_attempts a where a\.escalation_id = on_call_escalations\.id and a\.kind in \('warm_transfer', 'call'\)\) order by created_at desc limit \$3::integer/,
+    );
   });
 
   it("no statement reads a call_logs, call_turns or call_events time bare after its FROM", () => {

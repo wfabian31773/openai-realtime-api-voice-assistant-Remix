@@ -865,6 +865,29 @@ describe('a failed on-call transfer (the 70166 shape)', () => {
     expect(HANDOFF_CHAIN_STARTED_DIRECTIVE).not.toBe(HANDOFF_CHAIN_RUNNING_DIRECTIVE);
   });
 
+  // Review of #520: the on-call admin's Calls tab lists only escalations that
+  // placed a dial, read from dialAttempted; handoffFailed alone is also set
+  // when nothing rang.
+  it('records dialAttempted true when a dial was placed, false when nothing rang', async () => {
+    const ok = await call(NURSE, vi.fn(async () => {}));
+    expect(await invoke(ok.agent, 'escalate_to_human', PROVIDER)).toMatchObject({ success: true, dialAttempted: true });
+    const cases: Array<[string, boolean]> = [
+      ['handoff_failed:NO_ANSWER', true],
+      ['handoff_failed:DECLINED', true],
+      ['handoff_failed:CHAIN_STARTED', true],
+      ['handoff_failed:UNAVAILABLE', false],
+      ['handoff_failed:CHAIN_RUNNING', false],
+      ['handoff_failed:CHAIN_PENDING', false],
+      ['handoff_failed:FAILED', false],
+    ];
+    for (const [slug, dialled] of cases) {
+      const c = await call(NURSE, vi.fn(async () => { throw new Error(slug); }));
+      expect({ slug, r: await invoke(c.agent, 'escalate_to_human', PROVIDER) }).toMatchObject({
+        slug, r: { success: false, handoffFailed: true, dialAttempted: dialled },
+      });
+    }
+  });
+
   it.each(['on-call leg failed', 'handoff_failed:FAILED', 'handoff_failed:DECLINED'])(
     'keeps "Transfer failed" and says nobody-answered only on NO_ANSWER (%s)',
     async (thrown) => {

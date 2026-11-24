@@ -489,9 +489,10 @@ function summarizeResult(tool: string, resultJson: string): Record<string, unkno
     if (parsed?.[k] !== undefined) out[k] = parsed[k];
   }
   // These outcome flags are booleans only, never caller-supplied text.
-  // handoffFailed: escalate_to_human dialled and nobody took the call, which
-  // the on-call admin's Calls tab counts as an urgent call (a refusal does not).
-  for (const key of ['ticketCreated', 'callbackRequired', 'handoffFailed']) {
+  // handoffFailed: escalate_to_human's transfer did not connect (rang or not).
+  // dialAttempted: a dial to a person was actually placed; the on-call admin's
+  // Calls tab lists only those (review of #520).
+  for (const key of ['ticketCreated', 'callbackRequired', 'handoffFailed', 'dialAttempted']) {
     if (typeof parsed?.[key] === 'boolean') out[key] = parsed[key];
   }
   if (Array.isArray(parsed?.upcomingAppointments)) {

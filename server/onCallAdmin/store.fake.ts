@@ -199,7 +199,12 @@ export class FakeOnCallAdminStore implements OnCallAdminStore {
       .slice(0, f.limit);
   }
   async escalations(f: { since: Date; until: Date; limit: number }) {
-    return this.state.escalations.filter((e) => e.createdAt >= f.since && e.createdAt < f.until).slice(0, f.limit);
+    // Mirrors ADMIN_SQL.escalations: only a chain that placed a call, before the limit.
+    const dialled = (id: number) =>
+      this.state.attempts.some((a) => a.escalationId === id && (a.kind === "warm_transfer" || a.kind === "call"));
+    return this.state.escalations
+      .filter((e) => e.createdAt >= f.since && e.createdAt < f.until && dialled(e.id))
+      .slice(0, f.limit);
   }
   async attemptsForEscalations(ids: number[]) {
     return this.state.attempts.filter((a) => ids.includes(a.escalationId));

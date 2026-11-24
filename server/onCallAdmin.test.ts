@@ -612,6 +612,19 @@ describe("calls", () => {
     expect((await h.request("GET", `${ON_CALL_API}/calls/not-a-sid`)).status).toBe(400);
   });
 
+  it("lists no chain that placed no call (queued or SMS-only)", async () => {
+    const s = fixture();
+    const sid2 = "CA" + "b".repeat(32);
+    const sid3 = "CA" + "c".repeat(32);
+    s.escalations.push(
+      { ...s.escalations[0], id: 8, callSid: sid2, status: "active" },
+      { ...s.escalations[0], id: 9, callSid: sid3, status: "pending" },
+    );
+    s.attempts.push({ ...s.attempts[0], id: 2, escalationId: 8, callSid: sid2, kind: "sms", outcome: "sent" });
+    const list = await boot({}, s).request("GET", `${ON_CALL_API}/calls`);
+    expect(list.body.calls.map((c: any) => c.callSid)).toEqual([SID]);
+  });
+
   it("sends no escalation plan and no full E.164 number on the calls list or a call's detail", async () => {
     const s = fixture();
     s.escalations[0].plan = { levels: [{ role: "on_call", providerId: 1, name: "Dr. Test Alpha", phone: "+15555550101" } as any], notes: [] };

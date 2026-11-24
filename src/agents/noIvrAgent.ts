@@ -601,6 +601,22 @@ export const HANDOFF_NOT_PLACED_DIRECTIVE =
   'they were connected or that their request was submitted before create_ticket returns success.';
 
 /**
+ * Whether a failed handoff placed a dial to a person, read from the transfer
+ * layer's fixed slug. Recorded on the escalate_to_human result as
+ * `dialAttempted` (review of #520): `handoffFailed` alone is also set when
+ * nothing rang. Rang and not taken: NO_ANSWER, DECLINED, CHAIN_STARTED (the
+ * in-call dial was not taken and the chain went on). Nothing rang: UNAVAILABLE,
+ * CHAIN_RUNNING, CHAIN_PENDING. FAILED and anything else read false, because
+ * FAILED also covers a dial Twilio refused to create; the slug cannot tell the
+ * two apart. Telemetry only: it changes nothing said or routed.
+ */
+export function dialWasPlaced(failure: string): boolean {
+  return failure === 'handoff_failed:NO_ANSWER'
+    || failure === 'handoff_failed:DECLINED'
+    || failure === 'handoff_failed:CHAIN_STARTED';
+}
+
+/**
  * A second escalation on a call whose on-call chain is already running (v268):
  * nothing new was dialled, but the chain is still calling the on-call provider
  * and then the directors on its own. No claim that anyone answered, and none
@@ -3368,7 +3384,9 @@ PREREQUISITE: one quick ask for name and DOB; transfer even if unavailable. Clin
           }
         })();
 
-        return { success: true, message: "Call transferred to on-call provider." };
+        // dialAttempted: a dial to a person was placed (the on-call admin's
+        // Calls tab lists only these). Telemetry only, never spoken.
+        return { success: true, dialAttempted: true, message: "Call transferred to on-call provider." };
       } catch (handoffError) {
         finishRecordFiling(false);
         console.error("[HANDOFF] ✗ handoffToHuman() threw error:", handoffError);
@@ -3388,7 +3406,7 @@ PREREQUISITE: one quick ask for name and DOB; transfer even if unavailable. Clin
         const message = Object.prototype.hasOwnProperty.call(directives, failure)
           ? directives[failure]
           : HANDOFF_ERROR_DIRECTIVE;
-        return { success: false, handoffFailed: true, message };
+        return { success: false, handoffFailed: true, dialAttempted: dialWasPlaced(failure), message };
       }
     },
   });

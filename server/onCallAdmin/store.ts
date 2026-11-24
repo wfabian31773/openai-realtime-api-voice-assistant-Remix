@@ -329,6 +329,12 @@ export const ADMIN_SQL = {
               limit $6::integer`,
   escalations: `select ${ESC_COLS} from on_call_escalations
                  where created_at >= $1::timestamptz and created_at < $2::timestamptz
+                   -- Only a chain that placed a call (review of #520): a queued or
+                   -- SMS-only escalation is not a dialled call, and it is filtered
+                   -- here, before the limit, so it cannot crowd dialled calls out.
+                   and exists (select 1 from on_call_attempts a
+                                where a.escalation_id = on_call_escalations.id
+                                  and a.kind in ('warm_transfer', 'call'))
                  order by created_at desc limit $3::integer`,
   escalationByCall: `select ${ESC_COLS} from on_call_escalations where call_sid = $1::text`,
   attemptsFor: `select id, escalation_id, level_index, role, provider_id, kind, attempt_no, mode, dialed_to, outcome,
@@ -341,12 +347,12 @@ export const ADMIN_SQL = {
   urgentWithoutChain: `select ${CALL_COLS} from call_logs c
       where c.agent_used = any($1::text[])
         and (c.created_at at time zone 'UTC') >= $2::timestamptz and (c.created_at at time zone 'UTC') < $3::timestamptz
-        -- Only an escalation that proceeded to a dial: escalate_to_human answered
-        -- success (transferred) or handoffFailed (dialled, not connected). A
-        -- refusal (refused code, need_identity, the duplicate refusal) answers
-        -- success false with neither, and is not an urgent call (review of #520).
-        and (c.tool_timeline->'events' @> '[{"tool":"escalate_to_human","outcome":{"success":true}}]'::jsonb
-          or c.tool_timeline->'events' @> '[{"tool":"escalate_to_human","outcome":{"handoffFailed":true}}]'::jsonb)
+        -- Only an escalation that placed a dial: escalate_to_human records
+        -- dialAttempted true (v271 onward). handoffFailed is not enough: it is
+        -- also set on UNAVAILABLE, when nobody rang (review of #520). Rows from
+        -- before the field existed are excluded; the rotation was not live, so
+        -- there is no history worth reading there.
+        and c.tool_timeline->'events' @> '[{"tool":"escalate_to_human","outcome":{"dialAttempted":true}}]'::jsonb
         and not exists (select 1 from on_call_escalations e where e.call_sid = c.call_sid)
       order by (c.created_at at time zone 'UTC') desc limit $4::integer`,
   turns: `select (at at time zone 'UTC') as at, role, coalesce(final_transcript, raw_transcript) as text from call_turns
