@@ -373,9 +373,13 @@ export const ADMIN_SQL = {
         and c.tool_timeline->'events' @> '[{"tool":"escalate_to_human","outcome":{"dialAttempted":true}}]'::jsonb
         -- Excluded only when the escalation itself qualifies for the Calls list
         -- (review of #520, round 10): a chain row with no dial evidence must not
-        -- hide a call whose tool timeline confirms the dial.
+        -- hide a call whose tool timeline confirms the dial. The same range the
+        -- escalations query reads (round 11): an escalation outside it is not
+        -- listed there, so it must not hide the call here.
         and not exists (select 1 from on_call_escalations e
-                         where e.call_sid = c.call_sid and ${dialledChain("e.id")})
+                         where e.call_sid = c.call_sid
+                           and e.created_at >= $2::timestamptz and e.created_at < $3::timestamptz
+                           and ${dialledChain("e.id")})
       order by (c.created_at at time zone 'UTC') desc limit $4::integer`,
   turns: `select (at at time zone 'UTC') as at, role, coalesce(final_transcript, raw_transcript) as text from call_turns
            where call_sid = $1::text order by turn_index limit 1000`,

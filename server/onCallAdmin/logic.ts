@@ -23,8 +23,29 @@ import { ticketNumbersForCall } from "../callTicketNumbers";
 // ── Phones ──────────────────────────────────────────────────────────────────
 
 /** "…0100" for any number, or null. Never the whole number. */
+const IS_ND = /^\p{Nd}$/u;
+function isNd(cp: number): boolean {
+  return cp >= 0 && IS_ND.test(String.fromCodePoint(cp));
+}
+
+/**
+ * NFKC, then every Unicode decimal digit (Arabic-Indic, Persian, Devanagari,
+ * …) as its ASCII 0-9, so `\d` reads a phone in any script (review of #520,
+ * round 11). Each Nd run is whole blocks of ten starting at zero, so a
+ * digit's value is its distance from the run's start, modulo ten.
+ */
+export function asciiDigits(raw: string): string {
+  return raw.normalize("NFKC").replace(/\p{Nd}/gu, (ch) => {
+    const cp = ch.codePointAt(0)!;
+    if (cp <= 0x39) return ch;
+    let start = cp;
+    while (isNd(start - 1)) start--;
+    return String((cp - start) % 10);
+  });
+}
+
 export function last4(phone: string | null | undefined): string | null {
-  const digits = (phone ?? "").normalize("NFKC").replace(/\D/g, "");
+  const digits = asciiDigits(phone ?? "").replace(/\D/g, "");
   return digits.length >= 4 ? `…${digits.slice(-4)}` : null;
 }
 

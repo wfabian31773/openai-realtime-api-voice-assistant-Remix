@@ -159,8 +159,10 @@ describe("the Postgres admin store", () => {
     const rule = /and exists \(select 1 from on_call_attempts a where a\.escalation_id = on_call_escalations\.id (.*?)\) order by/.exec(esc);
     expect(rule).not.toBeNull();
     expect(without).toContain(
-      `and not exists (select 1 from on_call_escalations e where e.call_sid = c.call_sid and exists (select 1 from on_call_attempts a where a.escalation_id = e.id ${rule![1]}))`,
+      `and not exists (select 1 from on_call_escalations e where e.call_sid = c.call_sid and e.created_at >= $2::timestamptz and e.created_at < $3::timestamptz and exists (select 1 from on_call_attempts a where a.escalation_id = e.id ${rule![1]}))`,
     );
+    // Round 11: the exclusion reads the same range as the escalations query.
+    expect(esc).toContain("where created_at >= $1::timestamptz and created_at < $2::timestamptz");
     expect(without).not.toMatch(/not exists \(select 1 from on_call_escalations e where e\.call_sid = c\.call_sid\)/);
     expect(without.indexOf("not exists")).toBeLessThan(without.indexOf("limit $4::integer"));
   });
@@ -174,7 +176,13 @@ describe("the Postgres admin store", () => {
       checked.push(name);
       const tail = sql
         .slice(m.index)
-        .replace(/\((?:\w+\.)?(?:created_at|start_time|end_time|at) at time zone 'UTC'\)/g, "<utc>");
+        .replace(/\((?:\w+\.)?(?:created_at|start_time|end_time|at) at time zone 'UTC'\)/g, "<utc>")
+        // `e` is on_call_escalations, whose created_at is timestamptz and is
+        // read bare by the escalations query too (round 11).
+        .replace(/\be\.created_at\b/g, () => {
+          expect(sql).toMatch(/from on_call_escalations e\b/);
+          return "<esc>";
+        });
       const bare = tail.match(/\b(?:\w+\.)?(?:created_at|start_time|end_time|at)\b/g) ?? [];
       expect({ name, bare }).toEqual({ name, bare: [] });
     }

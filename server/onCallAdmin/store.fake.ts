@@ -231,7 +231,9 @@ export class FakeOnCallAdminStore implements OnCallAdminStore {
         const events = (c.toolTimeline as any)?.events;
         const dialled = Array.isArray(events) && events.some((e: any) => e?.tool === "escalate_to_human" && e?.outcome?.dialAttempted === true);
         if (!dialled) return false;
-        return !this.state.escalations.some((e) => e.callSid === c.callSid && this.dialled(e.id));
+        return !this.state.escalations.some(
+          (e) => e.callSid === c.callSid && e.createdAt >= f.since && e.createdAt < f.until && this.dialled(e.id),
+        );
       })
       .slice(0, f.limit);
   }

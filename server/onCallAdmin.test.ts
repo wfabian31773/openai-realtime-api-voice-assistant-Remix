@@ -666,6 +666,26 @@ describe("calls", () => {
     expect(list.body.calls.find((c: any) => c.callSid === sid2).chain).toBeNull();
   });
 
+  // Review of #520, round 11: an escalation just outside the range is not
+  // listed by the escalations query, so it must not hide its call here.
+  it("lists a timeline-confirmed dial once when its dialled escalation falls just outside the range", async () => {
+    const s = fixture();
+    const sid2 = "CA" + "f".repeat(32);
+    // days=1 reads from 2026-12-04T06:00Z; the escalation is a minute before.
+    s.escalations.push({ ...s.escalations[0], id: 8, callSid: sid2, status: "exhausted", createdAt: new Date("2026-12-04T05:59:00Z") });
+    s.attempts.push({ ...s.attempts[0], id: 2, escalationId: 8, callSid: sid2 });
+    s.callLogs.push({
+      id: "log-3", callSid: sid2, from: "+15555550177", agentUsed: "no-ivr", voiceProvider: "grok", status: "completed",
+      runtimeOutcome: null, agentOutcome: null, summary: null, duration: 60,
+      startTime: new Date("2026-12-04T06:01:00Z"), endTime: new Date("2026-12-04T06:02:00Z"), createdAt: new Date("2026-12-04T06:01:00Z"),
+      transferredToHuman: false, ticketNumber: null,
+      toolTimeline: { events: [{ tool: "escalate_to_human", at: "2026-12-04T06:01:20Z", ms: 10, args: {}, outcome: { dialAttempted: true } }] },
+    });
+    const list = await boot({}, s).request("GET", `${ON_CALL_API}/calls?days=1`);
+    const sids = list.body.calls.map((c: any) => c.callSid);
+    expect(sids.filter((x: string) => x === sid2)).toHaveLength(1);
+  });
+
   it("sends no escalation plan and no full E.164 number on the calls list or a call's detail", async () => {
     const s = fixture();
     s.escalations[0].plan = { levels: [{ role: "on_call", providerId: 1, name: "Dr. Test Alpha", phone: "+15555550101" } as any], notes: [] };
@@ -820,12 +840,19 @@ describe("maskCallPhones in free text", () => {
       const n = 10 + Math.floor(rnd() * 6);
       let digits = "";
       for (let j = 0; j < n; j++) digits += String(Math.floor(rnd() * 10));
+      // Round 11: sometimes written in another script's digits (ASCII,
+      // Arabic-Indic, Persian, Devanagari, Bengali), or mixed digit by digit.
+      const zeros = [0x30, 0x30, 0x660, 0x6f0, 0x966, 0x9e6];
+      const zero = pick(zeros);
+      const mixed = rnd() < 0.2;
+      const script = (s: string) =>
+        s.replace(/\d/g, (d) => String.fromCodePoint((mixed ? pick(zeros) : zero) + Number(d)));
       let phone = "";
       let k = 0;
       while (k < digits.length) {
         const len = 1 + Math.floor(rnd() * 4);
         if (k > 0) for (let r = 1 + Math.floor(rnd() * 3); r > 0; r--) phone += pick(seps);
-        phone += digits.slice(k, k + len);
+        phone += script(digits.slice(k, k + len));
         k += len;
       }
       const prefix = pick(["", "", "+", "00"]);
@@ -837,9 +864,27 @@ describe("maskCallPhones in free text", () => {
       const input = `${before} ${glueBefore}${prefix}${phone}${glueAfter} ${after}`;
       const out = maskCallPhones(input) as string;
       const stripped = out.normalize("NFKC").replace(/[\s.,()\p{Pd}−]/gu, "");
-      expect(stripped, `${JSON.stringify(input)} -> ${out}`).not.toMatch(/\d{7}/);
+      expect(stripped, `${JSON.stringify(input)} -> ${out}`).not.toMatch(/\p{Nd}{7}/u);
       expect(out, JSON.stringify(input)).toContain(`…${digits.slice(-4)}`);
     }
+  });
+
+  // Review of #520, round 11: NFKC leaves non-ASCII decimal digits as they are
+  // and `\d` is ASCII-only; they are folded to ASCII before the rule runs.
+  it.each([
+    ["Arabic-Indic", "call ٢١٢٥٥٥٠١٩٨ please", "…0198"],
+    ["Persian", "call ۲۱۲-۵۵۵-۰۱۹۸ please", "…0198"],
+    ["Devanagari", "call +१ २१२ ५५५ ०१९८", "…0198"],
+    ["Bengali", "call ২১২৫৫৫০১৯৮", "…0198"],
+    ["mixed scripts", "call 212 ٥٥٥ ०१९८", "…0198"],
+  ])("masks a phone written in %s digits", (_name, input, tail) => {
+    const out = maskCallPhones(input) as string;
+    expect(out).toContain(tail);
+    expect(out).not.toMatch(/\p{Nd}{5}/u);
+  });
+
+  it("masks a phone-named key written in Arabic-Indic digits to its ASCII last four", () => {
+    expect(maskCallPhones({ phone: "٢١٢٥٥٥٠١٩٨" })).toEqual({ phone: "…0198" });
   });
 
   // Property: whatever phone shape goes in, no 7 consecutive digits (ignoring

@@ -52,6 +52,7 @@ import {
   goLive,
   isDialable,
   isTuesday,
+  asciiDigits,
   last4,
   mergeTimeline,
   normalizePhone,
@@ -312,7 +313,7 @@ const SET_ASIDE_BASE = 0xe000;
 const SET_ASIDE_ANY = /[-]/;
 
 export function maskPhonesInText(raw: string): string {
-  const s = raw.normalize("NFKC");
+  const s = asciiDigits(raw);
   const kept: string[] = [];
   // Text that already carries private-use characters is masked with nothing
   // set aside (a date in it may be masked too); never the other way round.
