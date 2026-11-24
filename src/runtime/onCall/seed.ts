@@ -237,6 +237,8 @@ export interface SeedInput {
   final: string;
   /** Stamped into the SQL header. */
   generatedAt?: Date;
+  /** The rotation's caller ID; no provider loaded may have it as their phone. */
+  callerId?: string | null;
 }
 
 interface Candidate {
@@ -304,6 +306,7 @@ function readCandidates(table: Table, file: string, inPool: boolean, problems: s
 export function buildSeedSql(input: SeedInput): SeedResult {
   const problems: string[] = [];
   const warnings: string[] = [];
+  const callerId = checkCallerId(input.callerId);
 
   const pool = readTable(input.poolCsv, "pool");
   const schedule = readTable(input.scheduleCsv, "schedule");
@@ -448,6 +451,14 @@ export function buildSeedSql(input: SeedInput): SeedResult {
       rotationOrder: order.get(i) ?? null,
     });
   });
+  // A provider loaded with the rotation's own caller ID as their phone would
+  // be given weeks or a director rung the chain cannot ring (the admin page
+  // and the change script refuse the same).
+  const selfCalled = callerId ? providers.filter((p) => p.phone === callerId) : [];
+  for (const p of selfCalled) {
+    problems.push(`"${p.fullName}" has the rotation's own caller ID as their phone; the chain cannot call a number from itself`);
+  }
+  if (problems.length) throw new SeedError(problems);
   for (const p of providers) if (!p.npi) warnings.push(`"${p.fullName}" has no NPI; a post-op surgeon match falls back to the name`);
 
   const directors = new Map<string, number>();
@@ -519,6 +530,43 @@ function lookupProvider(name: string, variable: string, anyRow = false): string 
     `  SELECT count(*) INTO n FROM on_call_providers WHERE ${where};`,
     `  IF n <> 1 THEN RAISE EXCEPTION 'expected one ${kind} named %, found %', ${n}, n; END IF;`,
     `  SELECT id INTO ${variable} FROM on_call_providers WHERE ${where};`,
+  ].join("\n");
+}
+
+/** The DIALABLE shape the runtime rings, as a SQL regex literal (config.ts). */
+const DIALABLE_SQL = `'^\\+[0-9]{10,15}$'`;
+
+/**
+ * The rotation's caller ID as the CLI was given it: null (unknown) or an
+ * E.164 number. A value that is not a phone is refused rather than silently
+ * skipping the check it exists for.
+ */
+function checkCallerId(raw: string | null | undefined): string | null {
+  if (raw === null || raw === undefined || raw === "") return null;
+  const v = readPhone(raw);
+  if (!v) throw new SeedError([`the caller ID "${raw}" is not a phone number`]);
+  return v;
+}
+
+/**
+ * The PL/pgSQL that refuses, after `lookupProvider`, a provider the chain
+ * cannot ring: no dialable phone, or a phone that is the rotation's own caller
+ * ID (Twilio refuses a call from a number to itself). The admin page refuses
+ * the same assignments (`ringableProvider` in server/onCallAdmin.ts).
+ */
+function ringableCheck(variable: string, callerId: string | null): string {
+  const name = `(SELECT full_name FROM on_call_providers WHERE id = ${variable})`;
+  return [
+    `  IF NOT EXISTS (SELECT 1 FROM on_call_providers WHERE id = ${variable} AND phone ~ ${DIALABLE_SQL}) THEN`,
+    `    RAISE EXCEPTION '% has no dialable phone number on file; fix the number first', ${name};`,
+    `  END IF;`,
+    ...(callerId
+      ? [
+          `  IF EXISTS (SELECT 1 FROM on_call_providers WHERE id = ${variable} AND phone = ${lit(callerId)}) THEN`,
+          `    RAISE EXCEPTION '% has the rotation''s own caller ID as their phone; the chain cannot call it. Edit their phone first', ${name};`,
+          `  END IF;`,
+        ]
+      : []),
   ].join("\n");
 }
 
@@ -607,12 +655,18 @@ export function addProviderSql(input: {
   escalationOnly?: boolean;
   newRegion?: boolean;
   audit?: ChangeAudit;
+  /** The rotation's caller ID; a provider may not be given it as their phone. */
+  callerId?: string | null;
 }): string {
   checkAudit(input.audit);
+  const callerId = checkCallerId(input.callerId);
   const problems: string[] = [];
   const phone = readPhone(input.phone);
   if (!input.name.trim()) problems.push("no name");
   if (!phone) problems.push("the phone is not a phone number");
+  if (phone && callerId && phone === callerId) {
+    problems.push("that phone is the rotation's own caller ID (ON_CALL_CALLER_ID or TWILIO_PHONE_NUMBER); the chain cannot call a number from itself");
+  }
   const npi = (input.npi ?? "").replace(/\D/g, "");
   if (npi && npi.length !== 10) problems.push("the NPI is not 10 digits");
   const region = cleanRegion(input.region);
@@ -668,11 +722,12 @@ export function addProviderSql(input: {
  * the rotation). RETURNING shows what was added; ROLLBACK instead of COMMIT
  * undoes it.
  */
-export function extendScheduleSql(weeks: number, audit?: ChangeAudit): string {
+export function extendScheduleSql(weeks: number, audit?: ChangeAudit, opts: { callerId?: string | null } = {}): string {
   if (!Number.isInteger(weeks) || weeks < 1 || weeks > 104) {
     throw new SeedError([`weeks must be a whole number from 1 to 104, not ${weeks}`]);
   }
   checkAudit(audit);
+  const callerId = checkCallerId(opts.callerId);
   // The weeks to add, as a CTE chain ending in `planned (week, provider_id)`:
   // read once by the phone check and once by the insert, so the two cannot
   // disagree about who gets a week.
@@ -706,9 +761,9 @@ export function extendScheduleSql(weeks: number, audit?: ChangeAudit): string {
       ...planned("  "),
       `  SELECT string_agg(DISTINCT p.full_name, ', ' ORDER BY p.full_name) INTO bad`,
       `    FROM planned JOIN on_call_providers p ON p.id = planned.provider_id`,
-      `   WHERE p.phone IS NULL OR p.phone !~ '^\\+[0-9]{10,15}$';`,
+      `   WHERE p.phone IS NULL OR p.phone !~ ${DIALABLE_SQL}${callerId ? ` OR p.phone = ${lit(callerId)}` : ""};`,
       `  IF bad IS NOT NULL THEN`,
-      `    RAISE EXCEPTION 'extend refused: % would get a week but has no dialable phone number; fix the number or deactivate them, then extend again', bad;`,
+      `    RAISE EXCEPTION 'extend refused: % would get a week but has no dialable phone number (or it is the rotation''s own caller ID); fix the number or deactivate them, then extend again', bad;`,
       `  END IF;`,
     ]),
     ...planned(""),
@@ -740,8 +795,9 @@ export function extendScheduleSql(weeks: number, audit?: ChangeAudit): string {
 }
 
 /** A whole week given to someone else. */
-export function swapWeekSql(input: { week: string; to: string; note?: string; audit?: ChangeAudit }): string {
+export function swapWeekSql(input: { week: string; to: string; note?: string; audit?: ChangeAudit; callerId?: string | null }): string {
   checkAudit(input.audit);
+  const callerId = checkCallerId(input.callerId);
   const week = requireDate(input.week, "week");
   if (weekday(week) !== 2) throw new SeedError([`${week} is not a Tuesday (a week starts on Tuesday at 5:00 PM)`]);
   const note = input.note?.trim() || `swapped to ${input.to.trim()}`;
@@ -751,6 +807,7 @@ export function swapWeekSql(input: { week: string; to: string; note?: string; au
     ...auditTableCheck(input.audit),
     ...doBlock("n int; who int; prev jsonb; nxt jsonb;", [
       lookupProvider(input.to, "who"),
+      ringableCheck("who", callerId),
       `  SELECT to_jsonb(s) INTO prev FROM on_call_schedule s WHERE week_starts_on = '${week}';`,
       `  UPDATE on_call_schedule SET provider_id = who, note = ${lit(note)}, updated_at = now() WHERE week_starts_on = '${week}';`,
       `  IF NOT FOUND THEN RAISE EXCEPTION 'the week of % is not on the schedule', '${week}'; END IF;`,
@@ -784,8 +841,9 @@ export function readPacificTime(raw: string): string | null {
  * the window and never WHETHER: daytime inside it is still not on call. Times
  * are Pacific wall-clock.
  */
-export function coverSql(input: { from: string; to: string; by: string; reason?: string; audit?: ChangeAudit }): string {
+export function coverSql(input: { from: string; to: string; by: string; reason?: string; audit?: ChangeAudit; callerId?: string | null }): string {
   checkAudit(input.audit);
+  const callerId = checkCallerId(input.callerId);
   const from = readPacificTime(input.from);
   const to = readPacificTime(input.to);
   const problems: string[] = [];
@@ -800,6 +858,7 @@ export function coverSql(input: { from: string; to: string; by: string; reason?:
     ...auditTableCheck(input.audit),
     ...doBlock("n int; who int; new_id int; nxt jsonb;", [
       lookupProvider(input.by, "who"),
+      ringableCheck("who", callerId),
       `  INSERT INTO on_call_overrides (starts_at, ends_at, provider_id, reason)`,
       `  VALUES (('${from}'::timestamp AT TIME ZONE 'America/Los_Angeles'),`,
       `          ('${to}'::timestamp AT TIME ZONE 'America/Los_Angeles'), who, ${lit(reason)})`,
@@ -863,8 +922,9 @@ export function activateSql(name: string, audit?: ChangeAudit): string {
  * region that is not on file is refused unless `newRegion`, so a misspelt
  * region cannot quietly start a second one beside the real one.
  */
-export function setDirectorSql(input: { region: string; director: string; newRegion?: boolean; audit?: ChangeAudit }): string {
+export function setDirectorSql(input: { region: string; director: string; newRegion?: boolean; audit?: ChangeAudit; callerId?: string | null }): string {
   checkAudit(input.audit);
+  const callerId = checkCallerId(input.callerId);
   const region = cleanRegion(input.region);
   if (!region) throw new SeedError(["no region"]);
   return [
@@ -873,6 +933,7 @@ export function setDirectorSql(input: { region: string; director: string; newReg
     ...auditTableCheck(input.audit),
     ...doBlock("n int; who int; prev jsonb; nxt jsonb;", [
       lookupProvider(input.director, "who"),
+      ringableCheck("who", callerId),
       ...(input.audit ? [`  SELECT to_jsonb(d) INTO prev FROM on_call_escalation_directors d WHERE ${regionIs(region)};`] : []),
       `  UPDATE on_call_escalation_directors SET provider_id = who, updated_at = now() WHERE ${regionIs(region)};`,
       `  IF NOT FOUND THEN`,

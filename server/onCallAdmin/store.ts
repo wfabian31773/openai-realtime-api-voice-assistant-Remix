@@ -257,7 +257,10 @@ const ESC_COLS = `id, call_sid, mode, status, level_index, attempt_no, routing, 
 // call_logs, call_turns and call_events keep TIMESTAMP WITHOUT TIME ZONE
 // holding UTC wall time. Read raw, node-postgres parses those as the server's
 // LOCAL time; cast them to timestamptz so the merged timeline orders them
-// correctly against the on_call_* timestamptz columns whatever TZ is.
+// correctly against the on_call_* timestamptz columns whatever TZ is. The
+// same cast goes on every WHERE and ORDER BY that reads one of those columns:
+// compared bare against a timestamptz bound, Postgres reads the stored UTC
+// wall time in the SESSION time zone, so a non-UTC session shifts the window.
 const CALL_COLS = `id, call_sid, "from", agent_used, voice_provider, status, runtime_outcome, agent_outcome,
   summary, duration, (start_time at time zone 'UTC') as start_time, (end_time at time zone 'UTC') as end_time,
   (created_at at time zone 'UTC') as created_at, transferred_to_human, ticket_number, tool_timeline`;
@@ -337,14 +340,14 @@ export const ADMIN_SQL = {
   callLogsBySid: `select ${CALL_COLS} from call_logs where call_sid = any($1::text[])`,
   urgentWithoutChain: `select ${CALL_COLS} from call_logs c
       where c.agent_used = any($1::text[])
-        and c.created_at >= $2::timestamptz and c.created_at < $3::timestamptz
+        and (c.created_at at time zone 'UTC') >= $2::timestamptz and (c.created_at at time zone 'UTC') < $3::timestamptz
         and c.tool_timeline->'events' @> '[{"tool":"escalate_to_human"}]'::jsonb
         and not exists (select 1 from on_call_escalations e where e.call_sid = c.call_sid)
-      order by c.created_at desc limit $4::integer`,
+      order by (c.created_at at time zone 'UTC') desc limit $4::integer`,
   turns: `select (at at time zone 'UTC') as at, role, coalesce(final_transcript, raw_transcript) as text from call_turns
            where call_sid = $1::text order by turn_index limit 1000`,
   callEvents: `select (at at time zone 'UTC') as at, level, category, message, data from call_events
-                where call_sid = $1::text order by at, id limit 500`,
+                where call_sid = $1::text order by (call_events.at at time zone 'UTC'), id limit 500`,
   extraEvents: `select at, source, event_type, detail from on_call_call_events
                  where call_sid = $1::text order by at, id limit 500`,
   appendExtraEvent: `insert into on_call_call_events (call_sid, escalation_id, at, source, event_type, detail)

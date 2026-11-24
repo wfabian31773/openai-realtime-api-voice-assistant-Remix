@@ -580,3 +580,61 @@ describe("a value that holds a dollar-quote tag cannot end a DO block", () => {
     expect(lines[lines.length - 1]).toBe("END $oncall_3$;");
   });
 });
+
+// Review of #520: the admin page refuses a provider whose phone is the
+// rotation's caller ID (Twilio refuses a call from a number to itself), and a
+// provider with no dialable phone; the CLI's builders refuse the same.
+describe("a provider whose phone is the rotation's caller ID", () => {
+  const CID = "+15550100002"; // Ben Ortiz's phone in the fixtures
+
+  it("extend refuses a week to them, beside the no-dialable-phone check", () => {
+    const sql = extendScheduleSql(4, undefined, { callerId: "(555) 010-0002" });
+    expect(sql).toContain(`p.phone IS NULL OR p.phone !~ '^\\+[0-9]{10,15}$' OR p.phone = '${CID}'`);
+    expect(sql).toMatch(/RAISE EXCEPTION 'extend refused: .*rotation''s own caller ID/);
+    // Without a caller ID the dialable check stands and no caller-ID clause is written.
+    expect(extendScheduleSql(4)).not.toContain("OR p.phone = '");
+  });
+
+  const BUILDERS: Array<[string, (cid: string | null) => string]> = [
+    ["swap", (cid) => swapWeekSql({ week: "2026-12-08", to: "Ben Ortiz", callerId: cid })],
+    ["cover", (cid) => coverSql({ from: "2026-12-10 17:00", to: "2026-12-11 08:00", by: "Ben Ortiz", callerId: cid })],
+    ["set-director", (cid) => setDirectorSql({ region: "FINAL", director: "Ben Ortiz", callerId: cid })],
+  ];
+  for (const [name, build] of BUILDERS) {
+    it(`${name} refuses them, and a provider with no dialable phone, before writing`, () => {
+      const sql = build(CID);
+      const dialable = sql.indexOf("AND phone ~ '^\\+[0-9]{10,15}$'");
+      const self = sql.indexOf(`AND phone = '${CID}'`);
+      const write = Math.max(sql.indexOf("UPDATE on_call_"), sql.indexOf("INSERT INTO on_call_overrides"));
+      expect(dialable).toBeGreaterThan(0);
+      expect(self).toBeGreaterThan(dialable);
+      expect(write).toBeGreaterThan(self);
+      expect(sql).toMatch(/has the rotation''s own caller ID as their phone/);
+      expect(sql).toMatch(/has no dialable phone number on file/);
+      // Unknown caller ID: the dialable check stays, the caller-ID clause is not written.
+      const unknown = build(null);
+      expect(unknown).toContain("AND phone ~ '^\\+[0-9]{10,15}$'");
+      expect(unknown).not.toMatch(/own caller ID as their phone/);
+    });
+  }
+
+  it("add-provider refuses it as the new provider's phone", () => {
+    expect(problemsOf(() => addProviderSql({ name: "Kim Ruiz", phone: "555-010-0002", region: "San Diego", callerId: CID }))).toEqual([
+      "that phone is the rotation's own caller ID (ON_CALL_CALLER_ID or TWILIO_PHONE_NUMBER); the chain cannot call a number from itself",
+    ]);
+    expect(addProviderSql({ name: "Kim Ruiz", phone: "555-010-0012", region: "San Diego", callerId: CID })).toContain("'+15550100012'");
+  });
+
+  it("the first-load seed refuses a provider who has it", () => {
+    expect(problemsOf(() => seed({ callerId: CID }))).toEqual([
+      `"Ben Ortiz" has the rotation's own caller ID as their phone; the chain cannot call a number from itself`,
+    ]);
+    expect(seed({ callerId: "+15550100099" }).sql).toContain("INSERT INTO on_call_schedule");
+  });
+
+  it("refuses a caller ID that is not a phone rather than skipping the check", () => {
+    expect(problemsOf(() => swapWeekSql({ week: "2026-12-08", to: "Ben Ortiz", callerId: "on-call" }))).toEqual([
+      'the caller ID "on-call" is not a phone number',
+    ]);
+  });
+});

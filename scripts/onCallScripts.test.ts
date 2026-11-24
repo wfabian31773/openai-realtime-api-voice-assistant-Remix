@@ -255,3 +255,65 @@ describe("scripts/on-call-change.ts writes an audit row with every change", () =
     expect(sql.match(/'test change'/g)!.length).toBeGreaterThanOrEqual(2);
   });
 });
+
+describe("scripts/on-call-change.ts and on-call-seed.ts check the rotation's caller ID (review of #520)", () => {
+  const CID = "+15550100002";
+  const audited = (args: string[], env: Record<string, string | undefined>) =>
+    runChange([...args, "--reason", "test change", "--actor", "ops@example.test"], { env });
+  const ROLE_COMMANDS = [
+    ["swap", "--week", "2026-12-08", "--to", "Ben Ortiz"],
+    ["cover", "--from", "2026-12-10 17:00", "--to", "2026-12-11 08:00", "--by", "Ben Ortiz"],
+    ["extend", "--weeks", "4"],
+    ["set-director", "--region", "FINAL", "--director", "Ben Ortiz"],
+  ];
+
+  for (const args of ROLE_COMMANDS) {
+    it(`${args[0]} reads the caller ID the admin page reads and refuses it in the SQL`, () => {
+      const r = audited(args, { ON_CALL_CALLER_ID: "(555) 010-0002" });
+      expect(r.code).toBe(0);
+      expect(r.stdout).toMatch(new RegExp(`phone = '\\${CID}'`));
+      expect(r.stderr).toBe("");
+      // --caller-id wins over the environment.
+      const flag = audited([...args, "--caller-id", "555-010-0003"], { ON_CALL_CALLER_ID: CID });
+      expect(flag.code).toBe(0);
+      expect(flag.stdout).toContain("phone = '+15550100003'");
+      expect(flag.stdout).not.toContain(`'${CID}'`);
+    });
+
+    it(`${args[0]} warns that the caller-ID check was skipped when no caller ID is known`, () => {
+      const r = audited(args, {});
+      expect(r.code).toBe(0);
+      expect(r.stderr).toMatch(/caller ID is not known.*SKIPPED/);
+      expect(r.stdout).not.toMatch(/phone = '\+/);
+    });
+  }
+
+  it("add-provider refuses the caller ID as the new phone up front, from the env or --caller-id", () => {
+    const add = ["add-provider", "--name", "Kim Ruiz", "--phone", "555-010-0002", "--region", "San Diego"];
+    const env = audited(add, { TWILIO_PHONE_NUMBER: CID });
+    expect(env.code).toBe(1);
+    expect(env.stdout).toBe("");
+    expect(env.stderr).toMatch(/rotation's own caller ID/);
+    expect(audited([...add, "--caller-id", CID], {}).code).toBe(1);
+    expect(audited(add, {}).stderr).toMatch(/SKIPPED/);
+  });
+
+  it("refuses a --caller-id that is not a phone, and takes it only on commands that give a role", () => {
+    expect(audited(["extend", "--weeks", "4", "--caller-id", "nope"], {}).stderr).toMatch(/--caller-id nope is not a phone number/);
+    expect(audited(["deactivate", "Ada Lin", "--caller-id", CID], {}).stderr).toMatch(/deactivate takes no --caller-id/);
+    expect(audited(["activate", "Ada Lin"], {}).stderr).toBe("");
+  });
+
+  it("the seed refuses a provider whose phone is the caller ID, and warns when it is unknown", () => {
+    const f = files();
+    const base = [f.pool, f.schedule, "--final", "Dan Lowe", "--directors", f.directors];
+    const refused = seed(base, { env: { ON_CALL_CALLER_ID: CID } });
+    expect(refused.code).toBe(1);
+    expect(refused.stderr).toMatch(/Ben Ortiz.*rotation's own caller ID/);
+    expect(seed([...base, "--caller-id", CID], { env: {} }).code).toBe(1);
+    const ok = seed(base, { env: { ON_CALL_CALLER_ID: "+15550100099" } });
+    expect(ok.code).toBe(0);
+    expect(ok.stderr).not.toMatch(/SKIPPED/);
+    expect(seed(base, { env: {} }).stderr).toMatch(/SKIPPED/);
+  });
+});
