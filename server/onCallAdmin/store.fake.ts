@@ -205,8 +205,8 @@ export class FakeOnCallAdminStore implements OnCallAdminStore {
       this.state.attempts.some(
         (a) =>
           a.escalationId === id &&
-          (a.kind === "warm_transfer" || a.kind === "call") &&
-          (a.providerCallSid != null || rang.has(a.outcome)),
+          ((a.kind === "call" && a.providerCallSid != null) ||
+            (a.kind === "warm_transfer" && (a.providerCallSid != null || rang.has(a.outcome)))),
       );
     return this.state.escalations
       .filter((e) => e.createdAt >= f.since && e.createdAt < f.until && dialled(e.id))

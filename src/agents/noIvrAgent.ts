@@ -604,16 +604,18 @@ export const HANDOFF_NOT_PLACED_DIRECTIVE =
  * Whether a failed handoff placed a dial to a person, read from the transfer
  * layer's fixed slug. Recorded on the escalate_to_human result as
  * `dialAttempted` (review of #520): `handoffFailed` alone is also set when
- * nothing rang. Rang and not taken: NO_ANSWER, DECLINED, CHAIN_STARTED (the
- * in-call dial was not taken and the chain went on). Nothing rang: UNAVAILABLE,
- * CHAIN_RUNNING, CHAIN_PENDING. FAILED and anything else read false, because
- * FAILED also covers a dial Twilio refused to create; the slug cannot tell the
- * two apart. Telemetry only: it changes nothing said or routed.
+ * nothing rang. Rang and not taken: NO_ANSWER, DECLINED. Nothing rang:
+ * UNAVAILABLE, CHAIN_RUNNING, CHAIN_PENDING. CHAIN_STARTED, FAILED and anything
+ * else read false, because the slug cannot prove a dial: CHAIN_STARTED is also
+ * returned when the in-call transfer was unavailable or failed before dialling
+ * and the background chain carried on (review of #520, round 3), and FAILED
+ * also covers a dial Twilio refused to create. A CHAIN_STARTED call has an
+ * on_call_escalations row, so the Calls tab lists it from the chain's own
+ * attempts. Telemetry only: it changes nothing said or routed.
  */
 export function dialWasPlaced(failure: string): boolean {
   return failure === 'handoff_failed:NO_ANSWER'
-    || failure === 'handoff_failed:DECLINED'
-    || failure === 'handoff_failed:CHAIN_STARTED';
+    || failure === 'handoff_failed:DECLINED';
 }
 
 /**

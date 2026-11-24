@@ -335,13 +335,16 @@ export const ADMIN_SQL = {
                    and exists (select 1 from on_call_attempts a
                                 where a.escalation_id = on_call_escalations.id
                                   and a.kind in ('warm_transfer', 'call')
-                                  -- A dial that rang (review of #520, round 2): the runner
-                                  -- writes a call row before Twilio is asked, and a failed
-                                  -- row when the level has no phone or the create fails;
-                                  -- neither has a provider call sid or a ringing outcome.
-                                  and (a.provider_call_sid is not null
-                                       or a.outcome in ('accepted', 'no_answer', 'declined', 'busy',
-                                                        'no_status', 'taken_elsewhere')))
+                                  -- A dial that rang (review of #520, rounds 2 and 3). A
+                                  -- background call rang only if Twilio gave it a call sid:
+                                  -- the runner writes the row before Twilio is asked, and a
+                                  -- worker that stops there can leave no_status with no sid.
+                                  -- The in-call warm transfer keeps its ringing outcomes.
+                                  and ((a.kind = 'call' and a.provider_call_sid is not null)
+                                       or (a.kind = 'warm_transfer'
+                                           and (a.provider_call_sid is not null
+                                                or a.outcome in ('accepted', 'no_answer', 'declined', 'busy',
+                                                                 'no_status', 'taken_elsewhere')))))
                  order by created_at desc limit $3::integer`,
   escalationByCall: `select ${ESC_COLS} from on_call_escalations where call_sid = $1::text`,
   attemptsFor: `select id, escalation_id, level_index, role, provider_id, kind, attempt_no, mode, dialed_to, outcome,

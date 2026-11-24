@@ -625,6 +625,24 @@ describe("calls", () => {
     expect(list.body.calls.map((c: any) => c.callSid)).toEqual([SID]);
   });
 
+  // Review of #520, round 3: a background call row the worker wrote and then
+  // stopped on (no_status, no Twilio sid) never rang; only the sid proves it.
+  it("lists a background call only when it has a provider call sid", async () => {
+    const s = fixture();
+    const sid2 = "CA" + "b".repeat(32);
+    const sid3 = "CA" + "c".repeat(32);
+    s.escalations.push(
+      { ...s.escalations[0], id: 8, callSid: sid2, status: "exhausted" },
+      { ...s.escalations[0], id: 9, callSid: sid3, status: "exhausted" },
+    );
+    s.attempts.push(
+      { ...s.attempts[0], id: 2, escalationId: 8, callSid: sid2, kind: "call", outcome: "no_status", providerCallSid: null },
+      { ...s.attempts[0], id: 3, escalationId: 9, callSid: sid3, kind: "call", outcome: "no_status", providerCallSid: "CA" + "d".repeat(32) },
+    );
+    const list = await boot({}, s).request("GET", `${ON_CALL_API}/calls`);
+    expect(list.body.calls.map((c: any) => c.callSid).sort()).toEqual([SID, sid3].sort());
+  });
+
   it("sends no escalation plan and no full E.164 number on the calls list or a call's detail", async () => {
     const s = fixture();
     s.escalations[0].plan = { levels: [{ role: "on_call", providerId: 1, name: "Dr. Test Alpha", phone: "+15555550101" } as any], notes: [] };
@@ -697,6 +715,10 @@ describe("maskCallPhones in free text", () => {
     ["1-415-555-0123", "…0123"],
     ["+1 (415) 555-0123", "…0123"],
     ["+14155550123.", "…0123."],
+    ["call +44 20 7946 0958 now", "call …0958 now"],
+    ["+52 55 1234 5678", "…5678"],
+    ["+44.20.7946.0958", "…0958"],
+    ["+33-1-23-45-67-89", "…6789"],
     ["it is 4 1 5 5 5 5 0 1 2 3 thanks", "it is …0123 thanks"],
     ["4, 1, 5, 5, 5, 5, 0, 1, 2, 3", "…0123"],
   ])("masks %j", (input, out) => {

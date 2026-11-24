@@ -874,7 +874,9 @@ describe('a failed on-call transfer (the 70166 shape)', () => {
     const cases: Array<[string, boolean]> = [
       ['handoff_failed:NO_ANSWER', true],
       ['handoff_failed:DECLINED', true],
-      ['handoff_failed:CHAIN_STARTED', true],
+      // Also returned when the in-call transfer never dialled; the chain's
+      // own attempts list it on the Calls tab (review of #520, round 3).
+      ['handoff_failed:CHAIN_STARTED', false],
       ['handoff_failed:UNAVAILABLE', false],
       ['handoff_failed:CHAIN_RUNNING', false],
       ['handoff_failed:CHAIN_PENDING', false],

@@ -274,7 +274,7 @@ function describe(ans: OnCallAnswer, data: RotationData, at: Date, fallbackPhone
 /**
  * A phone number written inside free text (a transcript line, a summary, an
  * event message), in the forms a transcriber or a person writes one:
- * E.164 ("+14155550123"), US with an optional +1 / 1 and parentheses,
+ * E.164 ("+14155550123") and any formatted "+" number ("+44 20 7946 0958"), US with an optional +1 / 1 and parentheses,
  * spaces, dots or dashes ("(415) 555-0123", "1.415.555.0123"), ten or eleven
  * bare digits, and digits read out one at a time ("4 1 5 5 5 5 0 1 2 3").
  * Bounded by non-word characters, so a digit run inside a SID or a ticket
@@ -284,7 +284,9 @@ function describe(ans: OnCallAnswer, data: RotationData, at: Date, fallbackPhone
  */
 const PHONE_IN_TEXT = new RegExp(
   [
-    String.raw`\+\d{10,15}`,
+    // Any "+" number, 7 to 15 digits, groups split by a space, dot, dash or
+    // parenthesis ("+44 20 7946 0958", "+1 (415) 555-0123"); review of #520, round 3.
+    String.raw`\+\d(?:[ .()-]{0,2}\d){6,14}`,
     String.raw`(?:\+?1[\s.-]?)?(?:\(\d{3}\)\s?|\d{3}[\s.-]?)\d{3}[\s.-]?\d{4}`,
     String.raw`(?:\d[ ,.-]{1,2}){9,10}\d`,
   ]
@@ -296,7 +298,7 @@ const PHONE_IN_TEXT = new RegExp(
 function maskPhonesInText(s: string): string {
   return s.replace(PHONE_IN_TEXT, (m) => {
     const digits = m.replace(/\D/g, "");
-    const isPhone = m.startsWith("+") ? digits.length >= 10 : digits.length === 10 || (digits.length === 11 && digits[0] === "1");
+    const isPhone = m.startsWith("+") ? digits.length >= 7 && digits.length <= 15 : digits.length === 10 || (digits.length === 11 && digits[0] === "1");
     return isPhone ? last4(digits) ?? m : m;
   });
 }

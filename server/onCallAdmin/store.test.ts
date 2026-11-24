@@ -137,9 +137,12 @@ describe("the Postgres admin store", () => {
   // Review of #520, round 2: the runner writes a call row before Twilio is
   // asked, and a failed one when the level has no phone or the create fails.
   // Only a provider call sid or an outcome that means the phone rang counts.
+  // Round 3: a background 'call' row counts only with a provider call sid; a
+  // no_status row the worker left before asking Twilio has none.
   it("counts a call attempt only when the phone rang", () => {
     const sql = ADMIN_SQL.escalations.replace(/--[^\n]*/g, "").replace(/\s+/g, " ");
-    const filter = /and \(a\.provider_call_sid is not null or a\.outcome in \(([^)]*)\)\)\)/.exec(sql);
+    expect(sql).toContain("((a.kind = 'call' and a.provider_call_sid is not null) or (a.kind = 'warm_transfer' and");
+    const filter = /a\.kind = 'warm_transfer' and \(a\.provider_call_sid is not null or a\.outcome in \(([^)]*)\)\)\)\)\)/.exec(sql);
     expect(filter).not.toBeNull();
     const outcomes = filter![1].split(",").map((s) => s.trim().replace(/'/g, ""));
     expect(outcomes.sort()).toEqual(["accepted", "busy", "declined", "no_answer", "no_status", "taken_elsewhere"]);
