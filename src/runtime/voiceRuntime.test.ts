@@ -3465,7 +3465,7 @@ describe("the after-hours on-call chain at the runtime (src/runtime/onCall/)", (
 
   it("is off by default and says so on /voice/health", async () => {
     const h = await harness();
-    expect(await health(h)).toEqual({ mode: "off", testPhones: 0, requireKept: false, running: false });
+    expect(await health(h)).toEqual({ mode: "off", testPhones: 0, requireKept: false, finalFallback: { configured: false }, running: false });
   });
 
   it("builds the wiring from the runtime's own env, and reports why it is off", async () => {
@@ -3497,7 +3497,7 @@ describe("the after-hours on-call chain at the runtime (src/runtime/onCall/)", (
     const runner = recordingRunner();
     const h = await harness({ onCall: { ...wiring, runner } });
     const onCall = await health(h);
-    expect(onCall).toEqual({ mode: "test", testPhones: 2, requireKept: false, running: true });
+    expect(onCall).toEqual({ mode: "test", testPhones: 2, requireKept: false, finalFallback: { configured: false }, running: true });
     expect(JSON.stringify(onCall)).not.toMatch(/\d{7}/);
     expect(runner.started).toBe(1);
   });
