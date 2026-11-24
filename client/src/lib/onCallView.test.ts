@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { acceptExtendPreview, apiError, chainStatusVariant, countdown, coverBody, editCover, extendPlan, extendPreviewReady, isExtendPlanChanged, finalFallbackText, fmtPacific, fmtSeconds, fmtWeek, pacificMidnightIso, pacificNextMidnightIso, ROLE_LABELS, sectionBadge, toPacificInput, warnCoverOverlap } from './onCallView'
+import { acceptExtendPreview, apiError, chainStatusVariant, countdown, coverBody, editCover, extendPlan, extendPreviewReady, isExtendPlanChanged, finalFallbackText, fmtPacific, fmtSeconds, fmtWeek, pacificMidnightIso, pacificNextMidnightIso, providerBody, ROLE_LABELS, sectionBadge, toPacificInput, warnCoverOverlap } from './onCallView'
 
 describe('on-call page helpers', () => {
   it('shows times in Pacific and says so', () => {
@@ -128,6 +128,22 @@ describe('on-call page helpers', () => {
       expect(extendPreviewReady(p8, 12)).toBe(false)
       expect(extendPreviewReady({ ...p8, refusal: 'Dr. X has no phone.' }, 8)).toBe(false)
       expect(extendPreviewReady(p8, 8)).toBe(true)
+    })
+  })
+
+  describe('providerBody (review of #520)', () => {
+    const original = { fullName: 'Dr. Test', phone: '', email: '', npi: '', region: 'Los Angeles', newRegion: false, inRotation: true }
+    it('an edit sends only what changed, so a blank phone on file is not resubmitted', () => {
+      expect(providerBody({ ...original, inRotation: false }, original, 'r')).toEqual({ inRotation: false, reason: 'r' })
+      expect(providerBody(original, original, 'r')).toEqual({ reason: 'r' })
+      expect(providerBody({ ...original, phone: '555-555-0101' }, original, 'r')).toEqual({ phone: '555-555-0101', reason: 'r' })
+    })
+    it('a changed region carries its new-region flag; an unchanged one carries neither', () => {
+      expect(providerBody({ ...original, region: 'Coachella', newRegion: true }, original, 'r')).toEqual({ region: 'Coachella', newRegion: true, reason: 'r' })
+      expect(providerBody({ ...original, newRegion: true }, original, 'r')).toEqual({ reason: 'r' })
+    })
+    it('a new provider sends every field', () => {
+      expect(providerBody(original, null, 'r')).toEqual({ ...original, reason: 'r' })
     })
   })
 })

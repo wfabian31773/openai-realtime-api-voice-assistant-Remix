@@ -20,7 +20,7 @@ export interface Answer {
   director: PublicProvider | null
   final: PublicProvider | null
   chain: {
-    levels: Array<{ index: number; role: string; providerId: number; name: string; region: string | null; phoneLast4: string | null; dialable: boolean }>
+    levels: Array<{ index: number; role: string; providerId: number; name: string; region: string | null; phoneLast4: string | null; dialable: boolean; isCallerId?: boolean }>
     notes: string[]
     operationsFallbackConfigured?: boolean
   }
@@ -81,6 +81,7 @@ export function AnswerCard({ title, answer, highlight }: { title: string; answer
                   {l.region && <span className="text-muted-foreground">· {l.region}</span>}
                   <span className="text-muted-foreground">· {l.phoneLast4 ?? 'no phone'}</span>
                   {!l.dialable && <Badge variant="destructive">not dialable: skipped</Badge>}
+                  {l.isCallerId && <Badge variant="destructive">the rotation's caller ID: the call will fail</Badge>}
                 </div>
               </li>
             ))}

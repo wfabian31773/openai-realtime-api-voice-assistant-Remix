@@ -5,7 +5,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import { apiError, fmtWeek } from '@/lib/onCallView'
+import { apiError, fmtWeek, providerBody, type ProviderForm } from '@/lib/onCallView'
 import { Banner, ReasonDialog, useOnCall, useOnCallWrite } from './shared'
 import { ArrowDown, ArrowUp, ListOrdered, UserPlus } from 'lucide-react'
 
@@ -24,22 +24,14 @@ interface Provider {
   phoneDialable: boolean
 }
 
-interface Form {
-  fullName: string
-  phone: string
-  email: string
-  npi: string
-  region: string
-  newRegion: boolean
-  inRotation: boolean
-}
+type Form = ProviderForm
 
 const EMPTY: Form = { fullName: '', phone: '', email: '', npi: '', region: '', newRegion: false, inRotation: true }
 
 export function ProvidersTab() {
   const q = useOnCall<{ providers: Provider[]; regions: string[] }>('/providers')
   const write = useOnCallWrite()
-  const [edit, setEdit] = React.useState<{ id: number | null; form: Form } | null>(null)
+  const [edit, setEdit] = React.useState<{ id: number | null; form: Form; original: Form | null } | null>(null)
   const [toggle, setToggle] = React.useState<Provider | null>(null)
   const [del, setDel] = React.useState<Provider | null>(null)
   const [order, setOrder] = React.useState<number[] | null>(null)
@@ -54,13 +46,12 @@ export function ProvidersTab() {
   const rotation = providers.filter((p) => p.rotationOrder !== null).sort((a, b) => (a.rotationOrder ?? 0) - (b.rotationOrder ?? 0))
   const shown = providers.filter((p) => `${p.fullName} ${p.region} ${p.npi ?? ''}`.toLowerCase().includes(filter.toLowerCase()))
 
-  const openEdit = (p: Provider | null) =>
-    setEdit({
-      id: p?.id ?? null,
-      form: p
-        ? { fullName: p.fullName, phone: p.phone, email: p.email ?? '', npi: p.npi ?? '', region: p.region, newRegion: false, inRotation: p.rotationOrder !== null }
-        : EMPTY,
-    })
+  const openEdit = (p: Provider | null) => {
+    const form: Form = p
+      ? { fullName: p.fullName, phone: p.phone ?? '', email: p.email ?? '', npi: p.npi ?? '', region: p.region, newRegion: false, inRotation: p.rotationOrder !== null }
+      : EMPTY
+    setEdit({ id: p?.id ?? null, form, original: p ? form : null })
+  }
   const setF = (patch: Partial<Form>) => setEdit((e) => (e ? { ...e, form: { ...e.form, ...patch } } : e))
   const move = (i: number, d: -1 | 1) =>
     setOrder((o) => {
@@ -185,8 +176,7 @@ export function ProvidersTab() {
         description={edit?.id ? undefined : 'A new provider joins at the END of the rotation; their first week is the first one Extend adds.'}
         confirmLabel={edit?.id ? 'Save changes' : 'Add provider'}
         onConfirm={(reason) => {
-          const f = edit!.form
-          const body = { fullName: f.fullName, phone: f.phone, email: f.email, npi: f.npi, region: f.region, newRegion: f.newRegion, inRotation: f.inRotation, reason }
+          const body = providerBody(edit!.form, edit!.original, reason)
           return edit!.id
             ? write.mutateAsync({ method: 'patch', path: `/providers/${edit!.id}`, body })
             : write.mutateAsync({ method: 'post', path: '/providers', body })

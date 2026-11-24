@@ -223,16 +223,18 @@ export function planExtension(
 export function extensionRefusal(
   weeks: readonly { week: string; providerId: number }[],
   providers: readonly Pick<OnCallProvider, "id" | "fullName" | "phone">[],
+  /** The rotation's caller ID: a provider whose phone is it cannot be rung either. */
+  callerId: string | null = null,
 ): string | null {
   const bad = new Map<number, string[]>();
   for (const w of weeks) {
     const p = providers.find((x) => x.id === w.providerId);
-    if (p && !isDialable(p.phone)) bad.set(p.id, [...(bad.get(p.id) ?? []), w.week]);
+    if (p && (!isDialable(p.phone) || (callerId && p.phone === callerId))) bad.set(p.id, [...(bad.get(p.id) ?? []), w.week]);
   }
   if (bad.size === 0) return null;
   const who = [...bad].map(([id, ws]) => `${providers.find((p) => p.id === id)!.fullName} (week${ws.length === 1 ? "" : "s"} of ${ws.join(", ")})`);
   return (
-    `Extend refused: ${who.join("; ")} would get a week but ${who.length === 1 ? "has" : "have"} no dialable phone number. ` +
+    `Extend refused: ${who.join("; ")} would get a week but ${who.length === 1 ? "has" : "have"} no dialable phone number (or it is the rotation's own caller ID). ` +
     `Fix the number on the Providers tab, or deactivate them, then extend again. Nothing was added.`
   );
 }

@@ -110,6 +110,11 @@ describe("extend, as scripts/on-call-change.ts extend does it", () => {
     expect(planExtension({ week: "2026-12-01", providerId: 1 }, [P(1, 1)], 0).ok).toBe(false);
     expect(planExtension({ week: "2026-12-01", providerId: 1 }, [P(1, 1)], 105).ok).toBe(false);
   });
+  it("is refused when a provider who would get a week has the rotation's caller ID as their phone", () => {
+    const providers = [{ id: 1, fullName: "Dr. Test Self", phone: "+15550000001" }];
+    expect(extensionRefusal([{ week: "2026-12-08", providerId: 1 }], providers)).toBeNull();
+    expect(extensionRefusal([{ week: "2026-12-08", providerId: 1 }], providers, "+15550000001")).toMatch(/Dr\. Test Self \(week of 2026-12-08\)/);
+  });
   it("is refused, naming each provider and week, when a provider who would get a week has no dialable phone", () => {
     const providers = [
       { id: 1, fullName: "Dr. Test One", phone: "+15555550101" },

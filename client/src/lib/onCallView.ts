@@ -175,6 +175,35 @@ export function finalFallbackText(c: { finalFallbackLast4?: string | null; final
   return 'not configured: an exhausted chain only texts the urgent notification number'
 }
 
+export interface ProviderForm {
+  fullName: string
+  phone: string
+  email: string
+  npi: string
+  region: string
+  newRegion: boolean
+  inRotation: boolean
+}
+
+/**
+ * The provider dialog's save body. A new provider sends every field; an edit
+ * sends only what the admin changed against the form it opened with, so an
+ * unrelated edit (taking someone out of the rotation) is never refused for a
+ * blank or legacy phone that is already on file.
+ */
+export function providerBody(form: ProviderForm, original: ProviderForm | null, reason: string): Record<string, unknown> {
+  if (!original) return { ...form, reason }
+  const body: Record<string, unknown> = { reason }
+  for (const k of ['fullName', 'phone', 'email', 'npi', 'inRotation'] as const) {
+    if (form[k] !== original[k]) body[k] = form[k]
+  }
+  if (form.region !== original.region) {
+    body.region = form.region
+    body.newRegion = form.newRegion
+  }
+  return body
+}
+
 export interface CoverDraft {
   startsAt: string
   endsAt: string

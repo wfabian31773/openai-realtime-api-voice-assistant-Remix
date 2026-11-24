@@ -176,12 +176,26 @@ function intOf(v: unknown, what: string): number {
   return n;
 }
 
+/**
+ * A number the rotation can ring: the runtime's DIALABLE shape, and not the
+ * rotation's own caller ID (Twilio refuses a call from a number to itself; the
+ * same rule config.ts applies to ON_CALL_FINAL_FALLBACK_NUMBER).
+ */
+function ringsFrom(phone: string | null | undefined, callerId: string | null): boolean {
+  return isDialable(phone) && !(callerId && phone === callerId);
+}
+
+const CALLER_ID_REFUSAL = "That number is the rotation's own caller ID (ON_CALL_CALLER_ID or TWILIO_PHONE_NUMBER); the chain cannot call a number from itself. Enter the provider's own phone.";
+
 /** The provider a change names: on file, active, with a number the chain can dial. */
-function ringableProvider(providers: AdminProvider[], id: number): AdminProvider {
+function ringableProvider(providers: AdminProvider[], id: number, callerId: string | null): AdminProvider {
   const p = providers.find((x) => x.id === id);
   if (!p) throw new AdminRefusal(400, `Provider #${id} is not on file.`);
   if (!p.active) throw new AdminRefusal(400, `${p.fullName} is inactive; reactivate them first.`);
   if (!isDialable(p.phone)) throw new AdminRefusal(400, `${p.fullName} has no dialable phone number on file.`);
+  if (!ringsFrom(p.phone, callerId)) {
+    throw new AdminRefusal(400, `${p.fullName}'s phone on file is the rotation's own caller ID; the chain cannot call it. Edit their phone first.`);
+  }
   return p;
 }
 
@@ -199,7 +213,28 @@ function auditSnapshot(p: AdminProvider | null | undefined) {
   return rest;
 }
 
-function describe(ans: OnCallAnswer, data: RotationData, at: Date, fallbackPhone?: string) {
+/**
+ * An edit body without the fields that read exactly as they are on file, so a
+ * resubmitted unchanged field is neither validated nor written. A region kept
+ * as it is also drops its newRegion flag.
+ */
+export function changedFields(body: Record<string, unknown>, before: AdminProvider): Record<string, unknown> {
+  const out: Record<string, unknown> = { ...body };
+  const same = (k: "fullName" | "phone" | "npi" | "email" | "region", norm: (s: string) => string = (s) => s.trim()) =>
+    body[k] !== undefined && norm(String(body[k] ?? "")) === norm(String(before[k] ?? ""));
+  const spaces = (s: string) => s.trim().replace(/\s+/g, " ");
+  if (same("fullName", spaces)) delete out.fullName;
+  if (same("phone")) delete out.phone;
+  if (same("npi", (s) => s.replace(/\D/g, ""))) delete out.npi;
+  if (same("email")) delete out.email;
+  if (same("region", spaces)) {
+    delete out.region;
+    delete out.newRegion;
+  }
+  return out;
+}
+
+function describe(ans: OnCallAnswer, data: RotationData, at: Date, fallbackPhone: string | undefined, callerId: string | null) {
   // The chain the runtime would plan, the operations fallback (Wayne) included
   // when ON_CALL_FINAL_FALLBACK_NUMBER is set.
   const plan = withOperationsFallback(planChain(ans.provider ? { role: "on_call", provider: ans.provider } : null, data), fallbackPhone);
@@ -218,7 +253,9 @@ function describe(ans: OnCallAnswer, data: RotationData, at: Date, fallbackPhone
     chain: {
       levels: plan.levels.map((l, i) => {
         const p = byId.get(l.providerId);
-        return { index: i, role: l.role, providerId: l.providerId, name: l.name, region: p?.region ?? null, phoneLast4: last4(l.phone), dialable: isDialable(l.phone) };
+        return { index: i, role: l.role, providerId: l.providerId, name: l.name, region: p?.region ?? null, phoneLast4: last4(l.phone), dialable: isDialable(l.phone),
+          // The runtime does not skip this level; Twilio refuses the call (source = destination).
+          isCallerId: isDialable(l.phone) && !ringsFrom(l.phone, callerId) };
       }),
       notes: plan.notes,
       // Whether ON_CALL_FINAL_FALLBACK_NUMBER is set, so the page can say "not
@@ -250,6 +287,8 @@ function parseInstant(raw: unknown): Date | null {
 export function mountOnCallAdmin(app: Express, deps: OnCallAdminDeps) {
   const now = deps.now ?? (() => new Date());
   const guard = [deps.authenticate, deps.admin];
+  /** The rotation's caller ID as the runtime resolves it, read per request. */
+  const callerId = () => rotationCallerId(deps.env);
 
   type Handler = (req: Request, res: Response, store: OnCallAdminStore) => Promise<unknown>;
 
@@ -351,10 +390,11 @@ export function mountOnCallAdmin(app: Express, deps: OnCallAdminDeps) {
     const p = pacificMinute(t);
     const nextWindowAt = current.window.onCall ? null : pacificWallToDate(`${p.date} 17:00`);
     const fb = readFinalFallback(deps.env).finalFallbackPhone;
+    const cid = callerId();
     return {
-      now: describe(current, data, t, fb),
-      nextWindow: nextWindowAt ? describe(onCallAt(nextWindowAt, data), data, nextWindowAt, fb) : null,
-      nextWeek: describe(onCallAt(nextWeekAt, data), data, nextWeekAt, fb),
+      now: describe(current, data, t, fb, cid),
+      nextWindow: nextWindowAt ? describe(onCallAt(nextWindowAt, data), data, nextWindowAt, fb, cid) : null,
+      nextWeek: describe(onCallAt(nextWeekAt, data), data, nextWeekAt, fb, cid),
     };
   }));
 
@@ -362,7 +402,7 @@ export function mountOnCallAdmin(app: Express, deps: OnCallAdminDeps) {
     const at = parseInstant(req.query.at);
     if (!at) throw new AdminRefusal(400, "at must be a Pacific date and time (YYYY-MM-DDTHH:MM).");
     const { data } = await loadAll(store);
-    return { preview: describe(onCallAt(at, data), data, at, readFinalFallback(deps.env).finalFallbackPhone) };
+    return { preview: describe(onCallAt(at, data), data, at, readFinalFallback(deps.env).finalFallbackPhone, callerId()) };
   }));
 
   // ── Schedule ──────────────────────────────────────────────────────────────
@@ -395,7 +435,7 @@ export function mountOnCallAdmin(app: Express, deps: OnCallAdminDeps) {
     if (!isTuesday(week)) throw new AdminRefusal(400, `${week || "The week"} is not a Tuesday (a week starts on Tuesday at 5:00 PM).`);
     const providerId = intOf(req.body?.providerId, "providerId");
     const providers = await tx.providers();
-    const p = ringableProvider(providers, providerId);
+    const p = ringableProvider(providers, providerId, callerId());
     const before = (await tx.schedule()).find((r) => r.week === week) ?? null;
     if (before?.providerId === providerId) throw new AdminRefusal(400, `${p.fullName} already has the week of ${week}.`);
     const note = `${before ? "swapped" : "assigned"} to ${p.fullName}: ${reason}`.slice(0, 500);
@@ -422,8 +462,8 @@ export function mountOnCallAdmin(app: Express, deps: OnCallAdminDeps) {
     if (!ra || !rb) throw new AdminRefusal(400, `The week of ${!ra ? a : b} is not on the schedule.`);
     if (ra.providerId === rb.providerId) throw new AdminRefusal(400, "Both weeks already have the same provider.");
     const providers = await tx.providers();
-    const pa = ringableProvider(providers, rb.providerId);
-    const pb = ringableProvider(providers, ra.providerId);
+    const pa = ringableProvider(providers, rb.providerId, callerId());
+    const pb = ringableProvider(providers, ra.providerId, callerId());
     await tx.setWeekProvider(a, rb.providerId, `swapped with ${b} (${pa.fullName})`);
     await tx.setWeekProvider(b, ra.providerId, `swapped with ${a} (${pb.fullName})`);
     await audit({
@@ -454,7 +494,7 @@ export function mountOnCallAdmin(app: Express, deps: OnCallAdminDeps) {
         ok: true,
         dryRun: true,
         weeks: plan.weeks.map((w) => ({ ...w, providerName: providers.find((p) => p.id === w.providerId)?.fullName ?? null })),
-        refusal: extensionRefusal(plan.weeks, providers),
+        refusal: extensionRefusal(plan.weeks, providers, callerId()),
       });
     } catch {
       res.status(500).json({ error: "The on-call data could not be read." });
@@ -464,7 +504,7 @@ export function mountOnCallAdmin(app: Express, deps: OnCallAdminDeps) {
     const [providers, schedule] = await Promise.all([tx.providers(), tx.schedule()]);
     const plan = planExtension(schedule[schedule.length - 1] ?? null, providers, Number(req.body?.weeks));
     if (!plan.ok) throw new AdminRefusal(400, plan.error);
-    const refusal = extensionRefusal(plan.weeks, providers);
+    const refusal = extensionRefusal(plan.weeks, providers, callerId());
     if (refusal) throw new AdminRefusal(400, refusal);
     // The weeks the admin approved in the preview, compared under the write
     // lock with what would be written now: another admin or the CLI may have
@@ -507,7 +547,7 @@ export function mountOnCallAdmin(app: Express, deps: OnCallAdminDeps) {
     if (endsAt <= startsAt) throw new AdminRefusal(400, "The end must be after the start.");
     if (endsAt <= now()) throw new AdminRefusal(400, "That window is already over.");
     const providerId = intOf(req.body?.providerId, "providerId");
-    const p = ringableProvider(await tx.providers(), providerId);
+    const p = ringableProvider(await tx.providers(), providerId, callerId());
     const clash = overlapping(await tx.overrides(), startsAt, endsAt);
     const confirmed = req.body?.confirmedOverlapIds;
     if (clash.length && !sameOverlapIds(confirmed, clash.map((o) => o.id))) {
@@ -559,7 +599,7 @@ export function mountOnCallAdmin(app: Express, deps: OnCallAdminDeps) {
         upcomingWeeks: schedule.filter((r) => r.providerId === p.id && r.week >= current).map((r) => r.week),
         upcomingOverrides: overrides.filter((o) => o.providerId === p.id && o.endsAt > t).length,
         directsRegions: directors.filter((d) => d.providerId === p.id).map((d) => d.region),
-        phoneDialable: isDialable(p.phone),
+        phoneDialable: ringsFrom(p.phone, callerId()),
       })),
       regions: directors.map((d) => d.region),
     };
@@ -593,6 +633,8 @@ export function mountOnCallAdmin(app: Express, deps: OnCallAdminDeps) {
     if (body.phone !== undefined) {
       const phone = normalizePhone(String(body.phone ?? ""));
       if (!phone) throw new AdminRefusal(400, "The phone is not a phone number.");
+      const cid = callerId();
+      if (cid && phone === cid) throw new AdminRefusal(400, CALLER_ID_REFUSAL);
       patch.phone = phone;
     }
     if (body.npi !== undefined) {
@@ -636,7 +678,10 @@ export function mountOnCallAdmin(app: Express, deps: OnCallAdminDeps) {
     const providers = await tx.providers();
     const before = providers.find((p) => p.id === id);
     if (!before) throw new AdminRefusal(404, `Provider #${id} is not on file.`);
-    const patch = await providerFields(tx, req.body ?? {}, id);
+    // Only the fields the edit CHANGES are validated: an edit that resubmits a
+    // field as it is on file (a blank or legacy phone, say) must not be refused
+    // for that field when the admin only meant to change something else.
+    const patch = await providerFields(tx, changedFields(req.body ?? {}, before), id);
     if (typeof req.body?.inRotation === "boolean") {
       const inNow = before.rotationOrder !== null;
       if (req.body.inRotation && !inNow) patch.rotationOrder = Math.max(0, ...providers.map((p) => p.rotationOrder ?? 0)) + 1;
@@ -759,7 +804,7 @@ export function mountOnCallAdmin(app: Express, deps: OnCallAdminDeps) {
     const region = typeof req.body?.region === "string" ? req.body.region.trim().replace(/\s+/g, " ") : "";
     if (!region) throw new AdminRefusal(400, "A region is required.");
     const providerId = intOf(req.body?.providerId, "providerId");
-    const p = ringableProvider(await tx.providers(), providerId);
+    const p = ringableProvider(await tx.providers(), providerId, callerId());
     const directors = await tx.directors();
     const existing = directors.find((d) => regionKey(d.region) === regionKey(region));
     if (!existing && req.body?.newRegion !== true) {

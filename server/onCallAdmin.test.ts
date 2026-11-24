@@ -519,6 +519,65 @@ describe("providers", () => {
     expect(JSON.stringify(log.body)).not.toContain("5555550177");
   });
 
+  it("an edit that resubmits a blank or invalid phone unchanged is not refused for it (review of #520)", async () => {
+    const h = boot();
+    // Provider 5's phone on file is blank; the dialog sends it back as it was.
+    const r = await h.request("PATCH", `${ON_CALL_API}/providers/5`, "admin", {
+      fullName: "Dr. Test NoPhone",
+      phone: "",
+      region: "Inland Empire",
+      email: "",
+      npi: "",
+      inRotation: false,
+      reason: "escalation only",
+    });
+    expect(r.status).toBe(200);
+    expect(h.store.state.providers.find((p) => p.id === 5)).toMatchObject({ phone: "", rotationOrder: null });
+    expect(h.store.state.audit).toHaveLength(1);
+    // A phone the admin did change is still validated.
+    const bad = await h.request("PATCH", `${ON_CALL_API}/providers/5`, "admin", { phone: "12", reason: "x" });
+    expect(bad.status).toBe(400);
+    expect(bad.body.error).toMatch(/not a phone/);
+  });
+
+  it("an unchanged name another provider shares is not re-checked; a new one is", async () => {
+    const s = fixture();
+    s.providers.find((p) => p.id === 6)!.fullName = "Dr. Test Alpha";
+    const h = boot({}, s);
+    const ok = await h.request("PATCH", `${ON_CALL_API}/providers/6`, "admin", { fullName: "Dr. Test Alpha", email: "a@example.test", reason: "x" });
+    expect(ok.status).toBe(200);
+    const clash = await h.request("PATCH", `${ON_CALL_API}/providers/2`, "admin", { fullName: "Dr. Test Gamma", reason: "x" });
+    expect(clash.status).toBe(400);
+  });
+
+  it("refuses the rotation's own caller ID as a provider phone, on create and on change (review of #520)", async () => {
+    const h = boot({}, fixture(), { TWILIO_PHONE_NUMBER: "+15550000001" });
+    const create = await h.request("POST", `${ON_CALL_API}/providers`, "admin", { fullName: "Dr. Test New", phone: "555-000-0001", region: "Inland Empire", reason: "x" });
+    expect(create.status).toBe(400);
+    expect(create.body.error).toMatch(/caller ID/);
+    const change = await h.request("PATCH", `${ON_CALL_API}/providers/2`, "admin", { phone: "+15550000001", reason: "x" });
+    expect(change.status).toBe(400);
+    expect(change.body.error).toMatch(/caller ID/);
+    // ON_CALL_CALLER_ID wins over TWILIO_PHONE_NUMBER, as the runtime resolves it.
+    const h2 = boot({}, fixture(), { ON_CALL_CALLER_ID: "+15550000002", TWILIO_PHONE_NUMBER: "+15550000001" });
+    expect((await h2.request("PATCH", `${ON_CALL_API}/providers/2`, "admin", { phone: "+15550000001", reason: "x" })).status).toBe(200);
+    expect((await h2.request("PATCH", `${ON_CALL_API}/providers/3`, "admin", { phone: "+15550000002", reason: "x" })).status).toBe(400);
+  });
+
+  it("a provider whose phone on file is the caller ID cannot be scheduled, covered, made director or extended into", async () => {
+    const s = fixture();
+    s.providers.find((p) => p.id === 2)!.phone = "+15550000001";
+    const h = boot({}, s, { TWILIO_PHONE_NUMBER: "+15550000001" });
+    const assign = await h.request("POST", `${ON_CALL_API}/schedule/assign`, "admin", { week: "2026-12-15", providerId: 2, reason: "x" });
+    expect(assign.status).toBe(400);
+    expect(assign.body.error).toMatch(/caller ID/);
+    const director = await h.request("PUT", `${ON_CALL_API}/directors`, "admin", { region: "San Diego", providerId: 2, reason: "x" });
+    expect(director.status).toBe(400);
+    const list = await h.request("GET", `${ON_CALL_API}/providers`);
+    expect(list.body.providers.find((p: { id: number }) => p.id === 2).phoneDialable).toBe(false);
+    expect(list.body.providers.find((p: { id: number }) => p.id === 1).phoneDialable).toBe(true);
+  });
+
   it("the providers tab shows full phones; nothing else does", async () => {
     const h = boot();
     expect(JSON.stringify((await h.request("GET", `${ON_CALL_API}/providers`)).body)).toContain("+15555550101");
