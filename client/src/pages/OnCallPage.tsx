@@ -63,7 +63,8 @@ export function OnCallPage() {
     const t = setInterval(() => setTick((x) => x + 1), 30_000)
     return () => clearInterval(t)
   }, [])
-  const remaining = s ? Math.max(0, new Date(s.goLive.at).getTime() - Date.now()) + tick * 0 : 0
+  // `tick` re-renders the countdown every 30 seconds.
+  const remaining = React.useMemo(() => (s ? Math.max(0, new Date(s.goLive.at).getTime() - Date.now()) : 0), [s, tick])
 
   return (
     <div className="space-y-4 p-6">

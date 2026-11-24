@@ -371,6 +371,20 @@ describe("providers", () => {
     expect((await h.request("POST", `${ON_CALL_API}/providers/reorder`, "admin", { orderedIds: [1, 2], reason: "x" })).status).toBe(400);
   });
 
+  it("an edit writes and audits only what changed; an edit that changes nothing is refused", async () => {
+    const h = boot();
+    const same = { fullName: "Dr. Test Beta", phone: "+15555550102", region: "Los Angeles", email: "", npi: "", reason: "x" };
+    expect((await h.request("PATCH", `${ON_CALL_API}/providers/2`, "admin", same)).status).toBe(400);
+    const r = await h.request("PATCH", `${ON_CALL_API}/providers/2`, "admin", { ...same, phone: "555-555-0177" });
+    expect(r.status).toBe(200);
+    expect(h.store.state.audit).toHaveLength(1);
+    expect(h.store.state.providers.find((p) => p.id === 2)!.phone).toBe("+15555550177");
+    // The log keeps the number; the audit tab shows the last four.
+    const log = await h.request("GET", `${ON_CALL_API}/audit`);
+    expect(log.body.rows[0].after.phone).toBe("…0177");
+    expect(JSON.stringify(log.body)).not.toContain("5555550177");
+  });
+
   it("the providers tab shows full phones; nothing else does", async () => {
     const h = boot();
     expect(JSON.stringify((await h.request("GET", `${ON_CALL_API}/providers`)).body)).toContain("+15555550101");

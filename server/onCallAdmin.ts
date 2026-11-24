@@ -193,6 +193,15 @@ function extensionWarnings(weeks: Array<{ week: string; providerId: number }>, p
   });
 }
 
+/** Any `phone` value, at any depth, as its last four digits. */
+export function maskPhones(v: unknown): unknown {
+  if (Array.isArray(v)) return v.map(maskPhones);
+  if (!v || typeof v !== "object") return v;
+  return Object.fromEntries(
+    Object.entries(v as Record<string, unknown>).map(([k, x]) => [k, /phone/i.test(k) && typeof x === "string" ? last4(x) : maskPhones(x)]),
+  );
+}
+
 function parseInstant(raw: unknown): Date | null {
   if (typeof raw !== "string" || !raw.trim()) return null;
   const pac = pacificWallToDate(raw);
@@ -581,6 +590,10 @@ export function mountOnCallAdmin(app: Express, deps: OnCallAdminDeps) {
       if (req.body.inRotation && !inNow) patch.rotationOrder = Math.max(0, ...providers.map((p) => p.rotationOrder ?? 0)) + 1;
       if (!req.body.inRotation && inNow) patch.rotationOrder = null;
     }
+    // Only what actually changes is written and audited.
+    for (const k of Object.keys(patch) as Array<keyof ProviderPatch>) {
+      if ((patch[k] ?? null) === ((before as unknown as Record<string, unknown>)[k] ?? null)) delete patch[k];
+    }
     if (Object.keys(patch).length === 0) throw new AdminRefusal(400, "Nothing to change.");
     const after = await tx.updateProvider(id, patch);
     await audit({ action: "provider.update", entityType: "provider", entityId: String(id), before: auditSnapshot(before), after: auditSnapshot(after) });
@@ -745,7 +758,8 @@ export function mountOnCallAdmin(app: Express, deps: OnCallAdminDeps) {
         until: date(req.query.until),
         limit,
       });
-      res.json({ applied: true, rows });
+      // The log keeps full phones (they are what was changed); the page shows the last four.
+      res.json({ applied: true, rows: rows.map((r) => ({ ...r, before: maskPhones(r.before), after: maskPhones(r.after) })) });
     } catch (e) {
       console.error("[on-call admin] audit read failed:", (e as Error)?.message);
       res.status(500).json({ error: "The audit log could not be read." });
