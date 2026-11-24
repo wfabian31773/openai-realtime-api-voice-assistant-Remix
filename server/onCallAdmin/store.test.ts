@@ -130,8 +130,21 @@ describe("the Postgres admin store", () => {
   it("lists only chains with a call attempt, filtered before the limit", () => {
     const sql = ADMIN_SQL.escalations.replace(/\s+/g, " ");
     expect(sql).toMatch(
-      /where .* and exists \(select 1 from on_call_attempts a where a\.escalation_id = on_call_escalations\.id and a\.kind in \('warm_transfer', 'call'\)\) order by created_at desc limit \$3::integer/,
+      /where .* and exists \(select 1 from on_call_attempts a where a\.escalation_id = on_call_escalations\.id and a\.kind in \('warm_transfer', 'call'\) .*\) order by created_at desc limit \$3::integer/,
     );
+  });
+
+  // Review of #520, round 2: the runner writes a call row before Twilio is
+  // asked, and a failed one when the level has no phone or the create fails.
+  // Only a provider call sid or an outcome that means the phone rang counts.
+  it("counts a call attempt only when the phone rang", () => {
+    const sql = ADMIN_SQL.escalations.replace(/--[^\n]*/g, "").replace(/\s+/g, " ");
+    const filter = /and \(a\.provider_call_sid is not null or a\.outcome in \(([^)]*)\)\)\)/.exec(sql);
+    expect(filter).not.toBeNull();
+    const outcomes = filter![1].split(",").map((s) => s.trim().replace(/'/g, ""));
+    expect(outcomes.sort()).toEqual(["accepted", "busy", "declined", "no_answer", "no_status", "taken_elsewhere"]);
+    for (const notRung of ["in_progress", "failed", "sent", "send_failed"]) expect(outcomes).not.toContain(notRung);
+    expect(sql.indexOf("provider_call_sid is not null")).toBeLessThan(sql.indexOf("limit $3::integer"));
   });
 
   it("no statement reads a call_logs, call_turns or call_events time bare after its FROM", () => {

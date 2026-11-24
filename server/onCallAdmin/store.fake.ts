@@ -21,7 +21,7 @@ export interface FakeState {
   overrides: OverrideRow[];
   audit: AuditRow[];
   escalations: EscalationLite[];
-  attempts: Array<AttemptLite & { escalationId: number; callSid: string }>;
+  attempts: Array<AttemptLite & { escalationId: number; callSid: string; providerCallSid?: string | null }>;
   callLogs: CallLogLite[];
 }
 
@@ -199,9 +199,15 @@ export class FakeOnCallAdminStore implements OnCallAdminStore {
       .slice(0, f.limit);
   }
   async escalations(f: { since: Date; until: Date; limit: number }) {
-    // Mirrors ADMIN_SQL.escalations: only a chain that placed a call, before the limit.
+    // Mirrors ADMIN_SQL.escalations: only a chain whose call rang, before the limit.
+    const rang = new Set(["accepted", "no_answer", "declined", "busy", "no_status", "taken_elsewhere"]);
     const dialled = (id: number) =>
-      this.state.attempts.some((a) => a.escalationId === id && (a.kind === "warm_transfer" || a.kind === "call"));
+      this.state.attempts.some(
+        (a) =>
+          a.escalationId === id &&
+          (a.kind === "warm_transfer" || a.kind === "call") &&
+          (a.providerCallSid != null || rang.has(a.outcome)),
+      );
     return this.state.escalations
       .filter((e) => e.createdAt >= f.since && e.createdAt < f.until && dialled(e.id))
       .slice(0, f.limit);

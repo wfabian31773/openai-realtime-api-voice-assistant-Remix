@@ -33,6 +33,20 @@ describe("Pacific wall clock", () => {
   it("reads standard and daylight time", () => {
     expect(pacificWallToDate("2026-12-01 17:00")!.toISOString()).toBe("2026-12-02T01:00:00.000Z");
     expect(pacificWallToDate("2026-07-01T09:30")!.toISOString()).toBe("2026-07-01T16:30:00.000Z");
+    // Either side of both transitions.
+    expect(pacificWallToDate("2027-03-14 01:59")!.toISOString()).toBe("2027-03-14T09:59:00.000Z");
+    expect(pacificWallToDate("2027-03-14 03:00")!.toISOString()).toBe("2027-03-14T10:00:00.000Z");
+    expect(pacificWallToDate("2026-11-01 00:59")!.toISOString()).toBe("2026-11-01T07:59:00.000Z");
+    expect(pacificWallToDate("2026-11-01 02:00")!.toISOString()).toBe("2026-11-01T10:00:00.000Z");
+  });
+  // Review of #520: PostgreSQL's '<wall>'::timestamp AT TIME ZONE
+  // 'America/Los_Angeles' (checked on PG 17), so a cover entered in the admin
+  // page and one entered with the CLI start at the same instant.
+  it("reads a missing or repeated wall time at the standard offset, as PostgreSQL does", () => {
+    expect(pacificWallToDate("2027-03-14 02:30")!.toISOString()).toBe("2027-03-14T10:30:00.000Z");
+    expect(pacificWallToDate("2027-03-14 02:00")!.toISOString()).toBe("2027-03-14T10:00:00.000Z");
+    expect(pacificWallToDate("2026-11-01 01:30")!.toISOString()).toBe("2026-11-01T09:30:00.000Z");
+    expect(pacificWallToDate("2026-11-01 01:00")!.toISOString()).toBe("2026-11-01T09:00:00.000Z");
   });
   it("refuses what is not a time", () => {
     for (const bad of ["", "2026-02-30 10:00", "2026-12-01", "2026-12-01 25:00", "tomorrow"]) expect(pacificWallToDate(bad)).toBeNull();

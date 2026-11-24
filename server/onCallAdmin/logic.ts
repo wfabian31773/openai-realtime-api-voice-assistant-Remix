@@ -48,9 +48,11 @@ export function isDialable(phone: string | null | undefined): boolean {
 
 /**
  * "YYYY-MM-DD HH:MM" or "YYYY-MM-DDTHH:MM" read as a Pacific wall clock, to
- * the instant. Null when it is not that shape or not a real time. A wall time
- * that does not exist (the spring-forward hour) resolves an hour later, which
- * is what Postgres's AT TIME ZONE does too.
+ * the instant. Null when it is not that shape or not a real time. Matches
+ * PostgreSQL's `'<wall>'::timestamp AT TIME ZONE 'America/Los_Angeles'`
+ * exactly, so the admin API and the CLI agree: a wall time that does not exist
+ * (the spring-forward hour) or that happens twice (the fall-back hour) is read
+ * at the STANDARD offset, UTC-8. Only a time that reads in PDT alone is UTC-7.
  */
 export function pacificWallToDate(raw: string | null | undefined): Date | null {
   const m = /^(\d{4})-(\d{2})-(\d{2})[T ](\d{2}):(\d{2})$/.exec((raw ?? "").trim());
@@ -60,17 +62,14 @@ export function pacificWallToDate(raw: string | null | undefined): Date | null {
   const check = new Date(Date.UTC(y, mo - 1, d));
   if (check.getUTCMonth() !== mo - 1 || check.getUTCDate() !== d) return null;
   const wanted = Date.UTC(y, mo - 1, d, h, mi);
-  // Guess Pacific as UTC-8, then correct by what the guess reads as in Pacific.
-  let guess = wanted + 8 * 3_600_000;
-  for (let i = 0; i < 3; i++) {
-    const p = pacificMinute(new Date(guess));
+  const readsAsWanted = (instant: number) => {
+    const p = pacificMinute(new Date(instant));
     const [py, pm, pd] = p.date.split("-").map(Number);
-    const read = Date.UTC(py, pm - 1, pd, Math.floor(p.minute / 60), p.minute % 60);
-    const diff = wanted - read;
-    if (diff === 0) break;
-    guess += diff;
-  }
-  return new Date(guess);
+    return Date.UTC(py, pm - 1, pd, Math.floor(p.minute / 60), p.minute % 60) === wanted;
+  };
+  const standard = wanted + 8 * 3_600_000;
+  const daylight = wanted + 7 * 3_600_000;
+  return new Date(!readsAsWanted(standard) && readsAsWanted(daylight) ? daylight : standard);
 }
 
 /** The instant a rotation week starts: its Tuesday at 5:00 PM Pacific. */
