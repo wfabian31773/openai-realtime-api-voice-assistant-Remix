@@ -7,7 +7,7 @@ import { Label } from '@/components/ui/label'
 import { Select } from '@/components/ui/select'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import apiClient from '@/lib/apiClient'
-import { acceptExtendPreview, apiError, editCover, extendPreviewReady, fmtPacific, fmtWeek, toPacificInput, type CoverDraft, type ExtendPreview } from '@/lib/onCallView'
+import { acceptExtendPreview, apiError, editCover, extendPlan, extendPreviewReady, fmtPacific, isExtendPlanChanged, fmtWeek, toPacificInput, type CoverDraft, type ExtendPreview } from '@/lib/onCallView'
 import { Banner, ProviderSelect, ReasonDialog, useOnCall, useOnCallWrite, type PublicProvider } from './shared'
 import { AlertTriangle, CalendarPlus, Repeat, ShieldPlus } from 'lucide-react'
 
@@ -272,7 +272,20 @@ export function ScheduleTab() {
         description="Adds weeks after the last one, continuing the rotation order among active providers (the same as scripts/on-call-change.ts extend). Refused, with nothing added, if any provider who would get a week has no dialable phone."
         confirmLabel="Add these weeks"
         confirmDisabled={!extendPreviewReady(extendPreview, extendWeeks)}
-        onConfirm={(reason) => write.mutateAsync({ method: 'post', path: '/schedule/extend', body: { weeks: extendWeeks, reason } })}
+        onConfirm={async (reason) => {
+          if (!extendPreview) return
+          try {
+            await write.mutateAsync({ method: 'post', path: '/schedule/extend', body: { weeks: extendWeeks, plan: extendPlan(extendPreview), reason } })
+          } catch (e) {
+            // The server's message ("preview again") is shown by the dialog;
+            // the fresh preview replaces the stale weeks underneath it.
+            if (isExtendPlanChanged(e)) {
+              setExtendPreview(null)
+              loadExtendPreview(extendWeeks)
+            }
+            throw e
+          }
+        }}
       >
         <Label>Weeks to add</Label>
         <Input

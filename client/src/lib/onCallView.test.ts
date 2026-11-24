@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { acceptExtendPreview, apiError, chainStatusVariant, countdown, editCover, extendPreviewReady, finalFallbackText, fmtPacific, fmtSeconds, fmtWeek, pacificMidnightIso, pacificNextMidnightIso, ROLE_LABELS, sectionBadge, toPacificInput } from './onCallView'
+import { acceptExtendPreview, apiError, chainStatusVariant, countdown, editCover, extendPlan, extendPreviewReady, isExtendPlanChanged, finalFallbackText, fmtPacific, fmtSeconds, fmtWeek, pacificMidnightIso, pacificNextMidnightIso, ROLE_LABELS, sectionBadge, toPacificInput } from './onCallView'
 
 describe('on-call page helpers', () => {
   it('shows times in Pacific and says so', () => {
@@ -94,7 +94,18 @@ describe('on-call page helpers', () => {
   })
 
   describe('extend preview', () => {
-    const p8 = { count: 8, weeks: [{ week: '2026-12-01', providerName: 'A' }], refusal: null }
+    const p8 = { count: 8, weeks: [{ week: '2026-12-01', providerId: 4, providerName: 'A' }], refusal: null }
+
+    it('sends back the previewed weeks as the plan', () => {
+      expect(extendPlan(p8)).toEqual([{ week: '2026-12-01', providerId: 4 }])
+    })
+
+    it('recognises only the server saying the schedule changed since the preview', () => {
+      expect(isExtendPlanChanged({ response: { status: 409, data: { planChanged: true, error: 'x' } } })).toBe(true)
+      expect(isExtendPlanChanged({ response: { status: 409, data: { overlap: [] } } })).toBe(false)
+      expect(isExtendPlanChanged({ response: { status: 400, data: { planChanged: true } } })).toBe(false)
+      expect(isExtendPlanChanged(new Error('net'))).toBe(false)
+    })
 
     it('drops a preview answering an earlier count', () => {
       expect(acceptExtendPreview(12, p8)).toBe(false)

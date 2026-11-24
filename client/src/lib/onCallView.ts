@@ -198,8 +198,19 @@ export function editCover(cover: CoverDraft, patch: Partial<CoverDraft>): { cove
 export interface ExtendPreview {
   /** The week count this preview was requested for. */
   count: number
-  weeks: Array<{ week: string; providerName: string | null }>
+  weeks: Array<{ week: string; providerId: number; providerName: string | null }>
   refusal: string | null
+}
+
+/** The previewed weeks the confirm sends back, so the server writes only what the admin saw. */
+export function extendPlan(preview: ExtendPreview): Array<{ week: string; providerId: number }> {
+  return preview.weeks.map((w) => ({ week: w.week, providerId: w.providerId }))
+}
+
+/** The server refused the confirm because the schedule changed since the preview (a fresh preview is needed). */
+export function isExtendPlanChanged(e: unknown): boolean {
+  const r = (e as { response?: { status?: number; data?: { planChanged?: boolean } } })?.response
+  return r?.status === 409 && r.data?.planChanged === true
 }
 
 /** A preview response is kept only if it answers the count currently entered. */

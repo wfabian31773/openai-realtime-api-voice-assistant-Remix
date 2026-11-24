@@ -190,6 +190,21 @@ export function lit(v: string | null | undefined): string {
   return v === null || v === undefined || v === "" ? "NULL" : `'${v.replace(/'/g, "''")}'`;
 }
 
+/**
+ * A `DO` block whose dollar-quote tag does not occur anywhere in its body.
+ * `lit()` escapes single quotes but not a dollar tag, and a body carries names,
+ * regions, notes, actors and reasons; a value holding `$oncall$` would end a
+ * fixed-tag block early and run the rest as SQL. The tag starts at `$oncall$`
+ * and becomes `$oncall_1$`, `$oncall_2$`, ... until the body does not contain it.
+ * `declare` is fixed SQL (variable declarations), never a value.
+ */
+export function doBlock(declare: string, body: string[]): string[] {
+  const text = `${declare}\n${body.join("\n")}`;
+  let tag = "$oncall$";
+  for (let i = 1; text.includes(tag); i++) tag = `$oncall_${i}$`;
+  return [`DO ${tag} ${declare ? `DECLARE ${declare} ` : ""}BEGIN`, ...body, `END ${tag};`];
+}
+
 // ── The seed ────────────────────────────────────────────────────────────────
 
 export interface SeedProvider {
@@ -455,12 +470,12 @@ export function buildSeedSql(input: SeedInput): SeedResult {
     `BEGIN;`,
     `${ON_CALL_ADMIN_WRITE_LOCK_SQL};`,
     ``,
-    `DO $oncall$ BEGIN`,
-    `  IF EXISTS (SELECT 1 FROM on_call_providers) OR EXISTS (SELECT 1 FROM on_call_schedule)`,
-    `     OR EXISTS (SELECT 1 FROM on_call_escalation_directors) THEN`,
-    `    RAISE EXCEPTION 'the on-call tables are not empty: this seed is for the first load; use scripts/on-call-change.ts for changes';`,
-    `  END IF;`,
-    `END $oncall$;`,
+    ...doBlock("", [
+      `  IF EXISTS (SELECT 1 FROM on_call_providers) OR EXISTS (SELECT 1 FROM on_call_schedule)`,
+      `     OR EXISTS (SELECT 1 FROM on_call_escalation_directors) THEN`,
+      `    RAISE EXCEPTION 'the on-call tables are not empty: this seed is for the first load; use scripts/on-call-change.ts for changes';`,
+      `  END IF;`,
+    ]),
     ``,
     `INSERT INTO on_call_providers (id, full_name, npi, phone, email, region, rotation_order, active) VALUES`,
     providers
@@ -536,13 +551,11 @@ function checkAudit(audit: ChangeAudit | undefined): void {
 /** Refuses, before anything is written, when the audit table is not there. */
 function auditTableCheck(audit: ChangeAudit | undefined): string[] {
   if (!audit) return [];
-  return [
-    `DO $oncall$ BEGIN`,
+  return doBlock("", [
     `  IF to_regclass('on_call_audit_log') IS NULL THEN`,
     `    RAISE EXCEPTION 'on_call_audit_log is missing: apply migrations/add_on_call_admin.sql first; nothing was changed';`,
     `  END IF;`,
-    `END $oncall$;`,
-  ];
+  ]);
 }
 
 /**
@@ -615,18 +628,18 @@ export function addProviderSql(input: {
     `BEGIN;`,
     `${ON_CALL_ADMIN_WRITE_LOCK_SQL};`,
     ...auditTableCheck(input.audit),
-    `DO $oncall$ BEGIN`,
-    `  IF EXISTS (SELECT 1 FROM on_call_providers WHERE lower(regexp_replace(full_name, '\\s+', ' ', 'g')) = lower(${name})) THEN`,
-    `    RAISE EXCEPTION 'a provider named % is already on file; to bring them back use activate', ${name};`,
-    `  END IF;`,
-    ...(input.newRegion
-      ? []
-      : [
-          `  IF NOT EXISTS (SELECT 1 FROM on_call_escalation_directors WHERE ${regionIs(region)}) THEN`,
-          `    RAISE EXCEPTION 'region % has no escalation director; check the spelling, or pass --new-region for a new region', ${lit(region)};`,
-          `  END IF;`,
-        ]),
-    `END $oncall$;`,
+    ...doBlock("", [
+      `  IF EXISTS (SELECT 1 FROM on_call_providers WHERE lower(regexp_replace(full_name, '\\s+', ' ', 'g')) = lower(${name})) THEN`,
+      `    RAISE EXCEPTION 'a provider named % is already on file; to bring them back use activate', ${name};`,
+      `  END IF;`,
+      ...(input.newRegion
+        ? []
+        : [
+            `  IF NOT EXISTS (SELECT 1 FROM on_call_escalation_directors WHERE ${regionIs(region)}) THEN`,
+            `    RAISE EXCEPTION 'region % has no escalation director; check the spelling, or pass --new-region for a new region', ${lit(region)};`,
+            `  END IF;`,
+          ]),
+    ]),
     // VALUES, not INSERT ... SELECT FROM on_call_providers: without an
     // aggregate that SELECT yields one row per provider already on file.
     `INSERT INTO on_call_providers (full_name, npi, phone, email, region, rotation_order, active)`,
@@ -689,15 +702,15 @@ export function extendScheduleSql(weeks: number, audit?: ChangeAudit): string {
     ...auditTableCheck(audit),
     // Operator, 2026-11-24: an extension that would give a week to a provider
     // with no dialable phone is refused, naming them, and adds nothing.
-    `DO $oncall$ DECLARE bad text; BEGIN`,
-    ...planned("  "),
-    `  SELECT string_agg(DISTINCT p.full_name, ', ' ORDER BY p.full_name) INTO bad`,
-    `    FROM planned JOIN on_call_providers p ON p.id = planned.provider_id`,
-    `   WHERE p.phone IS NULL OR p.phone !~ '^\\+[0-9]{10,15}$';`,
-    `  IF bad IS NOT NULL THEN`,
-    `    RAISE EXCEPTION 'extend refused: % would get a week but has no dialable phone number; fix the number or deactivate them, then extend again', bad;`,
-    `  END IF;`,
-    `END $oncall$;`,
+    ...doBlock("bad text;", [
+      ...planned("  "),
+      `  SELECT string_agg(DISTINCT p.full_name, ', ' ORDER BY p.full_name) INTO bad`,
+      `    FROM planned JOIN on_call_providers p ON p.id = planned.provider_id`,
+      `   WHERE p.phone IS NULL OR p.phone !~ '^\\+[0-9]{10,15}$';`,
+      `  IF bad IS NOT NULL THEN`,
+      `    RAISE EXCEPTION 'extend refused: % would get a week but has no dialable phone number; fix the number or deactivate them, then extend again', bad;`,
+      `  END IF;`,
+    ]),
     ...planned(""),
     `, added AS (`,
     `  INSERT INTO on_call_schedule (week_starts_on, provider_id, note)`,
@@ -736,14 +749,14 @@ export function swapWeekSql(input: { week: string; to: string; note?: string; au
     `BEGIN;`,
     `${ON_CALL_ADMIN_WRITE_LOCK_SQL};`,
     ...auditTableCheck(input.audit),
-    `DO $oncall$ DECLARE n int; who int; prev jsonb; nxt jsonb; BEGIN`,
-    lookupProvider(input.to, "who"),
-    `  SELECT to_jsonb(s) INTO prev FROM on_call_schedule s WHERE week_starts_on = '${week}';`,
-    `  UPDATE on_call_schedule SET provider_id = who, note = ${lit(note)}, updated_at = now() WHERE week_starts_on = '${week}';`,
-    `  IF NOT FOUND THEN RAISE EXCEPTION 'the week of % is not on the schedule', '${week}'; END IF;`,
-    ...(input.audit ? [`  SELECT to_jsonb(s) INTO nxt FROM on_call_schedule s WHERE week_starts_on = '${week}';`] : []),
-    ...auditInsert(input.audit, { action: "schedule.swap_week", entityType: "schedule", entityId: `'${week}'`, before: "prev", after: "nxt" }),
-    `END $oncall$;`,
+    ...doBlock("n int; who int; prev jsonb; nxt jsonb;", [
+      lookupProvider(input.to, "who"),
+      `  SELECT to_jsonb(s) INTO prev FROM on_call_schedule s WHERE week_starts_on = '${week}';`,
+      `  UPDATE on_call_schedule SET provider_id = who, note = ${lit(note)}, updated_at = now() WHERE week_starts_on = '${week}';`,
+      `  IF NOT FOUND THEN RAISE EXCEPTION 'the week of % is not on the schedule', '${week}'; END IF;`,
+      ...(input.audit ? [`  SELECT to_jsonb(s) INTO nxt FROM on_call_schedule s WHERE week_starts_on = '${week}';`] : []),
+      ...auditInsert(input.audit, { action: "schedule.swap_week", entityType: "schedule", entityId: `'${week}'`, before: "prev", after: "nxt" }),
+    ]),
     `COMMIT;`,
     ``,
   ].join("\n");
@@ -785,15 +798,15 @@ export function coverSql(input: { from: string; to: string; by: string; reason?:
     `BEGIN;`,
     `${ON_CALL_ADMIN_WRITE_LOCK_SQL};`,
     ...auditTableCheck(input.audit),
-    `DO $oncall$ DECLARE n int; who int; new_id int; nxt jsonb; BEGIN`,
-    lookupProvider(input.by, "who"),
-    `  INSERT INTO on_call_overrides (starts_at, ends_at, provider_id, reason)`,
-    `  VALUES (('${from}'::timestamp AT TIME ZONE 'America/Los_Angeles'),`,
-    `          ('${to}'::timestamp AT TIME ZONE 'America/Los_Angeles'), who, ${lit(reason)})`,
-    `  RETURNING id INTO new_id;`,
-    ...(input.audit ? [`  SELECT to_jsonb(o) INTO nxt FROM on_call_overrides o WHERE id = new_id;`] : []),
-    ...auditInsert(input.audit, { action: "override.create", entityType: "override", entityId: "new_id::text", before: "NULL", after: "nxt" }),
-    `END $oncall$;`,
+    ...doBlock("n int; who int; new_id int; nxt jsonb;", [
+      lookupProvider(input.by, "who"),
+      `  INSERT INTO on_call_overrides (starts_at, ends_at, provider_id, reason)`,
+      `  VALUES (('${from}'::timestamp AT TIME ZONE 'America/Los_Angeles'),`,
+      `          ('${to}'::timestamp AT TIME ZONE 'America/Los_Angeles'), who, ${lit(reason)})`,
+      `  RETURNING id INTO new_id;`,
+      ...(input.audit ? [`  SELECT to_jsonb(o) INTO nxt FROM on_call_overrides o WHERE id = new_id;`] : []),
+      ...auditInsert(input.audit, { action: "override.create", entityType: "override", entityId: "new_id::text", before: "NULL", after: "nxt" }),
+    ]),
     `COMMIT;`,
     ``,
   ].join("\n");
@@ -822,10 +835,7 @@ export function deactivateSql(name: string, audit?: ChangeAudit): string {
     `BEGIN;`,
     `${ON_CALL_ADMIN_WRITE_LOCK_SQL};`,
     ...auditTableCheck(audit),
-    `DO $oncall$ DECLARE n int; who int; prev jsonb; nxt jsonb; BEGIN`,
-    lookupProvider(name, "who", true),
-    ...providerActiveChange(false, audit),
-    `END $oncall$;`,
+    ...doBlock("n int; who int; prev jsonb; nxt jsonb;", [lookupProvider(name, "who", true), ...providerActiveChange(false, audit)]),
     `-- Their scheduled weeks from today on (swap each with on-call-change.ts swap):`,
     `SELECT s.week_starts_on FROM on_call_schedule s JOIN on_call_providers p ON p.id = s.provider_id`,
     ` WHERE lower(regexp_replace(p.full_name, '\\s+', ' ', 'g')) = lower(${lit(name.trim().replace(/\s+/g, " "))})`,
@@ -842,10 +852,7 @@ export function activateSql(name: string, audit?: ChangeAudit): string {
     `BEGIN;`,
     `${ON_CALL_ADMIN_WRITE_LOCK_SQL};`,
     ...auditTableCheck(audit),
-    `DO $oncall$ DECLARE n int; who int; prev jsonb; nxt jsonb; BEGIN`,
-    lookupProvider(name, "who", true),
-    ...providerActiveChange(true, audit),
-    `END $oncall$;`,
+    ...doBlock("n int; who int; prev jsonb; nxt jsonb;", [lookupProvider(name, "who", true), ...providerActiveChange(true, audit)]),
     `COMMIT;`,
     ``,
   ].join("\n");
@@ -864,24 +871,24 @@ export function setDirectorSql(input: { region: string; director: string; newReg
     `BEGIN;`,
     `${ON_CALL_ADMIN_WRITE_LOCK_SQL};`,
     ...auditTableCheck(input.audit),
-    `DO $oncall$ DECLARE n int; who int; prev jsonb; nxt jsonb; BEGIN`,
-    lookupProvider(input.director, "who"),
-    ...(input.audit ? [`  SELECT to_jsonb(d) INTO prev FROM on_call_escalation_directors d WHERE ${regionIs(region)};`] : []),
-    `  UPDATE on_call_escalation_directors SET provider_id = who, updated_at = now() WHERE ${regionIs(region)};`,
-    `  IF NOT FOUND THEN`,
-    ...(input.newRegion
-      ? [`    INSERT INTO on_call_escalation_directors (region, provider_id) VALUES (${lit(region)}, who);`]
-      : [`    RAISE EXCEPTION 'region % is not on file; check the spelling, or pass --new-region for a new region', ${lit(region)};`]),
-    `  END IF;`,
-    ...(input.audit ? [`  SELECT to_jsonb(d) INTO nxt FROM on_call_escalation_directors d WHERE ${regionIs(region)};`] : []),
-    ...auditInsert(input.audit, {
-      action: "director.set",
-      entityType: "director",
-      entityId: `COALESCE(nxt->>'region', ${lit(region)})`,
-      before: "prev",
-      after: "nxt",
-    }),
-    `END $oncall$;`,
+    ...doBlock("n int; who int; prev jsonb; nxt jsonb;", [
+      lookupProvider(input.director, "who"),
+      ...(input.audit ? [`  SELECT to_jsonb(d) INTO prev FROM on_call_escalation_directors d WHERE ${regionIs(region)};`] : []),
+      `  UPDATE on_call_escalation_directors SET provider_id = who, updated_at = now() WHERE ${regionIs(region)};`,
+      `  IF NOT FOUND THEN`,
+      ...(input.newRegion
+        ? [`    INSERT INTO on_call_escalation_directors (region, provider_id) VALUES (${lit(region)}, who);`]
+        : [`    RAISE EXCEPTION 'region % is not on file; check the spelling, or pass --new-region for a new region', ${lit(region)};`]),
+      `  END IF;`,
+      ...(input.audit ? [`  SELECT to_jsonb(d) INTO nxt FROM on_call_escalation_directors d WHERE ${regionIs(region)};`] : []),
+      ...auditInsert(input.audit, {
+        action: "director.set",
+        entityType: "director",
+        entityId: `COALESCE(nxt->>'region', ${lit(region)})`,
+        before: "prev",
+        after: "nxt",
+      }),
+    ]),
     `COMMIT;`,
     ``,
   ].join("\n");

@@ -127,6 +127,17 @@ export const OPEN_DECISIONS = [
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
 
+export const EXTEND_PLAN_CHANGED = "The schedule changed since your preview; preview again.";
+
+/** The previewed plan the client confirmed equals the plan computed now, week for week. */
+export function samePlan(confirmed: unknown, current: Array<{ week: string; providerId: number }>): boolean {
+  if (!Array.isArray(confirmed) || confirmed.length !== current.length) return false;
+  return current.every((w, i) => {
+    const c = confirmed[i] as { week?: unknown; providerId?: unknown } | null;
+    return !!c && c.week === w.week && Number(c.providerId) === w.providerId;
+  });
+}
+
 function toRotationData(
   providers: AdminProvider[],
   schedule: Array<{ week: string; providerId: number }>,
@@ -444,6 +455,10 @@ export function mountOnCallAdmin(app: Express, deps: OnCallAdminDeps) {
     if (!plan.ok) throw new AdminRefusal(400, plan.error);
     const refusal = extensionRefusal(plan.weeks, providers);
     if (refusal) throw new AdminRefusal(400, refusal);
+    // The weeks the admin approved in the preview, compared under the write
+    // lock with what would be written now: another admin or the CLI may have
+    // extended the schedule or reordered providers since.
+    if (!samePlan(req.body?.plan, plan.weeks)) throw new AdminRefusal(409, EXTEND_PLAN_CHANGED, { planChanged: true });
     for (const w of plan.weeks) await tx.insertWeek(w.week, w.providerId, "added by the on-call admin page (extend)");
     await audit({
       action: "schedule.extend",

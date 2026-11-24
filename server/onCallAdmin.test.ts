@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Express, RequestHandler } from "express";
 import { requireAuth, requireRole } from "./auth";
-import { mountOnCallAdmin, ON_CALL_API, storePerPool } from "./onCallAdmin";
+import { EXTEND_PLAN_CHANGED, mountOnCallAdmin, ON_CALL_API, samePlan, storePerPool } from "./onCallAdmin";
 import { emptyFakeState, FakeOnCallAdminStore, type FakeOptions, type FakeState } from "./onCallAdmin/store.fake";
 import { pacificWallToDate } from "./onCallAdmin/logic";
 
@@ -334,7 +334,8 @@ describe("changes", () => {
     expect(dry.body.refusal).toMatch(/^Extend refused: Dr\. Test NoPhone \(week of 2026-12-29\)/);
     expect(h.store.transactions).toBe(0);
     const before = h.store.state.schedule.length;
-    const r = await h.request("POST", `${ON_CALL_API}/schedule/extend`, "admin", { weeks: 2, reason: "more weeks" });
+    const plan = dry.body.weeks.map((w: any) => ({ week: w.week, providerId: w.providerId }));
+    const r = await h.request("POST", `${ON_CALL_API}/schedule/extend`, "admin", { weeks: 2, plan, reason: "more weeks" });
     expect(r.status).toBe(400);
     expect(r.body.error).toMatch(/Dr\. Test NoPhone/);
     expect(h.store.state.schedule).toHaveLength(before);
@@ -348,10 +349,46 @@ describe("changes", () => {
     const dry = await h.request("POST", `${ON_CALL_API}/schedule/extend`, "admin", { weeks: 2, dryRun: true });
     expect(dry.body.refusal).toBeNull();
     expect(h.store.transactions).toBe(0);
-    const r = await h.request("POST", `${ON_CALL_API}/schedule/extend`, "admin", { weeks: 2, reason: "more weeks" });
+    const plan = dry.body.weeks.map((w: any) => ({ week: w.week, providerId: w.providerId }));
+    const r = await h.request("POST", `${ON_CALL_API}/schedule/extend`, "admin", { weeks: 2, plan, reason: "more weeks" });
     expect(r.status).toBe(200);
     expect(h.store.state.schedule.map((s) => s.week)).toContain("2027-01-05");
     expect(h.store.state.audit[0].action).toBe("schedule.extend");
+  });
+
+  it("refuses an extend whose confirmed plan is missing or no longer matches the schedule, and adds nothing", async () => {
+    const state = fixture();
+    state.providers = state.providers.map((p) => (p.id === 5 ? { ...p, phone: "+15555550105" } : p));
+    const h = boot({}, state);
+    const dry = await h.request("POST", `${ON_CALL_API}/schedule/extend`, "admin", { weeks: 2, dryRun: true });
+    const plan = dry.body.weeks.map((w: any) => ({ week: w.week, providerId: w.providerId }));
+    const before = h.store.state.schedule.length;
+
+    // No plan sent at all.
+    const none = await h.request("POST", `${ON_CALL_API}/schedule/extend`, "admin", { weeks: 2, reason: "more weeks" });
+    expect(none.status).toBe(409);
+    expect(none.body.error).toBe(EXTEND_PLAN_CHANGED);
+    expect(none.body.planChanged).toBe(true);
+
+    // Someone else extended the schedule by a week since the preview: the same
+    // request would now write different dates.
+    const last = h.store.state.schedule[h.store.state.schedule.length - 1];
+    h.store.state.schedule.push({ ...last, week: plan[0].week, providerId: plan[0].providerId });
+    const moved = await h.request("POST", `${ON_CALL_API}/schedule/extend`, "admin", { weeks: 2, plan, reason: "more weeks" });
+    expect(moved.status).toBe(409);
+    expect(moved.body.error).toBe(EXTEND_PLAN_CHANGED);
+    expect(h.store.state.schedule).toHaveLength(before + 1);
+    expect(h.store.state.audit).toHaveLength(0);
+  });
+
+  it("samePlan compares week and provider, in order", () => {
+    const cur = [{ week: "2027-01-05", providerId: 1 }, { week: "2027-01-12", providerId: 2 }];
+    expect(samePlan(cur.map((w) => ({ ...w })), cur)).toBe(true);
+    expect(samePlan(undefined, cur)).toBe(false);
+    expect(samePlan([cur[0]], cur)).toBe(false);
+    expect(samePlan([cur[1], cur[0]], cur)).toBe(false);
+    expect(samePlan([cur[0], { week: "2027-01-12", providerId: 3 }], cur)).toBe(false);
+    expect(samePlan([cur[0], null], cur)).toBe(false);
   });
 
   it("an override overlapping another needs confirming; a past or inverted window is refused", async () => {
