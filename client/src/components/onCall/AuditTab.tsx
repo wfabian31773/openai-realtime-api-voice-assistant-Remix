@@ -5,7 +5,7 @@ import { Input } from '@/components/ui/input'
 import { Label } from '@/components/ui/label'
 import { Select } from '@/components/ui/select'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
-import { apiError, fmtPacific } from '@/lib/onCallView'
+import { apiError, fmtPacific, pacificMidnightIso, pacificNextMidnightIso } from '@/lib/onCallView'
 import { Banner, useOnCall } from './shared'
 
 interface AuditRow {
@@ -24,7 +24,9 @@ interface AuditRow {
 export function AuditTab() {
   const [f, setF] = React.useState({ entityType: '', action: '', actor: '', since: '', until: '' })
   const qs = new URLSearchParams(
-    Object.entries({ ...f, since: f.since ? new Date(`${f.since}T00:00:00`).toISOString() : '', until: f.until ? new Date(`${f.until}T23:59:59`).toISOString() : '' }).filter(
+    // The table shows Pacific time, so the dates are Pacific days: from the
+    // From day's midnight PT to the midnight PT after the To day (exclusive).
+    Object.entries({ ...f, since: pacificMidnightIso(f.since) ?? '', until: pacificNextMidnightIso(f.until) ?? '' }).filter(
       ([, v]) => v,
     ) as [string, string][],
   ).toString()

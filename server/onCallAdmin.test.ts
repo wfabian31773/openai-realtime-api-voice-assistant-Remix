@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Express, RequestHandler } from "express";
 import { requireAuth, requireRole } from "./auth";
-import { mountOnCallAdmin, ON_CALL_API } from "./onCallAdmin";
+import { mountOnCallAdmin, ON_CALL_API, storePerPool } from "./onCallAdmin";
 import { emptyFakeState, FakeOnCallAdminStore, type FakeOptions, type FakeState } from "./onCallAdmin/store.fake";
 import { pacificWallToDate } from "./onCallAdmin/logic";
 
@@ -486,5 +486,31 @@ describe("calls", () => {
     expect(one.body.sections.extraEvents.wired).toBe(false);
     expect(JSON.stringify(one.body)).not.toContain("5555550101");
     expect((await h.request("GET", `${ON_CALL_API}/calls/not-a-sid`)).status).toBe(400);
+  });
+});
+
+describe("the admin store follows the database pool", () => {
+  it("builds one store per pool and a new one when db.ts swaps the pool", () => {
+    const first = { name: "first" };
+    const second = { name: "second" };
+    let live: object = first;
+    const create = vi.fn((p: object) => ({ pool: p }));
+    const get = storePerPool(() => live, create);
+    const a = get();
+    expect(get()).toBe(a);
+    expect(create).toHaveBeenCalledTimes(1);
+    live = second; // a failover or recycle reassigns the exported pool
+    const b = get();
+    expect(b).not.toBe(a);
+    expect(b.pool).toBe(second);
+    expect(get()).toBe(b);
+    expect(create).toHaveBeenCalledTimes(2);
+  });
+
+  it("routes.ts reads the live pool on every request, never caching the first one", async () => {
+    const { readFileSync } = await import("node:fs");
+    const src = readFileSync(new URL("./routes.ts", import.meta.url), "utf8");
+    expect(src).toContain("storePerPool(() => pool,");
+    expect(src).not.toMatch(/onCallAdminStore\s*\?\?=/);
   });
 });

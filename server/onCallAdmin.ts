@@ -79,6 +79,21 @@ export interface OnCallAdminDeps {
 
 export const ON_CALL_API = "/api/on-call";
 
+/**
+ * A store getter that builds one store per database pool. server/db.ts
+ * reassigns its exported `pool` on a pooler failover or a recycle and drains
+ * the old one, so a store cached on the first pool would keep using a closed
+ * pool until the process restarted. `currentPool` is read on every call.
+ */
+export function storePerPool<P, S>(currentPool: () => P, create: (pool: P) => S): () => S {
+  let cached: { pool: P; store: S } | null = null;
+  return () => {
+    const pool = currentPool();
+    if (!cached || cached.pool !== pool) cached = { pool, store: create(pool) };
+    return cached.store;
+  };
+}
+
 export const TABLES_NOT_APPLIED =
   "The on-call tables are not on the Hub yet. Apply migrations/add_on_call_rotation.sql (and then migrations/add_on_call_admin.sql); until then urgent after-hours calls ring the fixed on-call number.";
 export const AUDIT_NOT_APPLIED =

@@ -59,6 +59,31 @@ export function toPacificInput(d: Date): string {
   return `${g('year')}-${g('month')}-${g('day')}T${g('hour')}:${g('minute')}`
 }
 
+/**
+ * Midnight Pacific at the start of a YYYY-MM-DD day, as an ISO instant,
+ * whatever the browser's time zone. Midnight is PST (UTC-8) or PDT (UTC-7);
+ * Los Angeles changes clocks at 2 AM, so midnight always exists once.
+ * Returns null for anything that is not a real date.
+ */
+export function pacificMidnightIso(day: string): string | null {
+  const m = /^(\d{4})-(\d{2})-(\d{2})$/.exec(day)
+  if (!m) return null
+  for (const offsetHours of [8, 7]) {
+    const d = new Date(Date.UTC(+m[1], +m[2] - 1, +m[3], offsetHours))
+    if (toPacificInput(d) === `${day}T00:00`) return d.toISOString()
+  }
+  return null
+}
+
+/** Midnight Pacific at the start of the day AFTER a YYYY-MM-DD day: the exclusive end of that day. */
+export function pacificNextMidnightIso(day: string): string | null {
+  const start = pacificMidnightIso(day)
+  if (!start) return null
+  // 26 hours after midnight is always inside the next Pacific day (days run 23 to 25 hours).
+  const next = toPacificInput(new Date(new Date(start).getTime() + 26 * 3_600_000)).slice(0, 10)
+  return pacificMidnightIso(next)
+}
+
 /** "4d 3h 12m" until go-live; "live date passed" at zero. */
 export function countdown(ms: number): string {
   if (ms <= 0) return 'go-live date passed'

@@ -16,7 +16,7 @@ import { mountOperatorLineSettings } from './operatorLineSettings';
 import { mountNpxOutreachTracking } from './observatory/npxOutreach';
 import { boundPluginStore } from '../src/plugin/bindings';
 import { normalizeCallLog } from './callLogShape';
-import { mountOnCallAdmin } from './onCallAdmin';
+import { mountOnCallAdmin, storePerPool } from './onCallAdmin';
 import { createPgOnCallAdminStore, type OnCallAdminStore } from './onCallAdmin/store';
 import { pool } from './db';
 
@@ -59,12 +59,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // After-hours on-call admin page (/on-call): who is on call, swaps, covers,
   // providers, directors, an audit log and each urgent call's timeline.
   // Admin only. server/onCallAdmin.ts; docs/ON_CALL_ROTATION.md "Admin page".
-  let onCallAdminStore: OnCallAdminStore | null = null;
+  // `pool` is a live binding that db.ts reassigns on failover or recycle.
   mountOnCallAdmin(app, {
     authenticate: isAuthenticated,
     admin: requireRole('admin'),
     env: process.env,
-    store: () => (onCallAdminStore ??= createPgOnCallAdminStore(pool as any)),
+    store: storePerPool(() => pool, (p): OnCallAdminStore => createPgOnCallAdminStore(p as any)),
     actor: async (req) => {
       const userId = (req.session?.userId ?? (req.user as any)?.claims?.sub ?? null) as string | null;
       let email: string | null = null;
