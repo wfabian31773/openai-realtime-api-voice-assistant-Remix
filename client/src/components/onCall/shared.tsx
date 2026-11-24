@@ -136,10 +136,11 @@ export function ProviderSelect(props: {
   value: number | ''
   onChange: (id: number | '') => void
   id?: string
+  disabled?: boolean
 }) {
   const sorted = [...props.providers].sort((a, b) => Number(b.active) - Number(a.active) || a.fullName.localeCompare(b.fullName))
   return (
-    <Select id={props.id} value={props.value} onChange={(e) => props.onChange(e.target.value ? Number(e.target.value) : '')}>
+    <Select id={props.id} value={props.value} disabled={props.disabled} onChange={(e) => props.onChange(e.target.value ? Number(e.target.value) : '')}>
       <option value="">Choose a provider…</option>
       {sorted.map((p) => (
         <option key={p.id} value={p.id} disabled={!p.active}>

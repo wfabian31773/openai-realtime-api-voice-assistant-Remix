@@ -238,6 +238,15 @@ export function warnCoverOverlap(cover: CoverDraft, overlapIds: number[]): Cover
   return { ...cover, confirmOverlap: false, overlapIds: [...overlapIds] }
 }
 
+/**
+ * Whether an overlap answer for the draft that was submitted still belongs to
+ * the current draft: the same window and provider. A different draft gets no
+ * warning from a save it did not make.
+ */
+export function sameCoverDraft(submitted: CoverDraft, current: CoverDraft): boolean {
+  return submitted.startsAt === current.startsAt && submitted.endsAt === current.endsAt && submitted.providerId === current.providerId
+}
+
 /** The save body: the confirmed overlap ids are sent only when the box is ticked. */
 export function coverBody(cover: CoverDraft, reason: string) {
   return {

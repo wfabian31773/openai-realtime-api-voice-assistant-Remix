@@ -425,7 +425,9 @@ function toolEvents(raw: unknown): Array<Record<string, any>> {
       return [];
     }
   }
-  return Array.isArray(tl?.events) ? tl.events : [];
+  // A stored timeline is JSON: skip anything that is not an object, so one
+  // malformed entry costs that entry, not the whole call page.
+  return Array.isArray(tl?.events) ? tl.events.filter((e: unknown) => e !== null && typeof e === "object" && !Array.isArray(e)) : [];
 }
 
 /**
@@ -476,6 +478,7 @@ export function mergeTimeline(bundle: CallBundle): TimelineItem[] {
   }
 
   for (const t of bundle.turns) {
+    if (!t || typeof t !== "object") continue;
     const at = iso(t.at);
     if (!at) continue;
     push({ at, source: "transcript", kind: `turn_${t.role}`, title: t.role === "caller" ? "Caller" : "Agent", detail: t.text ?? "", status: "info" });
@@ -484,8 +487,9 @@ export function mergeTimeline(bundle: CallBundle): TimelineItem[] {
   for (const e of toolEvents(cl?.toolTimeline)) {
     const end = typeof e.at === "string" ? new Date(e.at).getTime() : NaN;
     if (Number.isNaN(end)) continue;
-    const ms = e.ms != null && !Number.isNaN(Number(e.ms)) ? Number(e.ms) : 0;
+    const ms = e.ms != null && Number.isFinite(Number(e.ms)) ? Number(e.ms) : 0;
     const tool = String(e.tool ?? e.name ?? "tool");
+    if (Number.isNaN(new Date(end - ms).getTime())) continue;
     const ok = e.outcome?.success !== false && e.outcome?.error == null && e.outcome?.cancelled !== true;
     push({
       at: new Date(end - ms).toISOString(),
@@ -499,6 +503,7 @@ export function mergeTimeline(bundle: CallBundle): TimelineItem[] {
   }
 
   for (const e of bundle.callEvents) {
+    if (!e || typeof e !== "object") continue;
     const at = iso(e.at);
     if (!at) continue;
     push({
@@ -513,8 +518,9 @@ export function mergeTimeline(bundle: CallBundle): TimelineItem[] {
 
   const esc = bundle.escalation;
   if (esc) {
-    const routing = esc.routing ?? {};
-    const levels = esc.plan?.levels ?? [];
+    const routing: Record<string, any> = esc.routing && typeof esc.routing === "object" ? esc.routing : {};
+    const levels = Array.isArray(esc.plan?.levels) ? esc.plan!.levels.filter((l) => l && typeof l === "object") : [];
+    const strings = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
     push({
       at: esc.createdAt.toISOString(),
       source: "escalation",
@@ -531,7 +537,7 @@ export function mergeTimeline(bundle: CallBundle): TimelineItem[] {
       status: "info",
       data: {
         plan: levels.map((l, i) => `${i + 1}. ${l.name ?? "?"} (${ROLE_WORDS[l.role ?? ""] ?? l.role})`),
-        notes: [...(esc.plan?.notes ?? []), ...((routing.notes as string[] | undefined) ?? [])],
+        notes: [...strings(esc.plan?.notes), ...strings(routing.notes)],
         ...(routing.postOp ? { postOp: routing.postOp } : {}),
         ...(routing.note ? { textNote: routing.note } : {}),
       },
@@ -595,6 +601,7 @@ export function mergeTimeline(bundle: CallBundle): TimelineItem[] {
   }
 
   for (const e of bundle.extraEvents) {
+    if (!e || typeof e !== "object") continue;
     const at = iso(e.at);
     if (!at) continue;
     push({

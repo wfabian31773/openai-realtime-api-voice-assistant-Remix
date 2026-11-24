@@ -611,6 +611,38 @@ describe("calls", () => {
     expect(JSON.stringify(one.body)).not.toContain("5555550101");
     expect((await h.request("GET", `${ON_CALL_API}/calls/not-a-sid`)).status).toBe(400);
   });
+
+  it("sends no escalation plan and no full E.164 number on the calls list or a call's detail", async () => {
+    const s = fixture();
+    s.escalations[0].plan = { levels: [{ role: "on_call", providerId: 1, name: "Dr. Test Alpha", phone: "+15555550101" } as any], notes: [] };
+    s.escalations[0].routing = { reason: "on_call", note: "fallback +15555550199", testPhone: "+15555550198" };
+    s.callLogs.push({
+      id: "log-1", callSid: SID, from: "+15555550177", agentUsed: "no-ivr", voiceProvider: "grok", status: "completed",
+      runtimeOutcome: null, agentOutcome: null, summary: null, duration: 60,
+      startTime: new Date("2026-12-05T05:00:00Z"), endTime: new Date("2026-12-05T05:01:00Z"), createdAt: null,
+      transferredToHuman: false, ticketNumber: null,
+      toolTimeline: { events: [{ tool: "escalate_to_human", at: "2026-12-05T05:00:20Z", ms: 10, args: { to: "+15555550166" }, outcome: { success: true } }] },
+    });
+    const h = boot({}, s);
+    const one = await h.request("GET", `${ON_CALL_API}/calls/${SID}`);
+    expect(one.status).toBe(200);
+    expect(one.body.escalation).not.toHaveProperty("plan");
+    expect(JSON.stringify(one.body)).not.toMatch(/\+\d{10,15}/);
+    expect(JSON.stringify((await h.request("GET", `${ON_CALL_API}/calls`)).body)).not.toMatch(/\+\d{10,15}/);
+  });
+
+  it("skips malformed tool-timeline entries instead of failing the call detail", async () => {
+    const s = fixture();
+    s.callLogs.push({
+      id: "log-2", callSid: SID, from: null, agentUsed: "no-ivr", voiceProvider: "grok", status: "completed",
+      runtimeOutcome: null, agentOutcome: null, summary: null, duration: 60,
+      startTime: new Date("2026-12-05T05:00:00Z"), endTime: null, createdAt: null, transferredToHuman: false, ticketNumber: null,
+      toolTimeline: { events: [null, 7, "x", [], { tool: "a" }, { tool: "b", at: "not a date" }, { tool: "c", at: "2026-12-05T05:00:20Z", ms: "huge" }, { tool: "lookup_patient", at: "2026-12-05T05:00:10Z", ms: 5 }] },
+    });
+    const one = await boot({}, s).request("GET", `${ON_CALL_API}/calls/${SID}`);
+    expect(one.status).toBe(200);
+    expect(one.body.timeline.filter((i: any) => i.source === "tool").map((i: any) => i.kind)).toEqual(["lookup_patient", "c"]);
+  });
 });
 
 describe("the admin store follows the database pool", () => {

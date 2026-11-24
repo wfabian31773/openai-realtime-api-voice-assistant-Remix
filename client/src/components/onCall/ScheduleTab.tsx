@@ -7,7 +7,7 @@ import { Label } from '@/components/ui/label'
 import { Select } from '@/components/ui/select'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import apiClient from '@/lib/apiClient'
-import { acceptExtendPreview, apiError, coverBody, editCover, extendPlan, extendPreviewReady, fmtPacific, isExtendPlanChanged, fmtWeek, toPacificInput, warnCoverOverlap, type CoverDraft, type ExtendPreview } from '@/lib/onCallView'
+import { acceptExtendPreview, apiError, coverBody, editCover, extendPlan, extendPreviewReady, fmtPacific, isExtendPlanChanged, fmtWeek, sameCoverDraft, toPacificInput, warnCoverOverlap, type CoverDraft, type ExtendPreview } from '@/lib/onCallView'
 import { Banner, ProviderSelect, ReasonDialog, useOnCall, useOnCallWrite, type PublicProvider } from './shared'
 import { AlertTriangle, CalendarPlus, Repeat, ShieldPlus } from 'lucide-react'
 
@@ -88,6 +88,11 @@ export function ScheduleTab() {
     }
     if (acceptExtendPreview(extendWeeksRef.current, preview)) setExtendPreview(preview)
   }
+
+  const [coverSaving, setCoverSaving] = React.useState(false)
+  const [extendSaving, setExtendSaving] = React.useState(false)
+  const coverRef = React.useRef(cover)
+  coverRef.current = cover
 
   const changeCover = (patch: Partial<CoverDraft>) => {
     const { cover: next, clearWarning } = editCover(cover, patch)
@@ -275,6 +280,7 @@ export function ScheduleTab() {
         confirmDisabled={!extendPreviewReady(extendPreview, extendWeeks)}
         onConfirm={async (reason) => {
           if (!extendPreview) return
+          setExtendSaving(true)
           try {
             await write.mutateAsync({ method: 'post', path: '/schedule/extend', body: { weeks: extendWeeks, plan: extendPlan(extendPreview), reason } })
           } catch (e) {
@@ -285,6 +291,8 @@ export function ScheduleTab() {
               loadExtendPreview(extendWeeks)
             }
             throw e
+          } finally {
+            setExtendSaving(false)
           }
         }}
       >
@@ -294,6 +302,7 @@ export function ScheduleTab() {
           min={1}
           max={104}
           value={extendWeeks}
+          disabled={extendSaving}
           onChange={(e) => {
             const n = Number(e.target.value)
             extendWeeksRef.current = n
@@ -324,34 +333,40 @@ export function ScheduleTab() {
         description="Someone covers a window (an evening, a weekend). It decides WHO for those hours and never WHETHER: weekday daytime inside it is still not on call. When overrides overlap, the one that starts latest wins."
         confirmLabel={cover.confirmOverlap ? 'Save despite overlap' : 'Save cover'}
         onConfirm={async (reason) => {
+          const submitted = cover
+          setCoverSaving(true)
           try {
-            await write.mutateAsync({ method: 'post', path: '/overrides', body: coverBody(cover, reason) })
+            await write.mutateAsync({ method: 'post', path: '/overrides', body: coverBody(submitted, reason) })
             setOverlap(null)
           } catch (e: any) {
-            if (e?.response?.status === 409 && e.response.data?.overlap) {
+            // An overlap answer belongs to the draft that was sent; a draft
+            // edited since gets no warning from it.
+            if (e?.response?.status === 409 && e.response.data?.overlap && sameCoverDraft(submitted, coverRef.current)) {
               const ids: number[] = e.response.data.overlap.map((o: any) => o.id)
               setCover((c) => warnCoverOverlap(c, ids))
               setOverlap(`Overlaps override(s) #${ids.join(', #')}. Tick the box to save anyway.`)
             }
             throw e
+          } finally {
+            setCoverSaving(false)
           }
         }}
       >
         <div className="grid gap-2 sm:grid-cols-2">
           <div>
             <Label>Starts (Pacific)</Label>
-            <Input type="datetime-local" value={cover.startsAt} onChange={(e) => changeCover({ startsAt: e.target.value })} />
+            <Input type="datetime-local" value={cover.startsAt} disabled={coverSaving} onChange={(e) => changeCover({ startsAt: e.target.value })} />
           </div>
           <div>
             <Label>Ends (Pacific)</Label>
-            <Input type="datetime-local" value={cover.endsAt} onChange={(e) => changeCover({ endsAt: e.target.value })} />
+            <Input type="datetime-local" value={cover.endsAt} disabled={coverSaving} onChange={(e) => changeCover({ endsAt: e.target.value })} />
           </div>
         </div>
         <Label>Covering provider</Label>
-        <ProviderSelect providers={data.providers} value={cover.providerId} onChange={(id) => changeCover({ providerId: id })} />
+        <ProviderSelect providers={data.providers} value={cover.providerId} disabled={coverSaving} onChange={(id) => changeCover({ providerId: id })} />
         {overlap && (
           <label className="flex items-center gap-2 text-sm">
-            <input type="checkbox" checked={cover.confirmOverlap} onChange={(e) => setCover((c) => ({ ...c, confirmOverlap: e.target.checked }))} />
+            <input type="checkbox" checked={cover.confirmOverlap} disabled={coverSaving} onChange={(e) => setCover((c) => ({ ...c, confirmOverlap: e.target.checked }))} />
             {overlap}
           </label>
         )}

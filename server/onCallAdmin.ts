@@ -266,6 +266,20 @@ function describe(ans: OnCallAnswer, data: RotationData, at: Date, fallbackPhone
 }
 
 /** Any `phone` value, at any depth, as its last four digits. */
+/**
+ * The Calls tab shows phones by their last four only (full phones live on the
+ * Providers tab). Masks phone-named keys, and any full E.164 number inside a
+ * string anywhere in the response (routing JSON, tool arguments, event data).
+ */
+export function maskCallPhones(v: unknown): unknown {
+  if (typeof v === "string") return v.replace(/\+\d{10,15}\b/g, (m) => last4(m) ?? "");
+  if (Array.isArray(v)) return v.map(maskCallPhones);
+  if (!v || typeof v !== "object") return v;
+  return Object.fromEntries(
+    Object.entries(v as Record<string, unknown>).map(([k, x]) => [k, /phone/i.test(k) && typeof x === "string" ? last4(x) : maskCallPhones(x)]),
+  );
+}
+
 export function maskPhones(v: unknown): unknown {
   if (Array.isArray(v)) return v.map(maskPhones);
   if (!v || typeof v !== "object") return v;
@@ -894,7 +908,7 @@ export function mountOnCallAdmin(app: Express, deps: OnCallAdminDeps) {
       runtimeOutcome: log?.runtimeOutcome ?? null,
       durationSec: log?.duration ?? null,
     });
-    return {
+    return maskCallPhones({
       days,
       calls: [
         ...escalations.map((e) => {
@@ -908,7 +922,7 @@ export function mountOnCallAdmin(app: Express, deps: OnCallAdminDeps) {
         }),
         ...withoutChain.map((l) => ({ ...row(l, l.callSid ?? ""), chain: null })),
       ].sort((a, b) => (b.startedAt ?? "").localeCompare(a.startedAt ?? "")),
-    };
+    });
   }));
 
   app.get(`${ON_CALL_API}/calls/:callSid`, ...guard, read(async (req, _res, store) => {
@@ -918,13 +932,14 @@ export function mountOnCallAdmin(app: Express, deps: OnCallAdminDeps) {
     if (!raw.callLog && !raw.escalation) throw new AdminRefusal(404, "No call or on-call chain on file for that SID.");
     const bundle = { ...raw, callSid, providerNames: new Map(providers.map((p) => [p.id, p.fullName])) };
     const tl = raw.callLog?.toolTimeline as any;
-    return {
+    // The plan (every level's full phone) is not sent: the Calls tab does not read it.
+    return maskCallPhones({
       callSid,
       callLogId: raw.callLog?.id ?? null,
       caller: last4(raw.callLog?.from),
       agent: raw.callLog?.agentUsed ?? null,
       escalation: raw.escalation
-        ? { id: raw.escalation.id, mode: raw.escalation.mode, status: raw.escalation.status, routing: raw.escalation.routing, plan: raw.escalation.plan }
+        ? { id: raw.escalation.id, mode: raw.escalation.mode, status: raw.escalation.status, routing: raw.escalation.routing }
         : null,
       outcome: outcomeSummary(bundle),
       timeline: mergeTimeline(bundle),
@@ -943,6 +958,6 @@ export function mountOnCallAdmin(app: Express, deps: OnCallAdminDeps) {
         "A provider's post-call note (what they did with the patient).",
         "Each change of the chain's status: only the current status and the row's last update are kept.",
       ],
-    };
+    });
   }));
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { acceptExtendPreview, apiError, chainStatusVariant, countdown, coverBody, editCover, extendPlan, extendPreviewReady, isExtendPlanChanged, finalFallbackText, fmtPacific, fmtSeconds, fmtWeek, pacificMidnightIso, pacificNextMidnightIso, providerBody, ROLE_LABELS, sectionBadge, toPacificInput, warnCoverOverlap } from './onCallView'
+import { acceptExtendPreview, apiError, chainStatusVariant, countdown, coverBody, editCover, extendPlan, extendPreviewReady, isExtendPlanChanged, finalFallbackText, fmtPacific, fmtSeconds, fmtWeek, pacificMidnightIso, pacificNextMidnightIso, providerBody, ROLE_LABELS, sameCoverDraft, sectionBadge, toPacificInput, warnCoverOverlap } from './onCallView'
 
 describe('on-call page helpers', () => {
   it('shows times in Pacific and says so', () => {
@@ -95,6 +95,13 @@ describe('on-call page helpers', () => {
 
     it('a new warning replaces the ids and withdraws the earlier confirmation', () => {
       expect(warnCoverOverlap(confirmed, [7, 9])).toEqual({ ...confirmed, confirmOverlap: false, overlapIds: [7, 9] })
+    })
+
+    it('an overlap answer belongs only to the draft that was submitted', () => {
+      expect(sameCoverDraft(confirmed, { ...confirmed, confirmOverlap: false, overlapIds: [] })).toBe(true)
+      for (const patch of [{ startsAt: '2026-12-04T18:00' }, { endsAt: '2026-12-06T08:00' }, { providerId: 4 as const }]) {
+        expect(sameCoverDraft(confirmed, { ...confirmed, ...patch })).toBe(false)
+      }
     })
 
     it('sends the confirmed overlap ids only when the box is ticked', () => {
