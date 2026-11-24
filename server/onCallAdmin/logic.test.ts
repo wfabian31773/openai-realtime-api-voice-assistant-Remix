@@ -10,6 +10,7 @@ import {
   overlapping,
   pacificWallToDate,
   planExtension,
+  extensionRefusal,
   planReorder,
   scheduleGaps,
   scheduleView,
@@ -108,6 +109,26 @@ describe("extend, as scripts/on-call-change.ts extend does it", () => {
     expect(planExtension({ week: "2026-12-01", providerId: 1 }, [P(1, null)], 1).ok).toBe(false);
     expect(planExtension({ week: "2026-12-01", providerId: 1 }, [P(1, 1)], 0).ok).toBe(false);
     expect(planExtension({ week: "2026-12-01", providerId: 1 }, [P(1, 1)], 105).ok).toBe(false);
+  });
+  it("is refused, naming each provider and week, when a provider who would get a week has no dialable phone", () => {
+    const providers = [
+      { id: 1, fullName: "Dr. Test One", phone: "+15555550101" },
+      { id: 2, fullName: "Dr. Test NoPhone", phone: "" },
+      { id: 3, fullName: "Dr. Test Short", phone: "555" },
+    ];
+    expect(extensionRefusal([{ week: "2026-12-08", providerId: 1 }], providers)).toBeNull();
+    const why = extensionRefusal(
+      [
+        { week: "2026-12-08", providerId: 2 },
+        { week: "2026-12-15", providerId: 1 },
+        { week: "2026-12-22", providerId: 2 },
+        { week: "2026-12-29", providerId: 3 },
+      ],
+      providers,
+    )!;
+    expect(why).toMatch(/^Extend refused: Dr\. Test NoPhone \(weeks of 2026-12-08, 2026-12-22\); Dr\. Test Short \(week of 2026-12-29\)/);
+    expect(why).toMatch(/have no dialable phone number/);
+    expect(why).not.toContain("Dr. Test One");
   });
 });
 

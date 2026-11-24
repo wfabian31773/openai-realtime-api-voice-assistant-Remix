@@ -214,6 +214,29 @@ export function planExtension(
   return { ok: true, weeks: out };
 }
 
+/**
+ * Why an extension is refused: a provider who would receive a week has no
+ * dialable phone (operator, 2026-11-24: refuse, not warn). Names every such
+ * provider and the weeks they would get; null when every one can be rung.
+ * scripts/on-call-change.ts `extend` refuses the same way in its SQL.
+ */
+export function extensionRefusal(
+  weeks: readonly { week: string; providerId: number }[],
+  providers: readonly Pick<OnCallProvider, "id" | "fullName" | "phone">[],
+): string | null {
+  const bad = new Map<number, string[]>();
+  for (const w of weeks) {
+    const p = providers.find((x) => x.id === w.providerId);
+    if (p && !isDialable(p.phone)) bad.set(p.id, [...(bad.get(p.id) ?? []), w.week]);
+  }
+  if (bad.size === 0) return null;
+  const who = [...bad].map(([id, ws]) => `${providers.find((p) => p.id === id)!.fullName} (week${ws.length === 1 ? "" : "s"} of ${ws.join(", ")})`);
+  return (
+    `Extend refused: ${who.join("; ")} would get a week but ${who.length === 1 ? "has" : "have"} no dialable phone number. ` +
+    `Fix the number on the Providers tab, or deactivate them, then extend again. Nothing was added.`
+  );
+}
+
 // ── Reorder ─────────────────────────────────────────────────────────────────
 
 /**

@@ -57,7 +57,7 @@ export function ScheduleTab() {
   const [swap, setSwap] = React.useState<{ a: string; b: string }>({ a: '', b: '' })
   const [extendOpen, setExtendOpen] = React.useState(false)
   const [extendWeeks, setExtendWeeks] = React.useState(8)
-  const [extendPreview, setExtendPreview] = React.useState<{ weeks: Array<{ week: string; providerName: string | null }>; warnings: string[] } | null>(null)
+  const [extendPreview, setExtendPreview] = React.useState<{ weeks: Array<{ week: string; providerName: string | null }>; refusal: string | null } | null>(null)
   const [coverOpen, setCoverOpen] = React.useState(false)
   const [cover, setCover] = React.useState<{ startsAt: string; endsAt: string; providerId: number | ''; confirmOverlap: boolean }>({
     startsAt: toPacificInput(new Date()),
@@ -77,9 +77,9 @@ export function ScheduleTab() {
   const loadExtendPreview = async (n: number) => {
     try {
       const { data: d } = await apiClient.post('/on-call/schedule/extend', { weeks: n, dryRun: true })
-      setExtendPreview(d)
+      setExtendPreview({ weeks: d.weeks ?? [], refusal: d.refusal ?? null })
     } catch (e) {
-      setExtendPreview({ weeks: [], warnings: [apiError(e)] })
+      setExtendPreview({ weeks: [], refusal: apiError(e) })
     }
   }
 
@@ -258,7 +258,7 @@ export function ScheduleTab() {
         open={extendOpen}
         onOpenChange={setExtendOpen}
         title="Extend the schedule"
-        description="Adds weeks after the last one, continuing the rotation order among active providers (the same as scripts/on-call-change.ts extend)."
+        description="Adds weeks after the last one, continuing the rotation order among active providers (the same as scripts/on-call-change.ts extend). Refused, with nothing added, if any provider who would get a week has no dialable phone."
         confirmLabel="Add these weeks"
         onConfirm={(reason) => write.mutateAsync({ method: 'post', path: '/schedule/extend', body: { weeks: extendWeeks, reason } })}
       >
@@ -276,11 +276,11 @@ export function ScheduleTab() {
         />
         {extendPreview && (
           <div className="max-h-48 overflow-y-auto rounded border p-2 text-sm">
-            {extendPreview.warnings.map((w) => (
-              <div key={w} className="text-destructive">
-                {w}
+            {extendPreview.refusal && (
+              <div className="text-destructive">
+                {extendPreview.refusal} Every provider who would get a week must have a dialable phone number.
               </div>
-            ))}
+            )}
             {extendPreview.weeks.map((w) => (
               <div key={w.week}>
                 {fmtWeek(w.week)} — {w.providerName}

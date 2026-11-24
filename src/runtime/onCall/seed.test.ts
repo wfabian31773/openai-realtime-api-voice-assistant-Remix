@@ -396,6 +396,19 @@ describe("changes after the seed", () => {
     expect(() => extendScheduleSql(104)).not.toThrow();
   });
 
+  it("refuses, naming them, an extension that gives a week to a provider with no dialable phone", () => {
+    const sql = extendScheduleSql(4);
+    const check = sql.indexOf("RAISE EXCEPTION 'extend refused:");
+    const insert = sql.indexOf("INSERT INTO on_call_schedule");
+    // The check runs first, in the same transaction, over the same planned weeks.
+    expect(check).toBeGreaterThan(0);
+    expect(check).toBeLessThan(insert);
+    expect(sql).toContain("string_agg(DISTINCT p.full_name");
+    expect(sql).toContain("p.phone IS NULL OR p.phone !~ '^\\+[0-9]{10,15}$'");
+    expect(sql).toContain("SELECT week, provider_id, 'added by scripts/on-call-change.ts extend' FROM planned");
+    expect(sql.match(/generate_series\(1, 4\)/g)).toHaveLength(2);
+  });
+
   it("swaps a whole week to one active provider, and refuses a week that is not a Tuesday", () => {
     const sql = swapWeekSql({ week: "12/8/2026", to: "Ben  Ortiz" });
     expect(sql).toContain("WHERE week_starts_on = '2026-12-08'");

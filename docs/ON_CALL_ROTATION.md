@@ -482,7 +482,10 @@ npx tsx scripts/on-call-change.ts extend --weeks 8
 ```
 
 Adds weeks after the last one on the schedule, continuing the rotation order
-among active providers (new providers included, at the end).
+among active providers (new providers included, at the end). **Refused, with
+nothing added, if any provider who would get a week has no dialable phone
+number**: the error names them (operator, 2026-11-24). Fix the number, or
+deactivate them, and run it again.
 
 ### A provider leaving, or coming back
 
@@ -769,8 +772,10 @@ audit row in the same transaction and there is nowhere to write it.
   `e164`.
 - A cover that overlaps another needs an explicit confirmation (the latest
   start wins). A cover entirely in the past is refused.
-- `extend` matches the CLI exactly, so an active provider with no dialable
-  phone can still get a week; the page warns when that happens.
+- `extend` gives the same weeks as the CLI, and like the CLI it is **refused**,
+  adding nothing, when any provider who would get a week has no dialable
+  phone; the preview shows the weeks and the refusal naming each such
+  provider and week (operator, 2026-11-24: refuse, not warn).
 - Reorder moves rotation places without two rows ever holding one number
   (`rotation_order` is UNIQUE): every moving row is cleared, then placed.
 

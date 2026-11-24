@@ -585,25 +585,46 @@ export function extendScheduleSql(weeks: number): string {
   if (!Number.isInteger(weeks) || weeks < 1 || weeks > 104) {
     throw new SeedError([`weeks must be a whole number from 1 to 104, not ${weeks}`]);
   }
+  // The weeks to add, as a CTE chain ending in `planned (week, provider_id)`:
+  // read once by the phone check and once by the insert, so the two cannot
+  // disagree about who gets a week.
+  const planned = (indent: string) =>
+    [
+      `WITH last AS (`,
+      `  SELECT s.week_starts_on, p.rotation_order`,
+      `    FROM on_call_schedule s JOIN on_call_providers p ON p.id = s.provider_id`,
+      `   ORDER BY s.week_starts_on DESC LIMIT 1`,
+      `), pool AS (`,
+      `  SELECT id, rotation_order, (row_number() OVER (ORDER BY rotation_order) - 1)::int AS pos,`,
+      `         count(*) OVER ()::int AS n`,
+      `    FROM on_call_providers WHERE active AND rotation_order IS NOT NULL`,
+      `), start AS (`,
+      `  SELECT CASE WHEN last.rotation_order IS NULL THEN 0`,
+      `              ELSE (SELECT count(*) FROM pool WHERE pool.rotation_order <= last.rotation_order)::int END AS pos`,
+      `    FROM last`,
+      `), planned AS (`,
+      `  SELECT (last.week_starts_on + 7 * k)::date AS week, pool.id AS provider_id`,
+      `    FROM last, start, generate_series(1, ${weeks}) AS k, pool`,
+      `   WHERE pool.pos = (start.pos + k - 1) % pool.n`,
+      `)`,
+    ].map((l) => indent + l);
   return [
     `BEGIN;`,
-    `WITH last AS (`,
-    `  SELECT s.week_starts_on, p.rotation_order`,
-    `    FROM on_call_schedule s JOIN on_call_providers p ON p.id = s.provider_id`,
-    `   ORDER BY s.week_starts_on DESC LIMIT 1`,
-    `), pool AS (`,
-    `  SELECT id, rotation_order, (row_number() OVER (ORDER BY rotation_order) - 1)::int AS pos,`,
-    `         count(*) OVER ()::int AS n`,
-    `    FROM on_call_providers WHERE active AND rotation_order IS NOT NULL`,
-    `), start AS (`,
-    `  SELECT CASE WHEN last.rotation_order IS NULL THEN 0`,
-    `              ELSE (SELECT count(*) FROM pool WHERE pool.rotation_order <= last.rotation_order)::int END AS pos`,
-    `    FROM last`,
-    `), added AS (`,
+    // Operator, 2026-11-24: an extension that would give a week to a provider
+    // with no dialable phone is refused, naming them, and adds nothing.
+    `DO $oncall$ DECLARE bad text; BEGIN`,
+    ...planned("  "),
+    `  SELECT string_agg(DISTINCT p.full_name, ', ' ORDER BY p.full_name) INTO bad`,
+    `    FROM planned JOIN on_call_providers p ON p.id = planned.provider_id`,
+    `   WHERE p.phone IS NULL OR p.phone !~ '^\\+[0-9]{10,15}$';`,
+    `  IF bad IS NOT NULL THEN`,
+    `    RAISE EXCEPTION 'extend refused: % would get a week but has no dialable phone number; fix the number or deactivate them, then extend again', bad;`,
+    `  END IF;`,
+    `END $oncall$;`,
+    ...planned(""),
+    `, added AS (`,
     `  INSERT INTO on_call_schedule (week_starts_on, provider_id, note)`,
-    `  SELECT (last.week_starts_on + 7 * k)::date, pool.id, 'added by scripts/on-call-change.ts extend'`,
-    `    FROM last, start, generate_series(1, ${weeks}) AS k, pool`,
-    `   WHERE pool.pos = (start.pos + k - 1) % pool.n`,
+    `  SELECT week, provider_id, 'added by scripts/on-call-change.ts extend' FROM planned`,
     `  RETURNING week_starts_on, provider_id`,
     `)`,
     `SELECT a.week_starts_on, p.full_name, p.region FROM added a JOIN on_call_providers p ON p.id = a.provider_id`,

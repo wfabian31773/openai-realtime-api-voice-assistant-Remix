@@ -322,16 +322,31 @@ describe("changes", () => {
     expect((await h.request("POST", `${ON_CALL_API}/schedule/swap-weeks`, "admin", { weekA: "2026-12-08", weekB: "2026-12-15", reason: "x" })).status).toBe(400);
   });
 
-  it("extends the schedule the way the CLI does, and a dry run writes nothing", async () => {
+  it("refuses to extend when a provider who would get a week has no dialable phone, and adds nothing", async () => {
     const h = boot();
     const dry = await h.request("POST", `${ON_CALL_API}/schedule/extend`, "admin", { weeks: 2, dryRun: true });
-    // Provider 5 is active, in the rotation and has no phone: the CLI's SQL
-    // gives them a week too. The page matches it and warns.
+    // Provider 5 is active, in the rotation and has no phone: the preview
+    // shows the weeks and the refusal naming them.
     expect(dry.body.weeks.map((w: any) => [w.week, w.providerId])).toEqual([
       ["2026-12-29", 5],
       ["2027-01-05", 1],
     ]);
-    expect(dry.body.warnings.join(" ")).toMatch(/Dr\. Test NoPhone.*2026-12-29/);
+    expect(dry.body.refusal).toMatch(/^Extend refused: Dr\. Test NoPhone \(week of 2026-12-29\)/);
+    expect(h.store.transactions).toBe(0);
+    const before = h.store.state.schedule.length;
+    const r = await h.request("POST", `${ON_CALL_API}/schedule/extend`, "admin", { weeks: 2, reason: "more weeks" });
+    expect(r.status).toBe(400);
+    expect(r.body.error).toMatch(/Dr\. Test NoPhone/);
+    expect(h.store.state.schedule).toHaveLength(before);
+    expect(h.store.state.audit).toHaveLength(0);
+  });
+
+  it("extends the schedule the way the CLI does when every provider can be rung, and a dry run writes nothing", async () => {
+    const state = fixture();
+    state.providers = state.providers.map((p) => (p.id === 5 ? { ...p, phone: "+15555550105" } : p));
+    const h = boot({}, state);
+    const dry = await h.request("POST", `${ON_CALL_API}/schedule/extend`, "admin", { weeks: 2, dryRun: true });
+    expect(dry.body.refusal).toBeNull();
     expect(h.store.transactions).toBe(0);
     const r = await h.request("POST", `${ON_CALL_API}/schedule/extend`, "admin", { weeks: 2, reason: "more weeks" });
     expect(r.status).toBe(200);

@@ -59,6 +59,7 @@ import {
   overlapping,
   pacificWallToDate,
   planExtension,
+  extensionRefusal,
   planReorder,
   scheduleView,
   weekStartInstant,
@@ -188,17 +189,6 @@ function describe(ans: OnCallAnswer, data: RotationData, at: Date, fallbackPhone
       operationsFallbackConfigured: Boolean(fallbackPhone),
     },
   };
-}
-
-/**
- * `extend` matches scripts/on-call-change.ts exactly, which gives a week to
- * any active provider with a rotation place, dialable or not. Say so.
- */
-function extensionWarnings(weeks: Array<{ week: string; providerId: number }>, providers: AdminProvider[]): string[] {
-  return weeks.flatMap((w) => {
-    const p = providers.find((x) => x.id === w.providerId);
-    return p && !isDialable(p.phone) ? [`${p.fullName} gets the week of ${w.week} but has no dialable phone; fix their number or swap the week.`] : [];
-  });
 }
 
 /** Any `phone` value, at any depth, as its last four digits. */
@@ -421,11 +411,13 @@ export function mountOnCallAdmin(app: Express, deps: OnCallAdminDeps) {
       const [providers, schedule] = await Promise.all([store.providers(), store.schedule()]);
       const plan = planExtension(schedule[schedule.length - 1] ?? null, providers, Number(req.body?.weeks));
       if (!plan.ok) return void res.status(400).json({ error: plan.error });
+      // The weeks are shown even when the extension would be refused, so the
+      // admin can see which week needs a fixed number.
       res.json({
         ok: true,
         dryRun: true,
         weeks: plan.weeks.map((w) => ({ ...w, providerName: providers.find((p) => p.id === w.providerId)?.fullName ?? null })),
-        warnings: extensionWarnings(plan.weeks, providers),
+        refusal: extensionRefusal(plan.weeks, providers),
       });
     } catch {
       res.status(500).json({ error: "The on-call data could not be read." });
@@ -435,6 +427,8 @@ export function mountOnCallAdmin(app: Express, deps: OnCallAdminDeps) {
     const [providers, schedule] = await Promise.all([tx.providers(), tx.schedule()]);
     const plan = planExtension(schedule[schedule.length - 1] ?? null, providers, Number(req.body?.weeks));
     if (!plan.ok) throw new AdminRefusal(400, plan.error);
+    const refusal = extensionRefusal(plan.weeks, providers);
+    if (refusal) throw new AdminRefusal(400, refusal);
     for (const w of plan.weeks) await tx.insertWeek(w.week, w.providerId, "added by the on-call admin page (extend)");
     await audit({
       action: "schedule.extend",
@@ -443,7 +437,7 @@ export function mountOnCallAdmin(app: Express, deps: OnCallAdminDeps) {
       before: null,
       after: plan.weeks,
     });
-    return { weeks: plan.weeks, warnings: extensionWarnings(plan.weeks, providers) };
+    return { weeks: plan.weeks };
   }));
 
   // ── Overrides ─────────────────────────────────────────────────────────────
