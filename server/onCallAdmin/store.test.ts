@@ -22,7 +22,7 @@ describe("the Postgres admin store", () => {
       await tx.audit({ actorUserId: "u", actorEmail: null, action: "a", entityType: "schedule", entityId: "w", before: null, after: null, reason: "r" });
     });
     expect(f.log[0]).toBe("BEGIN");
-    expect(f.log.at(-1)).toBe("COMMIT");
+    expect(f.log[f.log.length - 1]).toBe("COMMIT");
     expect(f.log.some((l) => l.startsWith("insert into on_call_audit_log"))).toBe(true);
     expect(f.released()).toBe(1);
   });
@@ -36,7 +36,7 @@ describe("the Postgres admin store", () => {
         await tx.audit({ actorUserId: null, actorEmail: null, action: "a", entityType: "schedule", entityId: null, before: null, after: null, reason: "r" });
       }),
     ).rejects.toThrow("boom");
-    expect(f.log.at(-1)).toBe("ROLLBACK");
+    expect(f.log[f.log.length - 1]).toBe("ROLLBACK");
     expect(f.log).not.toContain("COMMIT");
     expect(f.released()).toBe(1);
   });
