@@ -3,14 +3,26 @@ import { ADMIN_SQL, createPgOnCallAdminStore, escalationLiteFromRow, type PgPool
 
 function fakePool(fail?: (text: string) => boolean) {
   const log: string[] = [];
+  const full: string[] = [];
   let released = 0;
+  const releasedWith: Array<Error | undefined> = [];
   const query = async (text: string) => {
     log.push(text.trim().split(/\s+/).slice(0, 3).join(" "));
+    full.push(text);
     if (fail?.(text)) throw new Error("boom");
     return { rows: [] as any[], rowCount: 1 };
   };
-  const pool: PgPoolLike = { query, connect: async () => ({ query, release: () => void released++ }) };
-  return { pool, log, released: () => released };
+  const pool: PgPoolLike = {
+    query,
+    connect: async () => ({
+      query,
+      release: (err?: Error) => {
+        released++;
+        releasedWith.push(err);
+      },
+    }),
+  };
+  return { pool, log, full, released: () => released, releasedWith };
 }
 
 describe("the Postgres admin store", () => {
@@ -45,10 +57,42 @@ describe("the Postgres admin store", () => {
     const f = fakePool();
     const store = createPgOnCallAdminStore(f.pool);
     await store.transaction((tx) => tx.setRotationOrders([{ id: 2, to: 3 }, { id: 3, to: 2 }]));
-    const body = f.log.slice(1, -1);
+    const body = f.log.slice(2, -1);
     expect(body[0]).toBe("update on_call_providers set");
     expect(ADMIN_SQL.clearOrder).toMatch(/rotation_order = null/);
     expect(body).toHaveLength(3);
+  });
+
+  it("serialises admin writes with a transaction-scoped advisory lock, taken right after BEGIN", async () => {
+    const f = fakePool();
+    const store = createPgOnCallAdminStore(f.pool);
+    await store.transaction((tx) => tx.insertWeek("2026-12-08", 3, null));
+    expect(f.full[0]).toBe("BEGIN");
+    expect(f.full[1]).toBe(ADMIN_SQL.lock);
+    // xact-scoped: released at COMMIT/ROLLBACK, safe through PgBouncer's transaction pooler.
+    expect(ADMIN_SQL.lock).toMatch(/pg_advisory_xact_lock\(/);
+    expect(f.releasedWith).toEqual([undefined]);
+  });
+
+  it("destroys the connection when ROLLBACK itself fails, and reports the original error", async () => {
+    const f = fakePool((t) => t.includes("on_call_audit_log") || t === "ROLLBACK");
+    const store = createPgOnCallAdminStore(f.pool);
+    await expect(
+      store.transaction((tx) =>
+        tx.audit({ actorUserId: null, actorEmail: null, action: "a", entityType: "schedule", entityId: null, before: null, after: null, reason: "r" }),
+      ),
+    ).rejects.toThrow("boom");
+    expect(f.released()).toBe(1);
+    expect(f.releasedWith[0]).toBeInstanceOf(Error);
+  });
+
+  it("reads call_logs, call_turns and call_events times as UTC, not the server's local zone", () => {
+    expect(ADMIN_SQL.callLogsBySid).toMatch(/\(start_time at time zone 'UTC'\) as start_time/);
+    expect(ADMIN_SQL.callLogsBySid).toMatch(/\(end_time at time zone 'UTC'\) as end_time/);
+    expect(ADMIN_SQL.callLogsBySid).toMatch(/\(created_at at time zone 'UTC'\) as created_at/);
+    expect(ADMIN_SQL.urgentWithoutChain).toMatch(/\(start_time at time zone 'UTC'\)/);
+    expect(ADMIN_SQL.turns).toMatch(/\(at at time zone 'UTC'\) as at/);
+    expect(ADMIN_SQL.callEvents).toMatch(/\(at at time zone 'UTC'\) as at/);
   });
 
   it("never returns a chain level's phone", () => {

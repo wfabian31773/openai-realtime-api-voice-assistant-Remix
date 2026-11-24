@@ -253,10 +253,22 @@ function auditFromRow(r: any): AuditRow {
 
 const ESC_COLS = `id, call_sid, mode, status, level_index, attempt_no, routing, plan,
   accepted_by, accepted_at, accepted_attempt_id, created_at, updated_at`;
+// call_logs, call_turns and call_events keep TIMESTAMP WITHOUT TIME ZONE
+// holding UTC wall time. Read raw, node-postgres parses those as the server's
+// LOCAL time; cast them to timestamptz so the merged timeline orders them
+// correctly against the on_call_* timestamptz columns whatever TZ is.
 const CALL_COLS = `id, call_sid, "from", agent_used, voice_provider, status, runtime_outcome, agent_outcome,
-  summary, duration, start_time, end_time, created_at, transferred_to_human, ticket_number, tool_timeline`;
+  summary, duration, (start_time at time zone 'UTC') as start_time, (end_time at time zone 'UTC') as end_time,
+  (created_at at time zone 'UTC') as created_at, transferred_to_human, ticket_number, tool_timeline`;
 
 export const ADMIN_SQL = {
+  /**
+   * One admin change at a time: every write reads, decides and writes in one
+   * transaction, so two admins editing at once would otherwise lose an update
+   * and audit a stale "before". Transaction-scoped: released at COMMIT or
+   * ROLLBACK, so it is safe through PgBouncer's transaction pooler.
+   */
+  lock: `select pg_advisory_xact_lock(hashtext('on_call_admin_write'))`,
   tables: `select table_name from information_schema.tables where table_schema = 'public' and table_name = any($1::text[])`,
   providers: `select id, full_name, npi, phone, email, region, rotation_order, active, created_at, updated_at
                 from on_call_providers order by rotation_order nulls last, full_name`,
@@ -328,9 +340,9 @@ export const ADMIN_SQL = {
         and c.tool_timeline->'events' @> '[{"tool":"escalate_to_human"}]'::jsonb
         and not exists (select 1 from on_call_escalations e where e.call_sid = c.call_sid)
       order by c.created_at desc limit $4::integer`,
-  turns: `select at, role, coalesce(final_transcript, raw_transcript) as text from call_turns
+  turns: `select (at at time zone 'UTC') as at, role, coalesce(final_transcript, raw_transcript) as text from call_turns
            where call_sid = $1::text order by turn_index limit 1000`,
-  callEvents: `select at, level, category, message, data from call_events
+  callEvents: `select (at at time zone 'UTC') as at, level, category, message, data from call_events
                 where call_sid = $1::text order by at, id limit 500`,
   extraEvents: `select at, source, event_type, detail from on_call_call_events
                  where call_sid = $1::text order by at, id limit 500`,
@@ -343,7 +355,8 @@ export const ADMIN_SQL = {
 export type Query = (text: string, params?: unknown[]) => Promise<{ rows: any[] }>;
 export interface PgClientLike {
   query: Query;
-  release(): void;
+  /** An error destroys the connection instead of returning it to the pool. */
+  release(err?: Error): void;
 }
 export interface PgPoolLike {
   query: Query;
@@ -472,20 +485,24 @@ export function createPgOnCallAdminStore(pool: PgPoolLike): OnCallAdminStore {
           ]);
         },
       };
+      let broken: Error | undefined;
       try {
         await cq("BEGIN");
+        await cq(ADMIN_SQL.lock);
         const out = await fn(tx);
         await cq("COMMIT");
         return out;
       } catch (e) {
         try {
           await cq("ROLLBACK");
-        } catch {
-          /* the original error is the one to report */
+        } catch (rollbackError) {
+          // A connection that could not roll back must not return to the pool
+          // still inside a transaction. The original error is the one to report.
+          broken = rollbackError instanceof Error ? rollbackError : new Error(String(rollbackError));
         }
         throw e;
       } finally {
-        client.release();
+        client.release(broken);
       }
     },
     async auditLog(f) {
