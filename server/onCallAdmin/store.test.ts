@@ -1,4 +1,6 @@
 import { describe, expect, it } from "vitest";
+import { ON_CALL_ADMIN_WRITE_LOCK_SQL } from "../../src/runtime/onCall/adminLock";
+import { swapWeekSql } from "../../src/runtime/onCall/seed";
 import { ADMIN_SQL, createPgOnCallAdminStore, escalationLiteFromRow, type PgPoolLike } from "./store";
 
 function fakePool(fail?: (text: string) => boolean) {
@@ -72,6 +74,11 @@ describe("the Postgres admin store", () => {
     // xact-scoped: released at COMMIT/ROLLBACK, safe through PgBouncer's transaction pooler.
     expect(ADMIN_SQL.lock).toMatch(/pg_advisory_xact_lock\(/);
     expect(f.releasedWith).toEqual([undefined]);
+  });
+
+  it("takes the same lock statement the CLI's printed SQL takes, from one shared constant", () => {
+    expect(ADMIN_SQL.lock).toBe(ON_CALL_ADMIN_WRITE_LOCK_SQL);
+    expect(swapWeekSql({ week: "2026-12-08", to: "Ben Ortiz" })).toContain(`BEGIN;\n${ADMIN_SQL.lock};`);
   });
 
   it("destroys the connection when ROLLBACK itself fails, and reports the original error", async () => {

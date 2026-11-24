@@ -25,6 +25,7 @@ import {
   type SeedInput,
 } from "./seed";
 import { FINAL_REGION } from "./rotation";
+import { ON_CALL_ADMIN_WRITE_LOCK_SQL } from "./adminLock";
 
 const POOL = [
   "Provider,Cell Phone,Email,Region,Escalation Director,NPI",
@@ -476,6 +477,34 @@ describe("changes after the seed", () => {
     for (const sql of [swapWeekSql({ week: "2026-12-08", to: "Ada Lin" }), deactivateSql("Ada Lin")]) {
       expect(sql).toMatch(/IF n <> 1 THEN RAISE EXCEPTION 'expected one (active )?provider named %, found %'/);
     }
+  });
+});
+
+describe("every CLI transaction takes the admin page's write lock first", () => {
+  const audit = { actor: "ops", reason: "test" };
+  const cases: Array<[string, string]> = [
+    ["seed", seed().sql],
+    ["add-provider", addProviderSql({ name: "Kim Ruiz", phone: "555-010-0012", region: "Orange County", audit })],
+    ["extend", extendScheduleSql(4, audit)],
+    ["swap", swapWeekSql({ week: "2026-12-08", to: "Ben Ortiz", audit })],
+    ["cover", coverSql({ from: "2026-12-10 17:00", to: "2026-12-11 08:00", by: "Ada Lin", audit })],
+    ["deactivate", deactivateSql("Ada Lin", audit)],
+    ["activate", activateSql("Ada Lin", audit)],
+    ["set-director", setDirectorSql({ region: "Orange County", director: "Dr. Kim Ruiz", audit })],
+    ["swap, unaudited", swapWeekSql({ week: "2026-12-08", to: "Ben Ortiz" })],
+  ];
+
+  it("is the one shared constant, the admin page's advisory xact lock", () => {
+    expect(ON_CALL_ADMIN_WRITE_LOCK_SQL).toBe(`select pg_advisory_xact_lock(hashtext('on_call_admin_write'))`);
+  });
+
+  it.each(cases)("%s: the statement after BEGIN is the lock, before any check, read or write", (_name, sql) => {
+    const lines = sql.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("--"));
+    const begin = lines.indexOf("BEGIN;");
+    expect(begin).toBeGreaterThanOrEqual(0);
+    expect(lines.indexOf("BEGIN;", begin + 1)).toBe(-1);
+    expect(lines[begin + 1]).toBe(`${ON_CALL_ADMIN_WRITE_LOCK_SQL};`);
+    expect(sql.split(ON_CALL_ADMIN_WRITE_LOCK_SQL).length).toBe(2);
   });
 });
 

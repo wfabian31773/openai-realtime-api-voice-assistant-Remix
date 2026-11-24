@@ -24,6 +24,7 @@
  */
 import { parse } from "csv-parse/sync";
 import { toE164 } from "../../services/handoffPolicy";
+import { ON_CALL_ADMIN_WRITE_LOCK_SQL } from "./adminLock";
 import { nameKeyForMatch } from "./postOp";
 import { FINAL_REGION, regionKey } from "./rotation";
 
@@ -452,6 +453,7 @@ export function buildSeedSql(input: SeedInput): SeedResult {
       `(${weekRows[0]?.week ?? "none"} to ${weekRows[weekRows.length - 1]?.week ?? "none"}).`,
     ``,
     `BEGIN;`,
+    `${ON_CALL_ADMIN_WRITE_LOCK_SQL};`,
     ``,
     `DO $oncall$ BEGIN`,
     `  IF EXISTS (SELECT 1 FROM on_call_providers) OR EXISTS (SELECT 1 FROM on_call_schedule)`,
@@ -611,6 +613,7 @@ export function addProviderSql(input: {
   const named = `lower(regexp_replace(p.full_name, '\\s+', ' ', 'g')) = lower(${name})`;
   return [
     `BEGIN;`,
+    `${ON_CALL_ADMIN_WRITE_LOCK_SQL};`,
     ...auditTableCheck(input.audit),
     `DO $oncall$ BEGIN`,
     `  IF EXISTS (SELECT 1 FROM on_call_providers WHERE lower(regexp_replace(full_name, '\\s+', ' ', 'g')) = lower(${name})) THEN`,
@@ -682,6 +685,7 @@ export function extendScheduleSql(weeks: number, audit?: ChangeAudit): string {
     ].map((l) => indent + l);
   return [
     `BEGIN;`,
+    `${ON_CALL_ADMIN_WRITE_LOCK_SQL};`,
     ...auditTableCheck(audit),
     // Operator, 2026-11-24: an extension that would give a week to a provider
     // with no dialable phone is refused, naming them, and adds nothing.
@@ -730,6 +734,7 @@ export function swapWeekSql(input: { week: string; to: string; note?: string; au
   const note = input.note?.trim() || `swapped to ${input.to.trim()}`;
   return [
     `BEGIN;`,
+    `${ON_CALL_ADMIN_WRITE_LOCK_SQL};`,
     ...auditTableCheck(input.audit),
     `DO $oncall$ DECLARE n int; who int; prev jsonb; nxt jsonb; BEGIN`,
     lookupProvider(input.to, "who"),
@@ -778,6 +783,7 @@ export function coverSql(input: { from: string; to: string; by: string; reason?:
   const reason = input.reason?.trim() || `cover by ${input.by.trim()}`;
   return [
     `BEGIN;`,
+    `${ON_CALL_ADMIN_WRITE_LOCK_SQL};`,
     ...auditTableCheck(input.audit),
     `DO $oncall$ DECLARE n int; who int; new_id int; nxt jsonb; BEGIN`,
     lookupProvider(input.by, "who"),
@@ -814,6 +820,7 @@ export function deactivateSql(name: string, audit?: ChangeAudit): string {
   checkAudit(audit);
   return [
     `BEGIN;`,
+    `${ON_CALL_ADMIN_WRITE_LOCK_SQL};`,
     ...auditTableCheck(audit),
     `DO $oncall$ DECLARE n int; who int; prev jsonb; nxt jsonb; BEGIN`,
     lookupProvider(name, "who", true),
@@ -833,6 +840,7 @@ export function activateSql(name: string, audit?: ChangeAudit): string {
   checkAudit(audit);
   return [
     `BEGIN;`,
+    `${ON_CALL_ADMIN_WRITE_LOCK_SQL};`,
     ...auditTableCheck(audit),
     `DO $oncall$ DECLARE n int; who int; prev jsonb; nxt jsonb; BEGIN`,
     lookupProvider(name, "who", true),
@@ -854,6 +862,7 @@ export function setDirectorSql(input: { region: string; director: string; newReg
   if (!region) throw new SeedError(["no region"]);
   return [
     `BEGIN;`,
+    `${ON_CALL_ADMIN_WRITE_LOCK_SQL};`,
     ...auditTableCheck(input.audit),
     `DO $oncall$ DECLARE n int; who int; prev jsonb; nxt jsonb; BEGIN`,
     lookupProvider(input.director, "who"),

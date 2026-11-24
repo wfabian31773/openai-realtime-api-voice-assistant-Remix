@@ -13,6 +13,7 @@
  * selected, and a plan level's phone is dropped on the way out.
  */
 import type { OnCallProvider } from "../../src/runtime/onCall/rotation";
+import { ON_CALL_ADMIN_WRITE_LOCK_SQL } from "../../src/runtime/onCall/adminLock";
 import { ON_CALL_TABLES } from "../../src/runtime/onCall/store";
 import type { AttemptLite, CallLogLite, EscalationLite, OverrideRow, ScheduleRow } from "./logic";
 
@@ -265,10 +266,10 @@ export const ADMIN_SQL = {
   /**
    * One admin change at a time: every write reads, decides and writes in one
    * transaction, so two admins editing at once would otherwise lose an update
-   * and audit a stale "before". Transaction-scoped: released at COMMIT or
-   * ROLLBACK, so it is safe through PgBouncer's transaction pooler.
+   * and audit a stale "before". The same constant opens every transaction
+   * scripts/on-call-change.ts prints, so the CLI and the page serialise too.
    */
-  lock: `select pg_advisory_xact_lock(hashtext('on_call_admin_write'))`,
+  lock: ON_CALL_ADMIN_WRITE_LOCK_SQL,
   tables: `select table_name from information_schema.tables where table_schema = 'public' and table_name = any($1::text[])`,
   providers: `select id, full_name, npi, phone, email, region, rotation_order, active, created_at, updated_at
                 from on_call_providers order by rotation_order nulls last, full_name`,
