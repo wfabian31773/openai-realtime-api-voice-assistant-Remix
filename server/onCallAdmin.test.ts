@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Express, RequestHandler } from "express";
 import { requireAuth, requireRole } from "./auth";
-import { EXTEND_PLAN_CHANGED, mountOnCallAdmin, ON_CALL_API, samePlan, storePerPool } from "./onCallAdmin";
+import { EXTEND_PLAN_CHANGED, mountOnCallAdmin, ON_CALL_API, samePlan, sameOverlapIds, storePerPool } from "./onCallAdmin";
 import { emptyFakeState, FakeOnCallAdminStore, type FakeOptions, type FakeState } from "./onCallAdmin/store.fake";
 import { pacificWallToDate } from "./onCallAdmin/logic";
 
@@ -398,11 +398,39 @@ describe("changes", () => {
     const again = await h.request("POST", `${ON_CALL_API}/overrides`, "admin", { ...body, providerId: 1 });
     expect(again.status).toBe(409);
     expect(again.body.overlap).toHaveLength(1);
-    expect((await h.request("POST", `${ON_CALL_API}/overrides`, "admin", { ...body, providerId: 1, confirmOverlap: true })).status).toBe(200);
+    const firstId = again.body.overlap[0].id;
+    expect((await h.request("POST", `${ON_CALL_API}/overrides`, "admin", { ...body, providerId: 1, confirmOverlap: true })).status).toBe(409);
+    expect((await h.request("POST", `${ON_CALL_API}/overrides`, "admin", { ...body, providerId: 1, confirmedOverlapIds: [firstId] })).status).toBe(200);
     expect(h.store.state.overrides).toHaveLength(2);
     expect((await h.request("POST", `${ON_CALL_API}/overrides`, "admin", { ...body, endsAt: "2026-12-10T16:00" })).status).toBe(400);
     expect((await h.request("POST", `${ON_CALL_API}/overrides`, "admin", { ...body, startsAt: "2026-12-01T17:00", endsAt: "2026-12-02T08:00" })).status).toBe(400);
     expect(h.store.state.overrides[0].startsAt.toISOString()).toBe(pacificWallToDate("2026-12-10 17:00")!.toISOString());
+  });
+
+  it("a confirmed overlap does not approve an overlap added after the warning (review of #520)", async () => {
+    const h = boot();
+    const body = { startsAt: "2026-12-10T17:00", endsAt: "2026-12-11T08:00", providerId: 3, reason: "cover" };
+    expect((await h.request("POST", `${ON_CALL_API}/overrides`, "admin", body)).status).toBe(200);
+    const warned = await h.request("POST", `${ON_CALL_API}/overrides`, "admin", { ...body, providerId: 1 });
+    const confirmedIds = warned.body.overlap.map((o: { id: number }) => o.id);
+    // Another admin adds a cover over the same window before the retry.
+    expect((await h.request("POST", `${ON_CALL_API}/overrides`, "admin", { ...body, providerId: 2, confirmedOverlapIds: confirmedIds })).status).toBe(200);
+    const retry = await h.request("POST", `${ON_CALL_API}/overrides`, "admin", { ...body, providerId: 1, confirmedOverlapIds: confirmedIds });
+    expect(retry.status).toBe(409);
+    expect(retry.body.error).toMatch(/changed since you confirmed/);
+    expect(retry.body.overlap).toHaveLength(2);
+    expect(h.store.state.overrides).toHaveLength(2);
+    const ids = retry.body.overlap.map((o: { id: number }) => o.id).reverse();
+    expect((await h.request("POST", `${ON_CALL_API}/overrides`, "admin", { ...body, providerId: 1, confirmedOverlapIds: ids })).status).toBe(200);
+    expect(h.store.state.overrides).toHaveLength(3);
+  });
+
+  it("sameOverlapIds is set equality on integer ids", () => {
+    expect(sameOverlapIds([2, 1], [1, 2])).toBe(true);
+    expect(sameOverlapIds([1], [1, 2])).toBe(false);
+    expect(sameOverlapIds([1, 3], [1, 2])).toBe(false);
+    expect(sameOverlapIds(true, [1])).toBe(false);
+    expect(sameOverlapIds(["x"], [1])).toBe(false);
   });
 
   it("cancelling: an upcoming override is deleted, a running one ends now, a past one is refused", async () => {

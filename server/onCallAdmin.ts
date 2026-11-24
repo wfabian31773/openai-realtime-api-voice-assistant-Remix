@@ -138,6 +138,17 @@ export function samePlan(confirmed: unknown, current: Array<{ week: string; prov
   });
 }
 
+/**
+ * The override ids the admin confirmed overlapping are exactly the overlaps
+ * now. A boolean would also approve a conflict added after the warning.
+ */
+export function sameOverlapIds(confirmed: unknown, current: readonly number[]): boolean {
+  if (!Array.isArray(confirmed) || confirmed.length !== current.length) return false;
+  const a = confirmed.map(Number).sort((x, y) => x - y);
+  const b = [...current].sort((x, y) => x - y);
+  return a.every((id, i) => Number.isInteger(id) && id === b[i]);
+}
+
 function toRotationData(
   providers: AdminProvider[],
   schedule: Array<{ week: string; providerId: number }>,
@@ -498,8 +509,12 @@ export function mountOnCallAdmin(app: Express, deps: OnCallAdminDeps) {
     const providerId = intOf(req.body?.providerId, "providerId");
     const p = ringableProvider(await tx.providers(), providerId);
     const clash = overlapping(await tx.overrides(), startsAt, endsAt);
-    if (clash.length && req.body?.confirmOverlap !== true) {
-      throw new AdminRefusal(409, "This window overlaps other overrides; the one that starts latest wins. Confirm to save anyway.", {
+    const confirmed = req.body?.confirmedOverlapIds;
+    if (clash.length && !sameOverlapIds(confirmed, clash.map((o) => o.id))) {
+      const changed = Array.isArray(confirmed) && confirmed.length > 0;
+      throw new AdminRefusal(409, changed
+        ? "The overlapping overrides changed since you confirmed; review them and confirm again."
+        : "This window overlaps other overrides; the one that starts latest wins. Confirm to save anyway.", {
         overlap: clash.map((o) => ({ id: o.id, startsAt: o.startsAt.toISOString(), endsAt: o.endsAt.toISOString(), providerId: o.providerId })),
       });
     }

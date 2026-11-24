@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { acceptExtendPreview, apiError, chainStatusVariant, countdown, editCover, extendPlan, extendPreviewReady, isExtendPlanChanged, finalFallbackText, fmtPacific, fmtSeconds, fmtWeek, pacificMidnightIso, pacificNextMidnightIso, ROLE_LABELS, sectionBadge, toPacificInput } from './onCallView'
+import { acceptExtendPreview, apiError, chainStatusVariant, countdown, coverBody, editCover, extendPlan, extendPreviewReady, isExtendPlanChanged, finalFallbackText, fmtPacific, fmtSeconds, fmtWeek, pacificMidnightIso, pacificNextMidnightIso, ROLE_LABELS, sectionBadge, toPacificInput, warnCoverOverlap } from './onCallView'
 
 describe('on-call page helpers', () => {
   it('shows times in Pacific and says so', () => {
@@ -76,12 +76,13 @@ describe('on-call page helpers', () => {
   })
 
   describe('editCover', () => {
-    const confirmed = { startsAt: '2026-12-04T17:00', endsAt: '2026-12-05T08:00', providerId: 3 as number | '', confirmOverlap: true }
+    const confirmed = { startsAt: '2026-12-04T17:00', endsAt: '2026-12-05T08:00', providerId: 3 as number | '', confirmOverlap: true, overlapIds: [7] }
 
     it('withdraws a confirmed overlap and the warning when the start, end or provider changes', () => {
       for (const patch of [{ startsAt: '2026-12-04T18:00' }, { endsAt: '2026-12-06T08:00' }, { providerId: 4 }]) {
         const r = editCover(confirmed, patch)
         expect(r.cover.confirmOverlap).toBe(false)
+        expect(r.cover.overlapIds).toEqual([])
         expect(r.clearWarning).toBe(true)
         expect(r.cover).toMatchObject(patch)
       }
@@ -90,6 +91,16 @@ describe('on-call page helpers', () => {
     it('keeps the confirmation when nothing that decides the conflict changed', () => {
       expect(editCover(confirmed, { startsAt: confirmed.startsAt })).toEqual({ cover: confirmed, clearWarning: false })
       expect(editCover({ ...confirmed, confirmOverlap: false }, { confirmOverlap: true })).toEqual({ cover: confirmed, clearWarning: false })
+    })
+
+    it('a new warning replaces the ids and withdraws the earlier confirmation', () => {
+      expect(warnCoverOverlap(confirmed, [7, 9])).toEqual({ ...confirmed, confirmOverlap: false, overlapIds: [7, 9] })
+    })
+
+    it('sends the confirmed overlap ids only when the box is ticked', () => {
+      expect(coverBody(confirmed, 'cover')).toEqual({ startsAt: confirmed.startsAt, endsAt: confirmed.endsAt, providerId: 3, confirmedOverlapIds: [7], reason: 'cover' })
+      expect(coverBody({ ...confirmed, confirmOverlap: false }, 'cover').confirmedOverlapIds).toEqual([])
+      expect(coverBody(confirmed, 'cover')).not.toHaveProperty('confirmOverlap')
     })
   })
 

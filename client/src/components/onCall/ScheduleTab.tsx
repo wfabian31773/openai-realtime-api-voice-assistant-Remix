@@ -7,7 +7,7 @@ import { Label } from '@/components/ui/label'
 import { Select } from '@/components/ui/select'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import apiClient from '@/lib/apiClient'
-import { acceptExtendPreview, apiError, editCover, extendPlan, extendPreviewReady, fmtPacific, isExtendPlanChanged, fmtWeek, toPacificInput, type CoverDraft, type ExtendPreview } from '@/lib/onCallView'
+import { acceptExtendPreview, apiError, coverBody, editCover, extendPlan, extendPreviewReady, fmtPacific, isExtendPlanChanged, fmtWeek, toPacificInput, warnCoverOverlap, type CoverDraft, type ExtendPreview } from '@/lib/onCallView'
 import { Banner, ProviderSelect, ReasonDialog, useOnCall, useOnCallWrite, type PublicProvider } from './shared'
 import { AlertTriangle, CalendarPlus, Repeat, ShieldPlus } from 'lucide-react'
 
@@ -67,6 +67,7 @@ export function ScheduleTab() {
     endsAt: toPacificInput(new Date(Date.now() + 15 * 3_600_000)),
     providerId: '',
     confirmOverlap: false,
+    overlapIds: [],
   })
   const [overlap, setOverlap] = React.useState<string | null>(null)
   const [cancel, setCancel] = React.useState<OverrideView | null>(null)
@@ -109,7 +110,7 @@ export function ScheduleTab() {
         <Button variant="outline" onClick={() => setSwapOpen(true)}>
           <Repeat className="mr-1 h-4 w-4" /> Swap two weeks
         </Button>
-        <Button variant="outline" onClick={() => { setCover((c) => ({ ...c, confirmOverlap: false })); setOverlap(null); setCoverOpen(true) }}>
+        <Button variant="outline" onClick={() => { setCover((c) => ({ ...c, confirmOverlap: false, overlapIds: [] })); setOverlap(null); setCoverOpen(true) }}>
           <ShieldPlus className="mr-1 h-4 w-4" /> Cover part of a week
         </Button>
         <Button variant="outline" onClick={() => { setExtendPreview(null); setExtendOpen(true); loadExtendPreview(extendWeeks) }}>
@@ -324,11 +325,13 @@ export function ScheduleTab() {
         confirmLabel={cover.confirmOverlap ? 'Save despite overlap' : 'Save cover'}
         onConfirm={async (reason) => {
           try {
-            await write.mutateAsync({ method: 'post', path: '/overrides', body: { ...cover, reason } })
+            await write.mutateAsync({ method: 'post', path: '/overrides', body: coverBody(cover, reason) })
             setOverlap(null)
           } catch (e: any) {
             if (e?.response?.status === 409 && e.response.data?.overlap) {
-              setOverlap(`Overlaps override(s) #${e.response.data.overlap.map((o: any) => o.id).join(', #')}. Tick the box to save anyway.`)
+              const ids: number[] = e.response.data.overlap.map((o: any) => o.id)
+              setCover((c) => warnCoverOverlap(c, ids))
+              setOverlap(`Overlaps override(s) #${ids.join(', #')}. Tick the box to save anyway.`)
             }
             throw e
           }

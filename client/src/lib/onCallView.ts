@@ -180,6 +180,8 @@ export interface CoverDraft {
   endsAt: string
   providerId: number | ''
   confirmOverlap: boolean
+  /** The override ids the last overlap warning named; the confirmation covers these and no others. */
+  overlapIds: number[]
 }
 
 /**
@@ -191,8 +193,31 @@ export interface CoverDraft {
 export function editCover(cover: CoverDraft, patch: Partial<CoverDraft>): { cover: CoverDraft; clearWarning: boolean } {
   const changed = (['startsAt', 'endsAt', 'providerId'] as const).some((k) => k in patch && patch[k] !== cover[k])
   const next = { ...cover, ...patch }
-  if (changed) next.confirmOverlap = false
+  if (changed) {
+    next.confirmOverlap = false
+    next.overlapIds = []
+  }
   return { cover: next, clearWarning: changed }
+}
+
+/**
+ * The cover dialog after the server named the current overlaps: the warning
+ * shows these ids, and any earlier confirmation is withdrawn, because it was
+ * for a set that is no longer the one the save would supersede.
+ */
+export function warnCoverOverlap(cover: CoverDraft, overlapIds: number[]): CoverDraft {
+  return { ...cover, confirmOverlap: false, overlapIds: [...overlapIds] }
+}
+
+/** The save body: the confirmed overlap ids are sent only when the box is ticked. */
+export function coverBody(cover: CoverDraft, reason: string) {
+  return {
+    startsAt: cover.startsAt,
+    endsAt: cover.endsAt,
+    providerId: cover.providerId,
+    confirmedOverlapIds: cover.confirmOverlap ? cover.overlapIds : [],
+    reason,
+  }
 }
 
 export interface ExtendPreview {
