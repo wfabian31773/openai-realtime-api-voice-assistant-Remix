@@ -24,7 +24,7 @@ import { ticketNumbersForCall } from "../callTicketNumbers";
 
 /** "…0100" for any number, or null. Never the whole number. */
 export function last4(phone: string | null | undefined): string | null {
-  const digits = (phone ?? "").replace(/\D/g, "");
+  const digits = (phone ?? "").normalize("NFKC").replace(/\D/g, "");
   return digits.length >= 4 ? `…${digits.slice(-4)}` : null;
 }
 

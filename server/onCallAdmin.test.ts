@@ -779,6 +779,47 @@ describe("maskCallPhones in free text", () => {
     }
   });
 
+  // Review of #520, round 7: Unicode separators and full-width digits.
+  it.each([
+    ["no-break space", "+44 20 7946 0958", "…0958"],
+    ["narrow no-break space", "call +44 20 7946 0958 now", "call …0958 now"],
+    ["thin space", "415 555 0123", "…0123"],
+    ["figure space", "415 555 0123", "…0123"],
+    ["en dash", "415–555–0123", "…0123"],
+    ["em dash", "415—555—0123", "…0123"],
+    ["minus sign", "415−555−0123", "…0123"],
+    ["hyphen", "415‐555‐0123", "…0123"],
+    ["full-width digits", "４１５５５５０１２３", "…0123"],
+    ["full-width plus", "＋1 415 555 0123", "…0123"],
+    ["dash after a plus (not a date)", "+44-20-7946-0958", "…0958"],
+    ["comma and no-break space","4, 1, 5, 5, 5, 5, 0, 1, 2, 3", "…0123"],
+  ])("masks a phone with a %s", (_name, input, out) => {
+    expect(maskCallPhones(input)).toBe(out);
+    expect(maskCallPhones({ callerPhone: input })).toEqual({ callerPhone: out.slice(out.indexOf("…"), out.indexOf("…") + 5) });
+  });
+
+  it("still keeps dates, times and identifiers next to Unicode-separated phones", () => {
+    expect(maskCallPhones("on 2026-11-24 call 415 555 0123 at 10:30")).toBe("on 2026-11-24 call …0123 at 10:30");
+    expect(maskCallPhones("CA0123456789abcdef0123456789abcdef id 550e8400-e29b-41d4-a716-446655440000")).toBe(
+      "CA0123456789abcdef0123456789abcdef id 550e8400-e29b-41d4-a716-446655440000",
+    );
+  });
+
+  it("never leaves 7 or more phone digits in a row across Unicode separators", () => {
+    const seps = [" ", " ", " ", " ", " ", "–", "—", "‐", "−", ".", "-"];
+    const groups = [["415", "555", "0123"], ["+44", "20", "7946", "0958"], ["00", "52", "55", "1234", "5678"]];
+    const wraps = [(p: string) => p, (p: string) => `call ${p}.`, (p: string) => `(${p})`, (p: string) => `on 2026-11-24, ${p}, 10:30`];
+    for (const sep of seps) {
+      for (const g of groups) {
+        for (const w of wraps) {
+          const out = maskCallPhones(w(g.join(sep))) as string;
+          const digitsOnly = out.replace("2026-11-24", "").replace("10:30", "").replace(/\D/g, "");
+          expect(digitsOnly, `${JSON.stringify(w(g.join(sep)))} -> ${out}`).not.toMatch(/\d{7}/);
+        }
+      }
+    }
+  });
+
   it("masks a phone stored as a JSON number, and leaves small numbers alone", () => {
     expect(maskCallPhones({ args: { phone_number: 4155550123, other: 14155550123, durationSec: 312, id: 7 } })).toEqual({
       args: { phone_number: "…0123", other: "…0123", durationSec: 312, id: 7 },

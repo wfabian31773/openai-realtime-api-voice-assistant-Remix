@@ -270,8 +270,8 @@ function describe(ans: OnCallAnswer, data: RotationData, at: Date, fallbackPhone
  * summary, an event message, a tool's arguments or result, a routing note),
  * replacing the format-by-format patterns three review rounds of #520 kept
  * finding holes in: a run that starts with an optional "+" or "00", then
- * digits, where neighbouring digits may be split by a single space, dot,
- * dash, a comma (with an optional space; a number read out "4, 1, 5…") or
+ * digits, where neighbouring digits may be split by a single space (any
+ * Unicode whitespace), dot, dash (any Unicode dash, or the minus sign), a comma (with an optional space; a number read out "4, 1, 5…") or
  * parentheses ("(415) "), with 7 or more digits in all, is masked to its
  * last four ("…0123"). Some long digit runs that are not phones are masked
  * too; that is the accepted cost of never leaking one.
@@ -296,21 +296,29 @@ const PROTECTED_IN_TEXT = new RegExp(
     String.raw`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`,
     String.raw`[A-Z]{2}[0-9a-fA-F]{32}`,
   ]
-    .map((p) => `(?<![\\dA-Za-z])${p}(?![\\dA-Za-z])`)
+    // Not a protected span when it continues a phone run: after a "+", or
+    // after/before a digit joined by a tight separator ("+44-20-7946-0958"
+    // must not shield "44-20-7946" as a date; review of #520, round 7).
+    .map((p) => `(?<![\\dA-Za-z+])(?<!\\d[./\\p{Pd}\\u2212])${p}(?![\\dA-Za-z])(?![./\\p{Pd}\\u2212]\\d)`)
     .join("|"),
-  "g",
+  "gu",
 );
 
 // Optional "+"/"00", an optional "(", a digit, then digits each preceded by
-// an optional separator: ")" and/or one of space . - , (comma optionally with
-// a space), and/or "(". A run that starts inside a word is not a phone.
-const PHONE_RUN = /(?<!\w)(?:\+|00)?\(?\d(?:\)?(?:[ .-]|, ?)?\(?\d)*/g;
+// an optional separator: ")" and/or one of any Unicode whitespace (a no-break,
+// narrow, figure or thin space included), any Unicode dash or hyphen (en and
+// em dash included) or the minus sign, a dot, a comma (with optional
+// whitespace), and/or "(". A run that starts inside a word is not a phone.
+// The text is NFKC-normalised first, so full-width digits and the full-width
+// plus read as their ASCII forms (review of #520, round 7).
+const PHONE_RUN = /(?<![\p{L}\p{N}_])(?:\+|00)?\(?\d(?:\)?(?:[\s.\p{Pd}−]|,\s?)?\(?\d)*/gu;
 
 /** Set-aside marker for a protected span: private-use characters, never a digit or a separator. */
 const SET_ASIDE_BASE = 0xe000;
 const SET_ASIDE_ANY = /[-]/;
 
-export function maskPhonesInText(s: string): string {
+export function maskPhonesInText(raw: string): string {
+  const s = raw.normalize("NFKC");
   const kept: string[] = [];
   // Text that already carries private-use characters is masked with nothing
   // set aside (a date in it may be masked too); never the other way round.

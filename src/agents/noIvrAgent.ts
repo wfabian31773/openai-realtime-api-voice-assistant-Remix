@@ -612,9 +612,15 @@ export const HANDOFF_NOT_PLACED_DIRECTIVE =
  * also covers a dial Twilio refused to create. A CHAIN_STARTED call has an
  * on_call_escalations row, so the Calls tab lists it from the chain's own
  * attempts. Telemetry only: it changes nothing said or routed.
+ *
+ * `providerCallCreated` (review of #520, round 7): the transfer layer marks
+ * its thrown error when Twilio created a call to the provider (an office call
+ * SID exists), so a FAILED whose provider answered and whose caller redirect
+ * then failed still reads true. FAILED with no provider call stays false.
  */
-export function dialWasPlaced(failure: string): boolean {
-  return failure === 'handoff_failed:NO_ANSWER'
+export function dialWasPlaced(failure: string, providerCallCreated = false): boolean {
+  return providerCallCreated
+    || failure === 'handoff_failed:NO_ANSWER'
     || failure === 'handoff_failed:DECLINED';
 }
 
@@ -3408,7 +3414,13 @@ PREREQUISITE: one quick ask for name and DOB; transfer even if unavailable. Clin
         const message = Object.prototype.hasOwnProperty.call(directives, failure)
           ? directives[failure]
           : HANDOFF_ERROR_DIRECTIVE;
-        return { success: false, handoffFailed: true, dialAttempted: dialWasPlaced(failure), message };
+        // The transfer layer's error says whether a provider call was created
+        // (warmTransfer.ts handoffFailure); read without importing the runtime.
+        const providerCallCreated = Boolean(
+          handoffError && typeof handoffError === 'object'
+            && (handoffError as { providerCallCreated?: unknown }).providerCallCreated === true,
+        );
+        return { success: false, handoffFailed: true, dialAttempted: dialWasPlaced(failure, providerCallCreated), message };
       }
     },
   });

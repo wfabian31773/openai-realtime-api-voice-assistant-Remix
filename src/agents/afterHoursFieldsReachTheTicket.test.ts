@@ -12,6 +12,7 @@
  */
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { LiveTool } from '../runtime/agentBinding';
+import { handoffFailure, providerCallWasCreated } from '../runtime/warmTransfer';
 
 vi.hoisted(() => {
   process.env.DATABASE_URL ||= 'postgresql://unused:unused@127.0.0.1:5432/unused';
@@ -888,6 +889,31 @@ describe('a failed on-call transfer (the 70166 shape)', () => {
         slug, r: { success: false, handoffFailed: true, dialAttempted: dialled },
       });
     }
+  });
+
+  // Review of #520, round 7: a provider call was created (an office call SID
+  // exists) even though the slug reads FAILED, as when the provider answered
+  // and redirecting the caller failed. The transfer layer's error says so.
+  it('records dialAttempted true whenever the transfer layer created a provider call', async () => {
+    const cases: Array<[string, string | undefined, boolean]> = [
+      ['handoff_failed:FAILED', 'CA00000000000000000000000000000001', true],
+      ['handoff_failed:FAILED', undefined, false],
+      ['handoff_failed:CHAIN_STARTED', 'CA00000000000000000000000000000002', true],
+      ['handoff_failed:CHAIN_STARTED', undefined, false],
+      ['handoff_failed:UNAVAILABLE', undefined, false],
+      ['handoff_failed:NO_ANSWER', 'CA00000000000000000000000000000003', true],
+    ];
+    for (const [slug, sid, dialled] of cases) {
+      const c = await call(NURSE, vi.fn(async () => { throw handoffFailure(slug, sid); }));
+      const r = await invoke(c.agent, 'escalate_to_human', PROVIDER);
+      expect({ slug, sid, r }).toMatchObject({ slug, sid, r: { success: false, handoffFailed: true, dialAttempted: dialled } });
+      // The spoken directive is unchanged by the flag.
+      const plain = await call(NURSE, vi.fn(async () => { throw new Error(slug); }));
+      expect(r.message).toBe((await invoke(plain.agent, 'escalate_to_human', PROVIDER)).message);
+    }
+    expect(providerCallWasCreated(handoffFailure('handoff_failed:FAILED', 'CA1'))).toBe(true);
+    expect(providerCallWasCreated(handoffFailure('handoff_failed:FAILED', null))).toBe(false);
+    expect(providerCallWasCreated(new Error('handoff_failed:FAILED'))).toBe(false);
   });
 
   it.each(['on-call leg failed', 'handoff_failed:FAILED', 'handoff_failed:DECLINED'])(

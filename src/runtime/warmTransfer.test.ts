@@ -6,6 +6,7 @@ import {
   MAX_BRIEFING_CHARS,
   OFFICE_DIAL_TIMEOUT_SECONDS,
   performWarmTransfer,
+  providerCallWasCreated,
   type TransferTwilioOps,
   type WarmTransferDeps,
 } from "./warmTransfer";
@@ -349,6 +350,23 @@ describe("the callback the agent factories receive", () => {
     );
     expect(err?.message).toBe("handoff_failed:FAILED");
     expect(err?.message).not.toMatch(/21215|not authorized/);
+    // No provider call was created, so the error says so (review of #520, round 7).
+    expect(providerCallWasCreated(err)).toBe(false);
+  });
+
+  it("marks a FAILED whose provider call was created (the caller redirect failed after an accept)", async () => {
+    const cb = handoffCallbackFor(() => request, {
+      ...deps({
+        twilio: fakeTwilio({
+          redirectCallerToConference: async () => {
+            throw new Error("call already completed");
+          },
+        }).ops,
+      }),
+    });
+    const err = await cb().then(() => null, (e: Error) => e);
+    expect(err?.message).toBe("handoff_failed:FAILED");
+    expect(providerCallWasCreated(err)).toBe(true);
   });
 
   it("reads the request at call time, so a late-resolved destination is used", async () => {

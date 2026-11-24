@@ -344,7 +344,23 @@ export function handoffCallbackFor(
   return async () => {
     const outcome = await performWarmTransfer(request(), deps);
     if (!outcome.ok) {
-      throw new Error(`handoff_failed:${outcome.status}`);
+      throw handoffFailure(`handoff_failed:${outcome.status}`, outcome.officeCallSid);
     }
   };
+}
+
+/**
+ * The error a failed handoff throws: the fixed slug as its message (what the
+ * model is told, unchanged), plus `providerCallCreated`, true when Twilio
+ * created a call to the provider (an office call SID exists) whatever the
+ * slug says. Telemetry only (review of #520, round 7): a FAILED after the
+ * provider answered, a caller redirect that failed, still rang someone.
+ */
+export function handoffFailure(slug: string, officeCallSid?: string | null): Error & { providerCallCreated: boolean } {
+  return Object.assign(new Error(slug), { providerCallCreated: Boolean(officeCallSid) });
+}
+
+/** Whether a thrown handoff failure says a provider call was created. */
+export function providerCallWasCreated(err: unknown): boolean {
+  return Boolean(err && typeof err === "object" && (err as { providerCallCreated?: unknown }).providerCallCreated === true);
 }

@@ -32,7 +32,7 @@ import {
   type RuntimeTransferOutcome,
   type TransferAttemptId,
 } from "./transferOutcomeLog";
-import { ACCEPT_WINDOW_MS, conferenceNameFor, performWarmTransfer } from "./warmTransfer";
+import { ACCEPT_WINDOW_MS, conferenceNameFor, handoffFailure, performWarmTransfer } from "./warmTransfer";
 import { performBlindTransfer } from "./blindTransfer";
 import { defaultUrgentTransferAlerts, type UrgentTransferAlerts } from "./urgentTransferAlerts";
 import { URGENT_TRANSFER_NOT_ANSWERED, buildUrgentTransferSms, urgentAlertTime } from "../services/urgentTransferAlert";
@@ -1417,7 +1417,9 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
           // its own slug and its own words (v268).
           // A chain this attempt started is still paging even though the
           // in-call dial was not taken: its own slug and words too (v268).
-          throw new Error(
+          // providerCallCreated rides on the error (telemetry only): a call
+          // to the provider was created whenever the outcome names its leg.
+          throw handoffFailure(
             outcome.reason === ON_CALL_CHAIN_RUNNING
               ? "handoff_failed:CHAIN_RUNNING"
               : outcome.reason === ON_CALL_CHAIN_PENDING
@@ -1425,6 +1427,7 @@ export function createRuntimeTransfer(options: RuntimeTransferOptions): RuntimeT
                 : chainCarriesOn
                 ? HANDOFF_CHAIN_STARTED
                 : `handoff_failed:${outcome.status}`,
+            outcome.officeCallSid,
           );
         }
       };
