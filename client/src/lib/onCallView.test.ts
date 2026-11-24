@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { apiError, chainStatusVariant, countdown, finalFallbackText, fmtPacific, fmtSeconds, fmtWeek, pacificMidnightIso, pacificNextMidnightIso, ROLE_LABELS, sectionBadge, toPacificInput } from './onCallView'
+import { acceptExtendPreview, apiError, chainStatusVariant, countdown, editCover, extendPreviewReady, finalFallbackText, fmtPacific, fmtSeconds, fmtWeek, pacificMidnightIso, pacificNextMidnightIso, ROLE_LABELS, sectionBadge, toPacificInput } from './onCallView'
 
 describe('on-call page helpers', () => {
   it('shows times in Pacific and says so', () => {
@@ -72,6 +72,40 @@ describe('on-call page helpers', () => {
       expect(pacificNextMidnightIso('')).toBeNull()
       expect(pacificMidnightIso('2026-13-01')).toBeNull()
       expect(pacificMidnightIso('12/04/2026')).toBeNull()
+    })
+  })
+
+  describe('editCover', () => {
+    const confirmed = { startsAt: '2026-12-04T17:00', endsAt: '2026-12-05T08:00', providerId: 3 as number | '', confirmOverlap: true }
+
+    it('withdraws a confirmed overlap and the warning when the start, end or provider changes', () => {
+      for (const patch of [{ startsAt: '2026-12-04T18:00' }, { endsAt: '2026-12-06T08:00' }, { providerId: 4 }]) {
+        const r = editCover(confirmed, patch)
+        expect(r.cover.confirmOverlap).toBe(false)
+        expect(r.clearWarning).toBe(true)
+        expect(r.cover).toMatchObject(patch)
+      }
+    })
+
+    it('keeps the confirmation when nothing that decides the conflict changed', () => {
+      expect(editCover(confirmed, { startsAt: confirmed.startsAt })).toEqual({ cover: confirmed, clearWarning: false })
+      expect(editCover({ ...confirmed, confirmOverlap: false }, { confirmOverlap: true })).toEqual({ cover: confirmed, clearWarning: false })
+    })
+  })
+
+  describe('extend preview', () => {
+    const p8 = { count: 8, weeks: [{ week: '2026-12-01', providerName: 'A' }], refusal: null }
+
+    it('drops a preview answering an earlier count', () => {
+      expect(acceptExtendPreview(12, p8)).toBe(false)
+      expect(acceptExtendPreview(8, p8)).toBe(true)
+    })
+
+    it('allows adding weeks only when the preview for the current count is in and not refused', () => {
+      expect(extendPreviewReady(null, 8)).toBe(false)
+      expect(extendPreviewReady(p8, 12)).toBe(false)
+      expect(extendPreviewReady({ ...p8, refusal: 'Dr. X has no phone.' }, 8)).toBe(false)
+      expect(extendPreviewReady(p8, 8)).toBe(true)
     })
   })
 })

@@ -61,6 +61,8 @@ export function ReasonDialog(props: {
   confirmLabel?: string
   destructive?: boolean
   children?: React.ReactNode
+  /** Keeps the confirm button disabled (for example, while a preview is not ready). */
+  confirmDisabled?: boolean
   /** Throw to show the error; resolve to close. */
   onConfirm: (reason: string) => Promise<unknown>
 }) {
@@ -74,6 +76,7 @@ export function ReasonDialog(props: {
     }
   }, [props.open])
   const submit = async () => {
+    if (props.confirmDisabled) return
     if (!reason.trim()) return setError('A reason is required.')
     setBusy(true)
     setError(null)
@@ -110,7 +113,7 @@ export function ReasonDialog(props: {
           <Button variant="outline" onClick={() => props.onOpenChange(false)} disabled={busy}>
             Cancel
           </Button>
-          <Button variant={props.destructive ? 'destructive' : 'default'} onClick={submit} disabled={busy}>
+          <Button variant={props.destructive ? 'destructive' : 'default'} onClick={submit} disabled={busy || props.confirmDisabled}>
             {busy ? 'Saving…' : props.confirmLabel ?? 'Save'}
           </Button>
         </DialogFooter>

@@ -7,7 +7,7 @@ import { Label } from '@/components/ui/label'
 import { Select } from '@/components/ui/select'
 import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from '@/components/ui/table'
 import apiClient from '@/lib/apiClient'
-import { apiError, fmtPacific, fmtWeek, toPacificInput } from '@/lib/onCallView'
+import { acceptExtendPreview, apiError, editCover, extendPreviewReady, fmtPacific, fmtWeek, toPacificInput, type CoverDraft, type ExtendPreview } from '@/lib/onCallView'
 import { Banner, ProviderSelect, ReasonDialog, useOnCall, useOnCallWrite, type PublicProvider } from './shared'
 import { AlertTriangle, CalendarPlus, Repeat, ShieldPlus } from 'lucide-react'
 
@@ -57,9 +57,12 @@ export function ScheduleTab() {
   const [swap, setSwap] = React.useState<{ a: string; b: string }>({ a: '', b: '' })
   const [extendOpen, setExtendOpen] = React.useState(false)
   const [extendWeeks, setExtendWeeks] = React.useState(8)
-  const [extendPreview, setExtendPreview] = React.useState<{ weeks: Array<{ week: string; providerName: string | null }>; refusal: string | null } | null>(null)
+  // The count currently entered, read when a preview answers, so a slower answer
+  // for an earlier count is dropped instead of shown beside the current count.
+  const extendWeeksRef = React.useRef(extendWeeks)
+  const [extendPreview, setExtendPreview] = React.useState<ExtendPreview | null>(null)
   const [coverOpen, setCoverOpen] = React.useState(false)
-  const [cover, setCover] = React.useState<{ startsAt: string; endsAt: string; providerId: number | ''; confirmOverlap: boolean }>({
+  const [cover, setCover] = React.useState<CoverDraft>({
     startsAt: toPacificInput(new Date()),
     endsAt: toPacificInput(new Date(Date.now() + 15 * 3_600_000)),
     providerId: '',
@@ -75,12 +78,20 @@ export function ScheduleTab() {
   const scheduled = data.weeks.filter((w) => !w.gap)
 
   const loadExtendPreview = async (n: number) => {
+    let preview: ExtendPreview
     try {
       const { data: d } = await apiClient.post('/on-call/schedule/extend', { weeks: n, dryRun: true })
-      setExtendPreview({ weeks: d.weeks ?? [], refusal: d.refusal ?? null })
+      preview = { count: n, weeks: d.weeks ?? [], refusal: d.refusal ?? null }
     } catch (e) {
-      setExtendPreview({ weeks: [], refusal: apiError(e) })
+      preview = { count: n, weeks: [], refusal: apiError(e) }
     }
+    if (acceptExtendPreview(extendWeeksRef.current, preview)) setExtendPreview(preview)
+  }
+
+  const changeCover = (patch: Partial<CoverDraft>) => {
+    const { cover: next, clearWarning } = editCover(cover, patch)
+    setCover(next)
+    if (clearWarning) setOverlap(null)
   }
 
   return (
@@ -101,7 +112,7 @@ export function ScheduleTab() {
         <Button variant="outline" onClick={() => { setCover((c) => ({ ...c, confirmOverlap: false })); setOverlap(null); setCoverOpen(true) }}>
           <ShieldPlus className="mr-1 h-4 w-4" /> Cover part of a week
         </Button>
-        <Button variant="outline" onClick={() => { setExtendOpen(true); loadExtendPreview(extendWeeks) }}>
+        <Button variant="outline" onClick={() => { setExtendPreview(null); setExtendOpen(true); loadExtendPreview(extendWeeks) }}>
           <CalendarPlus className="mr-1 h-4 w-4" /> Extend schedule
         </Button>
       </div>
@@ -260,6 +271,7 @@ export function ScheduleTab() {
         title="Extend the schedule"
         description="Adds weeks after the last one, continuing the rotation order among active providers (the same as scripts/on-call-change.ts extend). Refused, with nothing added, if any provider who would get a week has no dialable phone."
         confirmLabel="Add these weeks"
+        confirmDisabled={!extendPreviewReady(extendPreview, extendWeeks)}
         onConfirm={(reason) => write.mutateAsync({ method: 'post', path: '/schedule/extend', body: { weeks: extendWeeks, reason } })}
       >
         <Label>Weeks to add</Label>
@@ -270,6 +282,7 @@ export function ScheduleTab() {
           value={extendWeeks}
           onChange={(e) => {
             const n = Number(e.target.value)
+            extendWeeksRef.current = n
             setExtendWeeks(n)
             loadExtendPreview(n)
           }}
@@ -311,15 +324,15 @@ export function ScheduleTab() {
         <div className="grid gap-2 sm:grid-cols-2">
           <div>
             <Label>Starts (Pacific)</Label>
-            <Input type="datetime-local" value={cover.startsAt} onChange={(e) => setCover((c) => ({ ...c, startsAt: e.target.value }))} />
+            <Input type="datetime-local" value={cover.startsAt} onChange={(e) => changeCover({ startsAt: e.target.value })} />
           </div>
           <div>
             <Label>Ends (Pacific)</Label>
-            <Input type="datetime-local" value={cover.endsAt} onChange={(e) => setCover((c) => ({ ...c, endsAt: e.target.value }))} />
+            <Input type="datetime-local" value={cover.endsAt} onChange={(e) => changeCover({ endsAt: e.target.value })} />
           </div>
         </div>
         <Label>Covering provider</Label>
-        <ProviderSelect providers={data.providers} value={cover.providerId} onChange={(id) => setCover((c) => ({ ...c, providerId: id }))} />
+        <ProviderSelect providers={data.providers} value={cover.providerId} onChange={(id) => changeCover({ providerId: id })} />
         {overlap && (
           <label className="flex items-center gap-2 text-sm">
             <input type="checkbox" checked={cover.confirmOverlap} onChange={(e) => setCover((c) => ({ ...c, confirmOverlap: e.target.checked }))} />

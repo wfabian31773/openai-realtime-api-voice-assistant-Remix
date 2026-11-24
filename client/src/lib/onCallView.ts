@@ -175,6 +175,43 @@ export function finalFallbackText(c: { finalFallbackLast4?: string | null; final
   return 'not configured: an exhausted chain only texts the urgent notification number'
 }
 
+export interface CoverDraft {
+  startsAt: string
+  endsAt: string
+  providerId: number | ''
+  confirmOverlap: boolean
+}
+
+/**
+ * A cover-dialog edit. Changing the window or the provider withdraws a
+ * confirmed overlap, because the conflict that was confirmed may no longer be
+ * the one the next save would supersede; `clearWarning` says the shown overlap
+ * warning is stale too.
+ */
+export function editCover(cover: CoverDraft, patch: Partial<CoverDraft>): { cover: CoverDraft; clearWarning: boolean } {
+  const changed = (['startsAt', 'endsAt', 'providerId'] as const).some((k) => k in patch && patch[k] !== cover[k])
+  const next = { ...cover, ...patch }
+  if (changed) next.confirmOverlap = false
+  return { cover: next, clearWarning: changed }
+}
+
+export interface ExtendPreview {
+  /** The week count this preview was requested for. */
+  count: number
+  weeks: Array<{ week: string; providerName: string | null }>
+  refusal: string | null
+}
+
+/** A preview response is kept only if it answers the count currently entered. */
+export function acceptExtendPreview(currentCount: number, preview: ExtendPreview): boolean {
+  return preview.count === currentCount
+}
+
+/** "Add these weeks" is allowed only once the preview for the current count is in and was not refused. */
+export function extendPreviewReady(preview: ExtendPreview | null, currentCount: number): boolean {
+  return preview !== null && preview.count === currentCount && preview.refusal === null
+}
+
 /** The tab a section of the per-call view says it came from, wired or not. */
 export function sectionBadge(s: { wired: boolean; present: boolean }): { label: string; variant: BadgeVariant } {
   if (!s.wired) return { label: 'placeholder', variant: 'outline' }
