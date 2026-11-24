@@ -64,6 +64,9 @@ interface CallDetail {
   timeline: TimelineItem[]
   sections: Record<string, { wired: boolean; present: boolean }>
   notCapturedYet: string[]
+  /** Set by the server when it answers without a detail (an error body). */
+  message?: string
+  error?: string
 }
 
 const SECTION_LABELS: Record<string, string> = {
