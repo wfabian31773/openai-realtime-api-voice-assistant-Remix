@@ -254,7 +254,7 @@ export function onCallAt(at: Date, data: RotationData): OnCallAnswer {
 
 // ── The chain ───────────────────────────────────────────────────────────────
 
-export type ChainRole = "on_call" | "surgeon" | "region_director" | "final";
+export type ChainRole = "on_call" | "surgeon" | "region_director" | "final" | "operations_fallback";
 
 export interface ChainLevel {
   role: ChainRole;
@@ -274,13 +274,21 @@ const ROLE_WORDS: Record<ChainRole, string> = {
   surgeon: "the patient's surgeon",
   region_director: "the region's medical director",
   final: "the final escalation director",
+  operations_fallback: "Wayne",
 };
+
+/** The operations fallback level's name; it has no provider row. */
+export const OPERATIONS_FALLBACK_NAME = "Operations fallback";
+/** The fallback level carries no on_call_providers id (stored as NULL). */
+export const OPERATIONS_FALLBACK_PROVIDER_ID = 0;
 
 /**
  * A level as staff read it on a ticket: who and in what role. Never the
  * number, because the number a level rings is a provider's own phone.
  */
 export function levelLabel(level: Pick<ChainLevel, "role" | "name">): string {
+  // "Operations fallback (Wayne)", whatever name the stored plan carries.
+  if (level.role === "operations_fallback") return `${OPERATIONS_FALLBACK_NAME} (${ROLE_WORDS.operations_fallback})`;
   return `${level.name} (${ROLE_WORDS[level.role]})`;
 }
 
@@ -332,4 +340,26 @@ export function planChain(
   else if (!final.active) notes.push("final_director_inactive");
   else push("final", final);
   return { levels, notes };
+}
+
+/**
+ * The operations fallback level (Wayne), appended after the final director
+ * when a number is configured (ON_CALL_FINAL_FALLBACK_NUMBER), for the regular
+ * and the post-op chain alike. Left off when no number is set; when the plan
+ * has no level at all (that call keeps today's fixed-number path); and when
+ * the number is one the plan already rings, so no number is rung twice.
+ * `phone` is the live number; test mode swaps it with the other levels'.
+ */
+export function withOperationsFallback(plan: ChainPlan, phone: string | undefined): ChainPlan {
+  if (!phone || plan.levels.length === 0) return plan;
+  if (plan.levels.some((l) => l.phone === phone)) {
+    return { ...plan, notes: [...plan.notes, "operations_fallback_already_in_chain"] };
+  }
+  return {
+    ...plan,
+    levels: [
+      ...plan.levels,
+      { role: "operations_fallback", providerId: OPERATIONS_FALLBACK_PROVIDER_ID, name: OPERATIONS_FALLBACK_NAME, phone },
+    ],
+  };
 }

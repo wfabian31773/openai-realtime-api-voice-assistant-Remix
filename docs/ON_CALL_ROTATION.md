@@ -257,7 +257,8 @@ ring comes from the rotation. With the rotation off, an unset
 | 0:00 | text + in-call warm transfer to the on-call provider (or the surgeon) |
 | after it rings out, at least 1:00 later, no later than 4:00 | second call + reminder text |
 | next | region director: text + call, then a second call + reminder text |
-| last | Dr. Logan: text + call, then a second call + reminder text |
+| next | Dr. Logan: text + call, then a second call + reminder text |
+| last, only when `ON_CALL_FINAL_FALLBACK_NUMBER` is set | the operations fallback (Wayne): text + call, then a second call + reminder text |
 | after the last call | the escalation is marked `exhausted` |
 
 A level with no dialable number on file (a provider, surgeon or director whose
@@ -335,6 +336,7 @@ sets them.
 | `ON_CALL_ROTATION_MODE` | `off` (default), `test`, `live` | `off`: today's behaviour. `test`: the whole chain runs, but every call and text goes to a test number. `live`: the rotation's own numbers. |
 | `ON_CALL_TEST_PHONES` | comma list of phone numbers | Test mode only, and required there. The levels that will ring take the numbers in order: the first level rung rings the first number, the next the second, the next the third; a shorter list reuses its last number. A level with no number of its own is skipped, as it would be live, and takes no test number. |
 | `ON_CALL_CALLER_ID` | a phone number | The number provider calls and texts come from. Defaults to `TWILIO_PHONE_NUMBER` when unset or blank. **Refused if it is the Wayne Operator Line** (`OPERATOR_LINE_FROM_NUMBER`), and refused if it is set but is not a phone number. |
+| `ON_CALL_FINAL_FALLBACK_NUMBER` | a phone number, or unset | The operations fallback (Wayne). When set, one more level is rung after the final director, on the regular and the post-op chain alike, before the chain closes `exhausted`: the details text, the call, then a second call and a reminder text, on the same timing as every level (`role` = `operations_fallback` in the attempt log, no provider id; labelled "Operations fallback (Wayne)" on texts and the admin page). In test mode it rings the next test number. A number the chain already rings is not rung twice (`operations_fallback_already_in_chain` in the plan's notes). A plan with no level at all still takes today's fixed-number path. **Unset, or not a phone number, or the rotation's own caller ID: no extra level**, and an exhausted chain only texts `URGENT_NOTIFICATION_NUMBER`, exactly as before. A bad value never turns the rotation off; `/voice/health` and the admin page say why it was not used. After the fallback is not taken either, `URGENT_NOTIFICATION_NUMBER` still gets the "nobody took it" text. |
 | `ON_CALL_POST_OP_REQUIRE_KEPT` | `1` or unset | Unset: a booked surgery in the last 7 days goes to the surgeon even if NextGen has not marked it kept yet (the note on the text says so). `1`: only a surgery marked kept goes to the surgeon. See section 8. |
 
 If any setting cannot be honoured (an unknown mode, no caller ID, a caller ID
@@ -357,8 +359,13 @@ The boot log prints one of:
 `/voice/health` carries an `onCall` block:
 
 ```json
-"onCall": { "mode": "test", "testPhones": 3, "requireKept": false, "running": true }
+"onCall": { "mode": "test", "testPhones": 3, "requireKept": false,
+            "finalFallback": { "configured": true, "last4": "1234" }, "running": true }
 ```
+
+`finalFallback` is `{ "configured": false }` when `ON_CALL_FINAL_FALLBACK_NUMBER`
+is unset (with a `problem` when it is set and not usable); only the last four
+digits are ever shown.
 
 `running: false` with a `disabledBecause` or `blockedBy` says why it is off.
 Phone numbers are never shown there, only how many test numbers are set.
@@ -547,6 +554,8 @@ seen; every provider call and text goes to the test numbers.
    - then the second test phone (the region director's level), text, call,
      second call, reminder.
    - then the third (Dr. Logan's level).
+   - with `ON_CALL_FINAL_FALLBACK_NUMBER` set, then the fourth (the operations
+     fallback's level), so give four test numbers to hear it on its own phone.
 
    The test phones go to the levels that ring, in order. A level with no
    number of its own (a director not yet entered) is skipped, as it would be
@@ -573,7 +582,9 @@ FROM on_call_escalations
 WHERE call_sid = '<CallSid>';
 ```
 
-`role` is `on_call`, `surgeon`, `region_director` or `final`. `kind` is
+`role` is `on_call`, `surgeon`, `region_director`, `final` or
+`operations_fallback` (Wayne, after the final director, when
+`ON_CALL_FINAL_FALLBACK_NUMBER` is set; its `provider_id` is NULL). `kind` is
 `warm_transfer`, `call`, `sms` or `nudge_sms`. `outcome` is `accepted`,
 `no_answer` (it rang out), `declined` (the phone was picked up, by a person
 or a voicemail, and no key was pressed, including a hang-up during the
@@ -699,6 +710,22 @@ by the switched-off deployment rather than left open (review of #514, round
 7. **A closed holiday on a Tuesday.** Its daytime hours go to the outgoing
    week's provider, because the week turns over at 5:00 PM. If the incoming
    provider should take those hours, that is an override for the day.
+
+### Closed
+
+- **A final fallback to Wayne after the final director. CLOSED (operator,
+  2026-11-24): call, via `ON_CALL_FINAL_FALLBACK_NUMBER`.** The operations
+  fallback level is rung after the final director with the same cadence as
+  every level, and the chain closes `exhausted` (and texts
+  `URGENT_NOTIFICATION_NUMBER`) only after it is not taken either. Unset, the
+  chain is as it was. See section 2.
+- **`extend` and a provider with no phone. CLOSED (operator, 2026-11-24):
+  refuse.** See section 9.
+- **CLI changes in the audit log. CLOSED (operator, 2026-11-24): audited.**
+  See section 4.
+- **Full phone numbers in the audit log. CLOSED (operator, 2026-11-24): kept
+  as they are.** The audit log is admin-only staff data; the Audit tab shows
+  phones as their last four digits.
 
 ---
 

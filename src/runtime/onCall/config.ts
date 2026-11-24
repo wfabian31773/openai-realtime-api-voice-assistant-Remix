@@ -20,6 +20,18 @@
  *                            is the Wayne Operator Line (OPERATOR_LINE_FROM_
  *                            NUMBER): "Never use the Wayne Operator Line
  *                            number as caller ID for provider calls."
+ *   ON_CALL_FINAL_FALLBACK_NUMBER
+ *                            E.164 or 10 digits. When set, one more level is
+ *                            rung after the final director, before the chain
+ *                            closes exhausted: the operations fallback (Wayne),
+ *                            with the same text, call, retry call and reminder
+ *                            text as every level (operator, 2026-11-24: "call,
+ *                            via ON_CALL_FINAL_FALLBACK_NUMBER"). Unset, or not
+ *                            a phone number, and nothing changes: no extra
+ *                            level, and an exhausted chain only texts
+ *                            URGENT_NOTIFICATION_NUMBER, as before. In test
+ *                            mode the level rings a test number like every
+ *                            other level.
  *   ON_CALL_POST_OP_REQUIRE_KEPT=1
  *                            a booked surgery not yet marked kept in NextGen
  *                            routes to on-call instead of the surgeon.
@@ -42,6 +54,14 @@ export interface OnCallConfig {
   /** E.164, never the operator line. Empty when mode is off. */
   callerId: string;
   requireKept: boolean;
+  /**
+   * E.164: the operations fallback level's number, rung after the final
+   * director. Absent when ON_CALL_FINAL_FALLBACK_NUMBER is unset or unusable,
+   * which leaves the chain exactly as it was.
+   */
+  finalFallbackPhone?: string;
+  /** Why ON_CALL_FINAL_FALLBACK_NUMBER was set and not used, when it was. */
+  finalFallbackProblem?: string;
   /** Why mode was forced off, when it was. */
   disabledBecause?: string;
 }
@@ -84,7 +104,9 @@ export function readOnCallConfig(env: Env = process.env): OnCallConfig {
   if (!caller.ok) return off(caller.why);
   const callerId = caller.callerId;
 
-  if (asked === "live") return { mode: "live", testPhones: [], callerId, requireKept };
+  const fallback = finalFallbackFrom(env, callerId);
+
+  if (asked === "live") return { mode: "live", testPhones: [], callerId, requireKept, ...fallback };
 
   const raw = (env.ON_CALL_TEST_PHONES ?? "").split(",").map((s) => s.trim()).filter(Boolean);
   const testPhones = raw.map(e164);
@@ -94,7 +116,27 @@ export function readOnCallConfig(env: Env = process.env): OnCallConfig {
   // the caller ID would fail every provider call and read as nobody answering
   // (review of #514, round 14).
   if (testPhones.includes(callerId)) return off("ON_CALL_TEST_PHONES holds the rotation's own caller ID");
-  return { mode: "test", testPhones: testPhones as string[], callerId, requireKept };
+  return { mode: "test", testPhones: testPhones as string[], callerId, requireKept, ...fallback };
+}
+
+/**
+ * The operations fallback number, or why it was set and not used. A bad value
+ * never turns the rotation off: it only leaves the fallback level out, which
+ * is the chain as it was before the lever existed.
+ */
+function finalFallbackFrom(
+  env: Env,
+  callerId: string,
+): { finalFallbackPhone?: string; finalFallbackProblem?: string } {
+  const raw = (env.ON_CALL_FINAL_FALLBACK_NUMBER ?? "").trim();
+  if (!raw) return {};
+  const phone = e164(raw);
+  if (!phone) return { finalFallbackProblem: "ON_CALL_FINAL_FALLBACK_NUMBER is not a phone number" };
+  // Twilio refuses a call from a number to itself (review of #514, round 14).
+  if (phone === callerId) {
+    return { finalFallbackProblem: "ON_CALL_FINAL_FALLBACK_NUMBER is the rotation's own caller ID" };
+  }
+  return { finalFallbackPhone: phone };
 }
 
 /**
@@ -127,6 +169,16 @@ export function rotationCallerId(env: Env = process.env): string | null {
   return caller.ok ? caller.callerId : null;
 }
 
+/**
+ * ON_CALL_FINAL_FALLBACK_NUMBER read whatever the mode, for the admin page's
+ * chain preview: the number the fallback level would ring, or why it would
+ * not be used.
+ */
+export function readFinalFallback(env: Env = process.env): { finalFallbackPhone?: string; finalFallbackProblem?: string } {
+  const caller = callerIdFrom(env);
+  return finalFallbackFrom(env, caller.ok ? caller.callerId : "");
+}
+
 /** The number level `index` rings in test mode. */
 export function testPhoneFor(config: Pick<OnCallConfig, "testPhones">, index: number): string {
   const list = config.testPhones;
@@ -138,12 +190,18 @@ export function onCallHealth(config: OnCallConfig): {
   mode: OnCallRotationMode;
   testPhones: number;
   requireKept: boolean;
+  finalFallback: { configured: boolean; last4?: string; problem?: string };
   disabledBecause?: string;
 } {
   return {
     mode: config.mode,
     testPhones: config.testPhones.length,
     requireKept: config.requireKept,
+    finalFallback: {
+      configured: Boolean(config.finalFallbackPhone),
+      ...(config.finalFallbackPhone ? { last4: config.finalFallbackPhone.slice(-4) } : {}),
+      ...(config.finalFallbackProblem ? { problem: config.finalFallbackProblem } : {}),
+    },
     ...(config.disabledBecause ? { disabledBecause: config.disabledBecause } : {}),
   };
 }

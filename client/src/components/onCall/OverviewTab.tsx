@@ -22,6 +22,7 @@ export interface Answer {
   chain: {
     levels: Array<{ index: number; role: string; providerId: number; name: string; region: string | null; phoneLast4: string | null; dialable: boolean }>
     notes: string[]
+    operationsFallbackConfigured?: boolean
   }
 }
 
@@ -36,6 +37,7 @@ const NOTE_TEXT: Record<string, string> = {
   no_final_director: 'No FINAL director is set.',
   final_director_inactive: 'The FINAL director is inactive.',
   no_first_level: 'Nobody to ring first.',
+  operations_fallback_already_in_chain: 'ON_CALL_FINAL_FALLBACK_NUMBER is a number the chain already rings, so it is not rung a second time.',
 }
 
 export function AnswerCard({ title, answer, highlight }: { title: string; answer: Answer; highlight?: boolean }) {
@@ -83,6 +85,12 @@ export function AnswerCard({ title, answer, highlight }: { title: string; answer
               </li>
             ))}
           </ol>
+          {!answer.chain.operationsFallbackConfigured && answer.chain.levels.length > 0 && (
+            <p className="mt-1 text-xs text-muted-foreground">
+              {ROLE_LABELS.operations_fallback}: not configured (ON_CALL_FINAL_FALLBACK_NUMBER unset). If nobody takes it, only the urgent
+              notification number is texted.
+            </p>
+          )}
           <p className="mt-1 text-xs text-muted-foreground">
             Each level: details text, then a call; a second call and a reminder text if not taken. A post-op patient (surgery 0–7
             days ago) goes to their surgeon first instead.

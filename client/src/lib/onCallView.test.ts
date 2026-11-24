@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { apiError, chainStatusVariant, countdown, fmtPacific, fmtSeconds, fmtWeek, sectionBadge, toPacificInput } from './onCallView'
+import { apiError, chainStatusVariant, countdown, finalFallbackText, fmtPacific, fmtSeconds, fmtWeek, ROLE_LABELS, sectionBadge, toPacificInput } from './onCallView'
 
 describe('on-call page helpers', () => {
   it('shows times in Pacific and says so', () => {
@@ -29,5 +29,11 @@ describe('on-call page helpers', () => {
     expect(sectionBadge({ wired: false, present: false }).label).toBe('placeholder')
     expect(sectionBadge({ wired: true, present: false }).label).toMatch(/none on this call/)
     expect(chainStatusVariant('exhausted')).toBe('destructive')
+  })
+  it('states the operations fallback: last-4, why not, or not configured', () => {
+    expect(finalFallbackText({ finalFallbackLast4: '…7777' })).toBe('Operations fallback (Wayne) …7777, rung after the final director')
+    expect(finalFallbackText({ finalFallbackLast4: null, finalFallbackProblem: 'not a phone number' })).toBe('not configured: not a phone number')
+    expect(finalFallbackText({})).toMatch(/^not configured/)
+    expect(ROLE_LABELS.operations_fallback).toBe('Operations fallback (Wayne)')
   })
 })

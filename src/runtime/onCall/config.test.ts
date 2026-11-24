@@ -153,7 +153,7 @@ describe("test numbers and health", () => {
   it("never puts a phone number on /voice/health", () => {
     const c = readOnCallConfig({ ...BASE, ON_CALL_ROTATION_MODE: "test", ON_CALL_TEST_PHONES: "+15550100001" });
     const h = onCallHealth(c);
-    expect(h).toEqual({ mode: "test", testPhones: 1, requireKept: false });
+    expect(h).toEqual({ mode: "test", testPhones: 1, requireKept: false, finalFallback: { configured: false } });
     expect(JSON.stringify(h)).not.toMatch(/555/);
   });
 });

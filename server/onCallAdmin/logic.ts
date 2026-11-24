@@ -347,6 +347,7 @@ const ROLE_WORDS: Record<string, string> = {
   surgeon: "surgeon",
   region_director: "region director",
   final: "final director",
+  operations_fallback: "operations fallback, Wayne",
 };
 
 const KIND_WORDS: Record<string, string> = {

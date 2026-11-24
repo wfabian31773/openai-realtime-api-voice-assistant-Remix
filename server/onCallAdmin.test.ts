@@ -231,6 +231,37 @@ describe("who is on call", () => {
     expect(r.body.preview.chain.levels.map((l: any) => l.role)).toEqual(["final"]);
     expect((await h.request("GET", `${ON_CALL_API}/preview?at=soon`)).status).toBe(400);
   });
+
+  it("says the operations fallback is not configured when ON_CALL_FINAL_FALLBACK_NUMBER is unset", async () => {
+    const h = boot();
+    const r = await h.request("GET", `${ON_CALL_API}/now`);
+    expect(r.body.now.chain.operationsFallbackConfigured).toBe(false);
+    expect(r.body.now.chain.levels.map((l: any) => l.role)).not.toContain("operations_fallback");
+    const s = await h.request("GET", `${ON_CALL_API}/status`);
+    expect(s.body.config.finalFallbackLast4).toBeNull();
+    expect(s.body.config.finalFallback).toEqual({ configured: false });
+    const e = await h.request("GET", `${ON_CALL_API}/escalation`);
+    expect(e.body.environment.values.ON_CALL_FINAL_FALLBACK_NUMBER).toMatch(/^not configured/);
+  });
+
+  it("shows the operations fallback (Wayne) after the final director when configured, as last-4 only", async () => {
+    const h = boot({}, fixture(), { TWILIO_PHONE_NUMBER: "+15550000001", ON_CALL_FINAL_FALLBACK_NUMBER: "+15550177777" });
+    const r = await h.request("GET", `${ON_CALL_API}/now`);
+    expect(r.body.now.chain.levels.map((l: any) => [l.role, l.phoneLast4])).toEqual([
+      ["on_call", "…0101"],
+      ["region_director", "…0110"],
+      ["final", "…0111"],
+      ["operations_fallback", "…7777"],
+    ]);
+    expect(r.body.now.chain.operationsFallbackConfigured).toBe(true);
+    const p = await h.request("GET", `${ON_CALL_API}/preview?at=2026-12-17T22:00`);
+    expect(p.body.preview.chain.levels.map((l: any) => l.role)).toEqual(["final", "operations_fallback"]);
+    const s = await h.request("GET", `${ON_CALL_API}/status`);
+    expect(s.body.config.finalFallbackLast4).toBe("…7777");
+    const e = await h.request("GET", `${ON_CALL_API}/escalation`);
+    expect(e.body.environment.values.ON_CALL_FINAL_FALLBACK_NUMBER).toMatch(/^…7777: operations fallback/);
+    for (const body of [r.body, s.body, e.body]) expect(JSON.stringify(body)).not.toContain("5550177777");
+  });
 });
 
 describe("changes", () => {

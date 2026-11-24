@@ -136,6 +136,18 @@ export const ROLE_LABELS: Record<string, string> = {
   surgeon: 'Surgeon',
   region_director: 'Region director',
   final: 'Final director',
+  operations_fallback: 'Operations fallback (Wayne)',
+}
+
+/**
+ * The operations fallback (Wayne) as the page states it: the last four digits
+ * when ON_CALL_FINAL_FALLBACK_NUMBER is set and usable, why not when it is set
+ * and unusable, and "not configured" otherwise.
+ */
+export function finalFallbackText(c: { finalFallbackLast4?: string | null; finalFallbackProblem?: string | null }): string {
+  if (c.finalFallbackLast4) return `Operations fallback (Wayne) ${c.finalFallbackLast4}, rung after the final director`
+  if (c.finalFallbackProblem) return `not configured: ${c.finalFallbackProblem}`
+  return 'not configured: an exhausted chain only texts the urgent notification number'
 }
 
 /** The tab a section of the per-call view says it came from, wired or not. */

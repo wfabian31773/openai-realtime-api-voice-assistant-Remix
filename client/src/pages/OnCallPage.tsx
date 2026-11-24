@@ -13,7 +13,7 @@
 import React from 'react'
 import { Card, CardContent } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
-import { countdown, fmtPacific } from '@/lib/onCallView'
+import { countdown, finalFallbackText, fmtPacific } from '@/lib/onCallView'
 import { Banner, useOnCall } from '@/components/onCall/shared'
 import { OverviewTab } from '@/components/onCall/OverviewTab'
 import { ScheduleTab } from '@/components/onCall/ScheduleTab'
@@ -37,6 +37,8 @@ interface Status {
     callerIdLast4: string | null
     urgentNotificationLast4: string | null
     fallbackNumberLast4: string | null
+    finalFallbackLast4?: string | null
+    finalFallbackProblem?: string | null
     transferMode: string
   }
   goLive: { at: string; pacific: string; msRemaining: number; passed: boolean }
@@ -110,6 +112,10 @@ export function OnCallPage() {
                 {s.config.requireKept ? 'yes' : 'no'} · {s.config.transferMode}
               </div>
               <div className="text-xs text-muted-foreground">as of {fmtPacific(s.now)}</div>
+            </div>
+            <div>
+              <div className="text-xs text-muted-foreground">Operations fallback after the final director (ON_CALL_FINAL_FALLBACK_NUMBER)</div>
+              <div>{finalFallbackText(s.config)}</div>
             </div>
           </CardContent>
         </Card>

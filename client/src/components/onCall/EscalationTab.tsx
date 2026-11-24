@@ -56,7 +56,8 @@ export function EscalationTab() {
           </CardTitle>
           <p className="text-xs text-muted-foreground">
             After the on-call provider (or surgeon), the chain rings that provider's region director, then the FINAL director. A region whose
-            director IS the final director goes straight to FINAL.
+            director IS the final director goes straight to FINAL. After FINAL, the operations fallback (Wayne) is called when
+            ON_CALL_FINAL_FALLBACK_NUMBER is set: {d.environment.values.ON_CALL_FINAL_FALLBACK_NUMBER ?? 'not configured'}.
           </p>
         </CardHeader>
         <CardContent className="p-0">

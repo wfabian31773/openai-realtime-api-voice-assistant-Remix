@@ -24,7 +24,7 @@
  * NOTHING HERE TOUCHES src/runtime/**, Twilio, or phone routing.
  */
 import type { Express, Request, RequestHandler, Response } from "express";
-import { readOnCallConfig, onCallHealth, rotationCallerId } from "../src/runtime/onCall/config";
+import { readOnCallConfig, onCallHealth, readFinalFallback, rotationCallerId } from "../src/runtime/onCall/config";
 import {
   activeOverride,
   addDays,
@@ -32,6 +32,7 @@ import {
   onCallAt,
   pacificMinute,
   planChain,
+  withOperationsFallback,
   regionKey,
   rotationWeekStart,
   type OnCallAnswer,
@@ -105,7 +106,7 @@ export const OPEN_DECISIONS = [
   "The fixed fallback number is HUMAN_AGENT_NUMBER (the old core used NO_IVR_HUMAN_AGENT_NUMBER for this line).",
   "A pickup with no key press is logged 'declined' and the chain carries on (voicemail and a provider who hung up look the same).",
   "A closed holiday on a Tuesday: its daytime hours go to the OUTGOING week's provider; use an override if the incoming provider should take them.",
-  "NOT BUILT: a final fallback to Wayne's own number. An exhausted chain only texts URGENT_NOTIFICATION_NUMBER.",
+  "CLOSED (operator, 2026-11-24): after the final director the chain calls the operations fallback (Wayne) at ON_CALL_FINAL_FALLBACK_NUMBER, with the same cadence as every level. Unset, an exhausted chain only texts URGENT_NOTIFICATION_NUMBER, as before.",
 ];
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -160,8 +161,10 @@ function auditSnapshot(p: AdminProvider | null | undefined) {
   return rest;
 }
 
-function describe(ans: OnCallAnswer, data: RotationData, at: Date) {
-  const plan = planChain(ans.provider ? { role: "on_call", provider: ans.provider } : null, data);
+function describe(ans: OnCallAnswer, data: RotationData, at: Date, fallbackPhone?: string) {
+  // The chain the runtime would plan, the operations fallback (Wayne) included
+  // when ON_CALL_FINAL_FALLBACK_NUMBER is set.
+  const plan = withOperationsFallback(planChain(ans.provider ? { role: "on_call", provider: ans.provider } : null, data), fallbackPhone);
   const byId = new Map(data.providers.map((p) => [p.id, p]));
   return {
     at: at.toISOString(),
@@ -180,6 +183,9 @@ function describe(ans: OnCallAnswer, data: RotationData, at: Date) {
         return { index: i, role: l.role, providerId: l.providerId, name: l.name, region: p?.region ?? null, phoneLast4: last4(l.phone), dialable: isDialable(l.phone) };
       }),
       notes: plan.notes,
+      // Whether ON_CALL_FINAL_FALLBACK_NUMBER is set, so the page can say "not
+      // configured" when the chain ends at the final director.
+      operationsFallbackConfigured: Boolean(fallbackPhone),
     },
   };
 }
@@ -298,6 +304,10 @@ export function mountOnCallAdmin(app: Express, deps: OnCallAdminDeps) {
         callerIdLast4: last4(cfg.callerId || rotationCallerId(env) || ""),
         urgentNotificationLast4: last4(env.URGENT_NOTIFICATION_NUMBER),
         fallbackNumberLast4: last4(env.HUMAN_AGENT_NUMBER),
+        // The operations fallback level (Wayne), read whatever the mode, so the
+        // page can say "not configured" or show the last four digits.
+        finalFallbackLast4: last4(readFinalFallback(env).finalFallbackPhone ?? ""),
+        finalFallbackProblem: readFinalFallback(env).finalFallbackProblem ?? null,
         transferMode: (env.RUNTIME_TRANSFER_MODE ?? "").trim() || "(default)",
       },
       goLive: goLive(now()),
@@ -313,10 +323,11 @@ export function mountOnCallAdmin(app: Express, deps: OnCallAdminDeps) {
     const nextWeekAt = weekStartInstant(addDays(rotationWeekStart(t), 7));
     const p = pacificMinute(t);
     const nextWindowAt = current.window.onCall ? null : pacificWallToDate(`${p.date} 17:00`);
+    const fb = readFinalFallback(deps.env).finalFallbackPhone;
     return {
-      now: describe(current, data, t),
-      nextWindow: nextWindowAt ? describe(onCallAt(nextWindowAt, data), data, nextWindowAt) : null,
-      nextWeek: describe(onCallAt(nextWeekAt, data), data, nextWeekAt),
+      now: describe(current, data, t, fb),
+      nextWindow: nextWindowAt ? describe(onCallAt(nextWindowAt, data), data, nextWindowAt, fb) : null,
+      nextWeek: describe(onCallAt(nextWeekAt, data), data, nextWeekAt, fb),
     };
   }));
 
@@ -324,7 +335,7 @@ export function mountOnCallAdmin(app: Express, deps: OnCallAdminDeps) {
     const at = parseInstant(req.query.at);
     if (!at) throw new AdminRefusal(400, "at must be a Pacific date and time (YYYY-MM-DDTHH:MM).");
     const { data } = await loadAll(store);
-    return { preview: describe(onCallAt(at, data), data, at) };
+    return { preview: describe(onCallAt(at, data), data, at, readFinalFallback(deps.env).finalFallbackPhone) };
   }));
 
   // ── Schedule ──────────────────────────────────────────────────────────────
@@ -678,6 +689,11 @@ export function mountOnCallAdmin(app: Express, deps: OnCallAdminDeps) {
           ON_CALL_TEST_PHONES: `${(env.ON_CALL_TEST_PHONES ?? "").split(",").filter((x) => x.trim()).length} number(s)`,
           ON_CALL_CALLER_ID: last4(env.ON_CALL_CALLER_ID) ?? "(unset: TWILIO_PHONE_NUMBER)",
           URGENT_NOTIFICATION_NUMBER: last4(env.URGENT_NOTIFICATION_NUMBER) ?? "(unset)",
+          ON_CALL_FINAL_FALLBACK_NUMBER: (() => {
+            const fb = readFinalFallback(env);
+            if (fb.finalFallbackPhone) return `${last4(fb.finalFallbackPhone)}: operations fallback (Wayne), rung after the final director`;
+            return fb.finalFallbackProblem ? `not configured: ${fb.finalFallbackProblem}` : "not configured: an exhausted chain only texts URGENT_NOTIFICATION_NUMBER";
+          })(),
           RUNTIME_TRANSFER_MODE: (env.RUNTIME_TRANSFER_MODE ?? "").trim() || "(default)",
         },
       },
