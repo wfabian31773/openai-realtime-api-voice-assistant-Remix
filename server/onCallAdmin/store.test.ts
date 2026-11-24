@@ -150,6 +150,21 @@ describe("the Postgres admin store", () => {
     expect(sql.indexOf("provider_call_sid is not null")).toBeLessThan(sql.indexOf("limit $3::integer"));
   });
 
+  // Review of #520, round 10: the no-chain list excludes a call only when its
+  // escalation qualifies by the same dial-evidence rule as the escalation list.
+  it("excludes from the no-chain list only a call whose escalation placed a dial", () => {
+    const norm = (q: string) => q.replace(/--[^\n]*/g, "").replace(/\s+/g, " ");
+    const esc = norm(ADMIN_SQL.escalations);
+    const without = norm(ADMIN_SQL.urgentWithoutChain);
+    const rule = /and exists \(select 1 from on_call_attempts a where a\.escalation_id = on_call_escalations\.id (.*?)\) order by/.exec(esc);
+    expect(rule).not.toBeNull();
+    expect(without).toContain(
+      `and not exists (select 1 from on_call_escalations e where e.call_sid = c.call_sid and exists (select 1 from on_call_attempts a where a.escalation_id = e.id ${rule![1]}))`,
+    );
+    expect(without).not.toMatch(/not exists \(select 1 from on_call_escalations e where e\.call_sid = c\.call_sid\)/);
+    expect(without.indexOf("not exists")).toBeLessThan(without.indexOf("limit $4::integer"));
+  });
+
   it("no statement reads a call_logs, call_turns or call_events time bare after its FROM", () => {
     const naive = /\bfrom\s+(call_logs|call_turns|call_events)\b/i;
     const checked: string[] = [];

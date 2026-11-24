@@ -271,8 +271,7 @@ function describe(ans: OnCallAnswer, data: RotationData, at: Date, fallbackPhone
  * after NFKC, an optional "+" or "00", then digit groups split by any run of
  * separators (Unicode whitespace, Unicode dashes and the minus sign, dot,
  * comma, parentheses), with 7 or more digits in all, is masked to its last
- * four ("…0123"). A run that starts inside a word (a SID, "VA-76222") is left
- * alone. Some long digit runs that are not phones are masked too, dates
+ * four ("…0123"). A run glued to letters or an underscore is masked too. Some long digit runs that are not phones are masked too, dates
  * written with dashes among them; that is the accepted cost of never leaking
  * one (review of #520, round 8).
  *
@@ -303,8 +302,10 @@ const PROTECTED_IN_TEXT = new RegExp(
 );
 
 // Optional "+"/"00", an optional "(", a digit, then digits each preceded by
-// any run of separators. Not a phone when it starts inside a word.
-const PHONE_RUN = new RegExp(String.raw`(?<![\p{L}\p{N}_])(?:\+|00)?\(?\d(?:${SEP}*\d)*`, "gu");
+// any run of separators. A run glued to letters or an underscore
+// ("callback_2125550198") is masked too (review of #520, round 10): SIDs,
+// uuids, dates and times are set aside above, so nothing else needs the guard.
+const PHONE_RUN = new RegExp(String.raw`(?<!\p{N})(?:\+|00)?\(?\d(?:${SEP}*\d)*`, "gu");
 
 /** Set-aside marker for a protected span: private-use characters, never a digit or a separator. */
 const SET_ASIDE_BASE = 0xe000;

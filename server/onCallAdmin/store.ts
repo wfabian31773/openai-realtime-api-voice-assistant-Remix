@@ -266,6 +266,25 @@ const CALL_COLS = `id, call_sid, "from", agent_used, voice_provider, status, run
   summary, duration, (start_time at time zone 'UTC') as start_time, (end_time at time zone 'UTC') as end_time,
   (created_at at time zone 'UTC') as created_at, transferred_to_human, ticket_number, tool_timeline`;
 
+/**
+ * A chain that placed a call (review of #520, rounds 2, 3 and 10): an attempt
+ * of kind warm_transfer or call that rang. A background call rang only if
+ * Twilio gave it a call sid: the runner writes the row before Twilio is asked,
+ * and a worker that stops there can leave no_status with no sid. The in-call
+ * warm transfer keeps its ringing outcomes. One copy, read by the escalation
+ * list and by the no-chain list's exclusion, so the two cannot disagree.
+ */
+function dialledChain(escalationId: string): string {
+  return `exists (select 1 from on_call_attempts a
+                    where a.escalation_id = ${escalationId}
+                      and a.kind in ('warm_transfer', 'call')
+                      and ((a.kind = 'call' and a.provider_call_sid is not null)
+                           or (a.kind = 'warm_transfer'
+                               and (a.provider_call_sid is not null
+                                    or a.outcome in ('accepted', 'no_answer', 'declined', 'busy',
+                                                     'no_status', 'taken_elsewhere')))))`;
+}
+
 export const ADMIN_SQL = {
   /**
    * One admin change at a time: every write reads, decides and writes in one
@@ -333,19 +352,7 @@ export const ADMIN_SQL = {
                    -- Only a chain that placed a call (review of #520): a queued or
                    -- SMS-only escalation is not a dialled call, and it is filtered
                    -- here, before the limit, so it cannot crowd dialled calls out.
-                   and exists (select 1 from on_call_attempts a
-                                where a.escalation_id = on_call_escalations.id
-                                  and a.kind in ('warm_transfer', 'call')
-                                  -- A dial that rang (review of #520, rounds 2 and 3). A
-                                  -- background call rang only if Twilio gave it a call sid:
-                                  -- the runner writes the row before Twilio is asked, and a
-                                  -- worker that stops there can leave no_status with no sid.
-                                  -- The in-call warm transfer keeps its ringing outcomes.
-                                  and ((a.kind = 'call' and a.provider_call_sid is not null)
-                                       or (a.kind = 'warm_transfer'
-                                           and (a.provider_call_sid is not null
-                                                or a.outcome in ('accepted', 'no_answer', 'declined', 'busy',
-                                                                 'no_status', 'taken_elsewhere')))))
+                   and ${dialledChain("on_call_escalations.id")}
                  order by created_at desc limit $3::integer`,
   escalationByCall: `select ${ESC_COLS} from on_call_escalations where call_sid = $1::text`,
   attemptsFor: `select id, escalation_id, level_index, role, provider_id, kind, attempt_no, mode, dialed_to, outcome,
@@ -364,7 +371,11 @@ export const ADMIN_SQL = {
         -- before the field existed are excluded; the rotation was not live, so
         -- there is no history worth reading there.
         and c.tool_timeline->'events' @> '[{"tool":"escalate_to_human","outcome":{"dialAttempted":true}}]'::jsonb
-        and not exists (select 1 from on_call_escalations e where e.call_sid = c.call_sid)
+        -- Excluded only when the escalation itself qualifies for the Calls list
+        -- (review of #520, round 10): a chain row with no dial evidence must not
+        -- hide a call whose tool timeline confirms the dial.
+        and not exists (select 1 from on_call_escalations e
+                         where e.call_sid = c.call_sid and ${dialledChain("e.id")})
       order by (c.created_at at time zone 'UTC') desc limit $4::integer`,
   turns: `select (at at time zone 'UTC') as at, role, coalesce(final_transcript, raw_transcript) as text from call_turns
            where call_sid = $1::text order by turn_index limit 1000`,

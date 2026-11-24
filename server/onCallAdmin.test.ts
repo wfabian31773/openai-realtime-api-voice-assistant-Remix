@@ -643,6 +643,29 @@ describe("calls", () => {
     expect(list.body.calls.map((c: any) => c.callSid).sort()).toEqual([SID, sid3].sort());
   });
 
+  // Review of #520, round 10: an escalation row with no qualifying attempt
+  // must not hide a call whose tool timeline confirms the dial.
+  it("lists a timeline-confirmed dial once when its escalation has no qualifying attempt", async () => {
+    const s = fixture();
+    const sid2 = "CA" + "e".repeat(32);
+    s.escalations.push({ ...s.escalations[0], id: 8, callSid: sid2, status: "exhausted" });
+    s.attempts.push({ ...s.attempts[0], id: 2, escalationId: 8, callSid: sid2, kind: "call", outcome: "no_status", providerCallSid: null });
+    const log = (id: string, callSid: string) => ({
+      id, callSid, from: "+15555550177", agentUsed: "no-ivr", voiceProvider: "grok", status: "completed",
+      runtimeOutcome: null, agentOutcome: null, summary: null, duration: 60,
+      startTime: new Date("2026-12-05T05:00:00Z"), endTime: new Date("2026-12-05T05:01:00Z"), createdAt: new Date("2026-12-05T05:00:00Z"),
+      transferredToHuman: false, ticketNumber: null,
+      toolTimeline: { events: [{ tool: "escalate_to_human", at: "2026-12-05T05:00:20Z", ms: 10, args: {}, outcome: { dialAttempted: true } }] },
+    });
+    // SID's escalation qualifies, so its timeline must not list it a second time.
+    s.callLogs.push(log("log-1", SID), log("log-2", sid2));
+    const list = await boot({}, s).request("GET", `${ON_CALL_API}/calls`);
+    const sids = list.body.calls.map((c: any) => c.callSid);
+    expect(sids.filter((x: string) => x === sid2)).toHaveLength(1);
+    expect(sids.filter((x: string) => x === SID)).toHaveLength(1);
+    expect(list.body.calls.find((c: any) => c.callSid === sid2).chain).toBeNull();
+  });
+
   it("sends no escalation plan and no full E.164 number on the calls list or a call's detail", async () => {
     const s = fixture();
     s.escalations[0].plan = { levels: [{ role: "on_call", providerId: 1, name: "Dr. Test Alpha", phone: "+15555550101" } as any], notes: [] };
@@ -727,7 +750,13 @@ describe("maskCallPhones in free text", () => {
     ["call 0044 20 7946 0958 now", "call …0958 now"],
     ["00 52 55 1234 5678", "…5678"],
     ["555-0123", "…0123"],
-    ["a+4155550123", "a+…0123"],
+    ["a+4155550123", "a…0123"],
+    // Review of #520, round 10: a run glued to letters or an underscore is masked.
+    ["callback_2125550198", "callback_…0198"],
+    ["x4155550123", "x…0123"],
+    ["4155550123_tail", "…0123_tail"],
+    ["phone=4155550123abc", "phone=…0123abc"],
+    ["id_415-555-0123", "id_…0123"],
     ["(415)555-0123", "…0123"],
     ["on 2026-11-24 call 415-555-0123", "on 2026-11-24 call …0123"],
     // A time or date joined to a phone by separators is part of the run (round 8).
@@ -757,6 +786,14 @@ describe("maskCallPhones in free text", () => {
     "ticket VA-84772 and PCP-73679",
     "VA-76222",
     "CA0123456789abcdef0123456789abcdef",
+    // Twilio SIDs whose hex is mostly digits, alone and after a word or underscore (round 10).
+    "CA01234567890123456789012345678901",
+    "SM98765432109876543210987654321098",
+    "PN12345678901234567890123456789012",
+    "sid_CA01234567890123456789012345678901",
+    "callSid=CA01234567890123456789012345678901",
+    "550e8400-e29b-41d4-a716-446655440000",
+    "id_12345678-1234-1234-1234-123456789012",
     "id 550e8400-e29b-41d4-a716-446655440000",
     "order 12345",
     "1 2 3",
@@ -794,7 +831,10 @@ describe("maskCallPhones in free text", () => {
       const prefix = pick(["", "", "+", "00"]);
       const before = Array.from({ length: Math.floor(rnd() * 3) }, () => pick(words)).join(" ");
       const after = Array.from({ length: Math.floor(rnd() * 3) }, () => pick(words)).join(" ");
-      const input = `${before} ${prefix}${phone} ${after}`;
+      // Round 10: the phone may be glued to letters or an underscore on either side.
+      const glueBefore = pick(["", "", "x", "callback_", "id_", "tel"]);
+      const glueAfter = pick(["", "", "x", "_tail", "abc"]);
+      const input = `${before} ${glueBefore}${prefix}${phone}${glueAfter} ${after}`;
       const out = maskCallPhones(input) as string;
       const stripped = out.normalize("NFKC").replace(/[\s.,()\p{Pd}−]/gu, "");
       expect(stripped, `${JSON.stringify(input)} -> ${out}`).not.toMatch(/\d{7}/);

@@ -198,18 +198,20 @@ export class FakeOnCallAdminStore implements OnCallAdminStore {
       .reverse()
       .slice(0, f.limit);
   }
+  /** Mirrors dialledChain in store.ts: the chain has an attempt that rang. */
+  private dialled(escalationId: number): boolean {
+    const rang = new Set(["accepted", "no_answer", "declined", "busy", "no_status", "taken_elsewhere"]);
+    return this.state.attempts.some(
+      (a) =>
+        a.escalationId === escalationId &&
+        ((a.kind === "call" && a.providerCallSid != null) ||
+          (a.kind === "warm_transfer" && (a.providerCallSid != null || rang.has(a.outcome)))),
+    );
+  }
   async escalations(f: { since: Date; until: Date; limit: number }) {
     // Mirrors ADMIN_SQL.escalations: only a chain whose call rang, before the limit.
-    const rang = new Set(["accepted", "no_answer", "declined", "busy", "no_status", "taken_elsewhere"]);
-    const dialled = (id: number) =>
-      this.state.attempts.some(
-        (a) =>
-          a.escalationId === id &&
-          ((a.kind === "call" && a.providerCallSid != null) ||
-            (a.kind === "warm_transfer" && (a.providerCallSid != null || rang.has(a.outcome)))),
-      );
     return this.state.escalations
-      .filter((e) => e.createdAt >= f.since && e.createdAt < f.until && dialled(e.id))
+      .filter((e) => e.createdAt >= f.since && e.createdAt < f.until && this.dialled(e.id))
       .slice(0, f.limit);
   }
   async attemptsForEscalations(ids: number[]) {
@@ -218,8 +220,20 @@ export class FakeOnCallAdminStore implements OnCallAdminStore {
   async callLogsBySid(sids: string[]) {
     return this.state.callLogs.filter((c) => c.callSid && sids.includes(c.callSid));
   }
-  async urgentCallsWithoutChain() {
-    return [];
+  async urgentCallsWithoutChain(f: { since: Date; until: Date; limit: number }) {
+    // Mirrors ADMIN_SQL.urgentWithoutChain: an after-hours call whose timeline
+    // records a dial, unless an escalation that itself qualifies covers it.
+    return this.state.callLogs
+      .filter((c) => {
+        const at = c.createdAt ?? c.startTime;
+        if (!at || at < f.since || at >= f.until) return false;
+        if (!["no-ivr", "no-ivr-v2", "dev-no-ivr"].includes(c.agentUsed ?? "")) return false;
+        const events = (c.toolTimeline as any)?.events;
+        const dialled = Array.isArray(events) && events.some((e: any) => e?.tool === "escalate_to_human" && e?.outcome?.dialAttempted === true);
+        if (!dialled) return false;
+        return !this.state.escalations.some((e) => e.callSid === c.callSid && this.dialled(e.id));
+      })
+      .slice(0, f.limit);
   }
   async callBundle(callSid: string): Promise<CallBundleRaw> {
     return {
