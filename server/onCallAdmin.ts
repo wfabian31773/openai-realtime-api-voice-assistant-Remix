@@ -26,6 +26,7 @@
 import type { Express, Request, RequestHandler, Response } from "express";
 import { readOnCallConfig, onCallHealth, rotationCallerId } from "../src/runtime/onCall/config";
 import {
+  activeOverride,
   addDays,
   FINAL_REGION,
   onCallAt,
@@ -169,7 +170,8 @@ function describe(ans: OnCallAnswer, data: RotationData, at: Date) {
     source: ans.source,
     note: ans.note ?? null,
     provider: publicProvider(ans.provider as AdminProvider | null),
-    override: ans.source === "override" ? data.overrides.find((o) => o.startsAt <= at && at < o.endsAt && o.providerId === ans.provider?.id) ?? null : null,
+    // The runtime's own pick (latest start, then latest id), not the first match.
+    override: ans.source === "override" ? activeOverride(at, data.overrides) : null,
     director: publicProvider(ans.director as AdminProvider | null),
     final: publicProvider(ans.final as AdminProvider | null),
     chain: {

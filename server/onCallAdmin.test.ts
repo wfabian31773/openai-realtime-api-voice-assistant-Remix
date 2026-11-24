@@ -201,6 +201,29 @@ describe("who is on call", () => {
     expect(JSON.stringify(r.body)).not.toMatch(/5555550\d{3}/);
   });
 
+  it("names the override the runtime picks when two overlap (the later start wins)", async () => {
+    const state = fixture();
+    const ov = (id: number, start: string, end: string, providerId: number) => ({
+      id,
+      startsAt: new Date(start),
+      endsAt: new Date(end),
+      providerId,
+      reason: null,
+      createdAt: null,
+    });
+    // Both cover NOW; #8 starts later, so the runtime rings Gamma (#3) under #8.
+    // A second, earlier override for the same provider must not be the one shown.
+    state.overrides = [
+      ov(5, "2026-12-05T01:00:00Z", "2026-12-05T10:00:00Z", 3),
+      ov(8, "2026-12-05T04:00:00Z", "2026-12-05T09:00:00Z", 3),
+      ov(6, "2026-12-05T02:00:00Z", "2026-12-05T09:00:00Z", 2),
+    ];
+    const r = await boot({}, state).request("GET", `${ON_CALL_API}/now`);
+    expect(r.body.now.source).toBe("override");
+    expect(r.body.now.provider.fullName).toBe("Dr. Test Gamma");
+    expect(r.body.now.override.id).toBe(8);
+  });
+
   it("previews any moment, and a gap week rings only the final director", async () => {
     const h = boot();
     const r = await h.request("GET", `${ON_CALL_API}/preview?at=2026-12-17T22:00`);
