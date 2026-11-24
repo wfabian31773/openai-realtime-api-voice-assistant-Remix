@@ -721,6 +721,18 @@ describe("maskCallPhones in free text", () => {
     ["+33-1-23-45-67-89", "…6789"],
     ["it is 4 1 5 5 5 5 0 1 2 3 thanks", "it is …0123 thanks"],
     ["4, 1, 5, 5, 5, 5, 0, 1, 2, 3", "…0123"],
+    // Review of #520, round 4: the one general rule.
+    ["+1 415 555 0123", "…0123"],
+    ["0044 20 7946 0958", "…0958"],
+    ["call 0044 20 7946 0958 now", "call …0958 now"],
+    ["00 52 55 1234 5678", "…5678"],
+    ["555-0123", "…0123"],
+    ["a+4155550123", "a+…0123"],
+    ["(415)555-0123", "…0123"],
+    ["on 2026-11-24 call 415-555-0123", "on 2026-11-24 call …0123"],
+    ["10:30 555-0123", "10:30 …0123"],
+    ["11/24/2026 4155550123", "11/24/2026 …0123"],
+    ["at 2026-11-24T10:30:00Z (415) 555-0123", "at 2026-11-24T10:30:00Z …0123"],
   ])("masks %j", (input, out) => {
     expect(maskCallPhones(input)).toBe(out);
   });
@@ -728,15 +740,49 @@ describe("maskCallPhones in free text", () => {
   it.each([
     "born 03/17/1973",
     "DOB 1973-03-17",
+    "on 2026-11-24",
+    "at 2026-11-24T10:30:00Z",
     "at 2026-12-05T06:00:40.000Z",
+    "2026-11-24 10:30",
     "at 10:30 PM",
+    "11/24/2026",
+    "01/02/1960",
     "ticket VA-84772 and PCP-73679",
+    "VA-76222",
     "CA0123456789abcdef0123456789abcdef",
+    "id 550e8400-e29b-41d4-a716-446655440000",
     "order 12345",
     "12-05-2026",
     "1 2 3",
+    "555-012",
   ])("leaves %j alone", (input) => {
     expect(maskCallPhones(input)).toBe(input);
+  });
+
+  // Property: whatever phone shape goes in, no 7 consecutive digits (ignoring
+  // the separators the rule allows) come out, alone or inside a sentence.
+  it("never leaves 7 or more phone digits in a row", () => {
+    const phones = [
+      "+1 415 555 0123", "+14155550123", "(415) 555-0123", "415-555-0123", "415.555.0123",
+      "4155550123", "0044 20 7946 0958", "+44 20 7946 0958", "00 52 55 1234 5678", "555-0123",
+      "+1 (415) 555-0123", "1-415-555-0123", "4 1 5 5 5 5 0 1 2 3", "+33-1-23-45-67-89", "415 5550123",
+    ];
+    const wraps = [(p: string) => p, (p: string) => `call ${p}.`, (p: string) => `(${p})`, (p: string) => `on 2026-11-24, ${p}, 10:30`];
+    for (const p of phones) {
+      for (const w of wraps) {
+        const out = maskCallPhones(w(p)) as string;
+        expect(out).not.toContain(p);
+        // The wrapping date and time are kept by design; take them out before counting.
+        const digitsOnly = out.replace("2026-11-24", "").replace("10:30", "").replace(/[ .,()+-]/g, "");
+        expect(digitsOnly, `${w(p)} -> ${out}`).not.toMatch(/\d{7}/);
+      }
+    }
+  });
+
+  it("masks a phone stored as a JSON number, and leaves small numbers alone", () => {
+    expect(maskCallPhones({ args: { phone_number: 4155550123, other: 14155550123, durationSec: 312, id: 7 } })).toEqual({
+      args: { phone_number: "…0123", other: "…0123", durationSec: 312, id: 7 },
+    });
   });
 
   it("masks every string in a nested call-detail shape", () => {

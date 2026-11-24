@@ -266,4 +266,35 @@ describe("the per-call timeline", () => {
       routingReason: "on_call",
     });
   });
+
+  // Self-review of #520: the count matches the list's rule (a call that rang).
+  it("does not count a call attempt that never rang", () => {
+    const b = {
+      ...bundle,
+      attempts: [
+        ...bundle.attempts,
+        { ...bundle.attempts[1], id: 9, outcome: "no_status", providerCallSid: null },
+        { ...bundle.attempts[1], id: 10, outcome: "failed", providerCallSid: null },
+        { ...bundle.attempts[1], id: 11, outcome: "no_status", providerCallSid: "CA" + "e".repeat(32) },
+      ],
+    };
+    expect(outcomeSummary(b).calls).toBe(3);
+  });
+
+  it("survives a plan stored in the wrong shape", () => {
+    for (const plan of [{ levels: "oops" }, { levels: [null, 5, "x"] }, { levels: { 0: "a" } }, null] as any[]) {
+      const b = { ...bundle, escalation: { ...bundle.escalation!, plan } };
+      expect(() => mergeTimeline(b)).not.toThrow();
+      expect(() => outcomeSummary(b)).not.toThrow();
+      expect(outcomeSummary(b).acceptedByName).toBe("Dr. Test 2");
+    }
+  });
+
+  it("reads a tool stamp with no zone as UTC", () => {
+    const b = {
+      ...bundle,
+      callLog: { ...bundle.callLog!, toolTimeline: { events: [{ at: "2026-12-05T06:00:40.000", ms: 1000, tool: "escalate_to_human", outcome: { success: true } }] } },
+    };
+    expect(mergeTimeline(b).find((i) => i.kind === "escalate_to_human")?.at).toBe("2026-12-05T06:00:39.000Z");
+  });
 });

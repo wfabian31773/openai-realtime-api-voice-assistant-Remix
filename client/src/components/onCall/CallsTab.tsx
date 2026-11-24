@@ -111,17 +111,35 @@ function Outcome({ o }: { o: Omit<ChainSummary, 'mode'> }) {
 function CallDetailView({ callSid, onBack }: { callSid: string; onBack: () => void }) {
   const q = useOnCall<CallDetail>(`/calls/${callSid}`)
   const [showTranscript, setShowTranscript] = React.useState(false)
-  if (q.isLoading) return <p className="text-muted-foreground">Loading…</p>
-  if (q.error) return <Banner tone="error">{apiError(q.error)}</Banner>
+  // Review of #520: the way back stays on screen while the detail loads, fails or comes back empty.
+  const back = (
+    <Button variant="outline" size="sm" onClick={onBack}>
+      <ArrowLeft className="mr-1 h-4 w-4" /> All calls
+    </Button>
+  )
   const d = q.data
-  if (!d?.timeline) return null
+  if (q.isLoading || q.error || !d?.timeline) {
+    return (
+      <div className="space-y-4">
+        <div className="flex flex-wrap items-center gap-2">
+          {back}
+          <span className="font-mono text-sm">{callSid}</span>
+        </div>
+        {q.isLoading ? (
+          <p className="text-muted-foreground">Loading…</p>
+        ) : q.error ? (
+          <Banner tone="error">{apiError(q.error)}</Banner>
+        ) : (
+          <Banner tone="error">{d?.message ?? d?.error ?? 'No detail came back for this call.'}</Banner>
+        )}
+      </div>
+    )
+  }
   const items = d.timeline.filter((i) => showTranscript || i.source !== 'transcript')
   return (
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-2">
-        <Button variant="outline" size="sm" onClick={onBack}>
-          <ArrowLeft className="mr-1 h-4 w-4" /> All calls
-        </Button>
+        {back}
         <span className="font-mono text-sm">{d.callSid}</span>
         <span className="text-sm text-muted-foreground">
           caller {d.caller ?? 'withheld'} · {d.agent ?? 'agent unknown'}
@@ -238,6 +256,9 @@ export function CallsTab() {
         </p>
       </div>
       {q.error && <Banner tone="error">{apiError(q.error)}</Banner>}
+      {!q.error && q.data && !Array.isArray(q.data.calls) && (
+        <Banner tone="error">{q.data.message ?? q.data.error ?? 'The call list did not come back.'}</Banner>
+      )}
       <Card>
         <CardContent className="p-0">
           <Table>
@@ -278,6 +299,13 @@ export function CallsTab() {
                   </TableCell>
                 </TableRow>
               ))}
+              {q.isLoading && (
+                <TableRow>
+                  <TableCell colSpan={8} className="text-center text-muted-foreground">
+                    Loading…
+                  </TableCell>
+                </TableRow>
+              )}
               {q.data && q.data.calls?.length === 0 && (
                 <TableRow>
                   <TableCell colSpan={8} className="text-center text-muted-foreground">

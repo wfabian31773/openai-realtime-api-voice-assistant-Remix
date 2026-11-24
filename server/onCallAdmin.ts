@@ -265,46 +265,80 @@ function describe(ans: OnCallAnswer, data: RotationData, at: Date, fallbackPhone
   };
 }
 
-/** Any `phone` value, at any depth, as its last four digits. */
 /**
- * The Calls tab shows phones by their last four only (full phones live on the
- * Providers tab). Masks phone-named keys, and any full E.164 number inside a
- * string anywhere in the response (routing JSON, tool arguments, event data).
+ * ONE rule for a phone number written in free text (a transcript line, a
+ * summary, an event message, a tool's arguments or result, a routing note),
+ * replacing the format-by-format patterns three review rounds of #520 kept
+ * finding holes in: a run that starts with an optional "+" or "00", then
+ * digits, where neighbouring digits may be split by a single space, dot,
+ * dash, a comma (with an optional space; a number read out "4, 1, 5…") or
+ * parentheses ("(415) "), with 7 or more digits in all, is masked to its
+ * last four ("…0123"). Some long digit runs that are not phones are masked
+ * too; that is the accepted cost of never leaking one.
+ *
+ * Kept as written, by design: ISO dates and instants ("2026-11-24",
+ * "2026-11-24T10:30:00Z"), clock times ("10:30"), and dates written with
+ * slashes or as MM-DD-YYYY ("11/24/2026", "12-05-2026"); these are set aside
+ * before the rule runs and put back after, so a phone written next to one is
+ * still masked and the date is not. A run that starts inside a word (a SID,
+ * "VA-76222") is left alone.
  */
-/**
- * A phone number written inside free text (a transcript line, a summary, an
- * event message), in the forms a transcriber or a person writes one:
- * E.164 ("+14155550123") and any formatted "+" number ("+44 20 7946 0958"), US with an optional +1 / 1 and parentheses,
- * spaces, dots or dashes ("(415) 555-0123", "1.415.555.0123"), ten or eleven
- * bare digits, and digits read out one at a time ("4 1 5 5 5 5 0 1 2 3").
- * Bounded by non-word characters, so a digit run inside a SID or a ticket
- * number ("VA-84772") is left alone; dates ("03/17/1973", "2026-12-05"),
- * times and ISO instants have the wrong grouping and do not match.
- * Review of #520: only the bare "+" form was masked before.
- */
-const PHONE_IN_TEXT = new RegExp(
+const PROTECTED_IN_TEXT = new RegExp(
   [
-    // Any "+" number, 7 to 15 digits, groups split by a space, dot, dash or
-    // parenthesis ("+44 20 7946 0958", "+1 (415) 555-0123"); review of #520, round 3.
-    String.raw`\+\d(?:[ .()-]{0,2}\d){6,14}`,
-    String.raw`(?:\+?1[\s.-]?)?(?:\(\d{3}\)\s?|\d{3}[\s.-]?)\d{3}[\s.-]?\d{4}`,
-    String.raw`(?:\d[ ,.-]{1,2}){9,10}\d`,
+    // ISO date, optionally with a time and a zone.
+    String.raw`\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:?\d{2})?)?`,
+    // 11/24/2026, 1/2/60, 12-05-2026.
+    String.raw`\d{1,2}/\d{1,2}/\d{2,4}`,
+    String.raw`\d{1,2}-\d{1,2}-\d{4}`,
+    // 10:30, 10:30:15.
+    String.raw`\d{1,2}:\d{2}(?::\d{2})?`,
+    // Identifiers the page links by: a uuid, a Twilio SID.
+    String.raw`[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}`,
+    String.raw`[A-Z]{2}[0-9a-fA-F]{32}`,
   ]
-    .map((p) => `(?<![\\w+])${p}(?![\\w])`)
+    .map((p) => `(?<![\\dA-Za-z])${p}(?![\\dA-Za-z])`)
     .join("|"),
   "g",
 );
 
-function maskPhonesInText(s: string): string {
-  return s.replace(PHONE_IN_TEXT, (m) => {
+// Optional "+"/"00", an optional "(", a digit, then digits each preceded by
+// an optional separator: ")" and/or one of space . - , (comma optionally with
+// a space), and/or "(". A run that starts inside a word is not a phone.
+const PHONE_RUN = /(?<!\w)(?:\+|00)?\(?\d(?:\)?(?:[ .-]|, ?)?\(?\d)*/g;
+
+/** Set-aside marker for a protected span: private-use characters, never a digit or a separator. */
+const SET_ASIDE_BASE = 0xe000;
+const SET_ASIDE_ANY = /[-]/;
+
+export function maskPhonesInText(s: string): string {
+  const kept: string[] = [];
+  // Text that already carries private-use characters is masked with nothing
+  // set aside (a date in it may be masked too); never the other way round.
+  const shielded = SET_ASIDE_ANY.test(s)
+    ? s
+    : s.replace(PROTECTED_IN_TEXT, (m) => {
+        if (kept.length >= 0x18ff) return m;
+        kept.push(m);
+        return String.fromCharCode(SET_ASIDE_BASE + kept.length - 1);
+      });
+  const masked = shielded.replace(PHONE_RUN, (m) => {
     const digits = m.replace(/\D/g, "");
-    const isPhone = m.startsWith("+") ? digits.length >= 7 && digits.length <= 15 : digits.length === 10 || (digits.length === 11 && digits[0] === "1");
-    return isPhone ? last4(digits) ?? m : m;
+    return digits.length >= 7 ? last4(digits) ?? m : m;
   });
+  return kept.length === 0 ? masked : masked.replace(/[-]/g, (c) => kept[c.charCodeAt(0) - SET_ASIDE_BASE] ?? c);
 }
 
+/**
+ * The Calls tab shows phones by their last four only (full phones live on the
+ * Providers tab): every phone-named key as its last four, and every other
+ * string through `maskPhonesInText`, at any depth.
+ */
 export function maskCallPhones(v: unknown): unknown {
   if (typeof v === "string") return maskPhonesInText(v);
+  // A phone stored as a JSON number (a tool argument, an event's data) is a
+  // phone all the same: 7+ digit integers go out as their last four. Nothing
+  // the Calls tab reads as a number is that large (durations, counts, ids).
+  if (typeof v === "number" && Number.isSafeInteger(v) && Math.abs(v) >= 1_000_000) return last4(String(v));
   if (Array.isArray(v)) return v.map(maskCallPhones);
   if (!v || typeof v !== "object") return v;
   return Object.fromEntries(

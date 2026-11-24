@@ -211,6 +211,7 @@ export function attemptLiteFromRow(r: any): AttemptLite & { escalationId: number
     routingReason: s(r.routing_reason),
     startedAt: d(r.started_at)!,
     endedAt: d(r.ended_at),
+    providerCallSid: s(r.provider_call_sid),
   };
 }
 
@@ -348,10 +349,10 @@ export const ADMIN_SQL = {
                  order by created_at desc limit $3::integer`,
   escalationByCall: `select ${ESC_COLS} from on_call_escalations where call_sid = $1::text`,
   attemptsFor: `select id, escalation_id, level_index, role, provider_id, kind, attempt_no, mode, dialed_to, outcome,
-                       routing_reason, started_at, ended_at
+                       routing_reason, started_at, ended_at, provider_call_sid
                   from on_call_attempts where escalation_id = any($1::integer[]) order by started_at, id`,
   attemptsByCall: `select id, escalation_id, level_index, role, provider_id, kind, attempt_no, mode, dialed_to, outcome,
-                          routing_reason, started_at, ended_at
+                          routing_reason, started_at, ended_at, provider_call_sid
                      from on_call_attempts where call_sid = $1::text order by started_at, id`,
   callLogsBySid: `select ${CALL_COLS} from call_logs where call_sid = any($1::text[])`,
   urgentWithoutChain: `select ${CALL_COLS} from call_logs c

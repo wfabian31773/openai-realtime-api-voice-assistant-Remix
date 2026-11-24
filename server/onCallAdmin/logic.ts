@@ -342,6 +342,30 @@ export interface AttemptLite {
   routingReason: string | null;
   startedAt: Date;
   endedAt: Date | null;
+  /** The provider leg's Twilio sid, when Twilio placed one. */
+  providerCallSid?: string | null;
+}
+
+const RANG_OUTCOMES = new Set(["accepted", "no_answer", "declined", "busy", "taken_elsewhere"]);
+
+/**
+ * A call attempt that rang a phone, the rule the Calls list filters on
+ * (store.ts ADMIN_SQL.escalations): a background call Twilio gave a sid to,
+ * or a warm transfer with a sid or a ringing outcome. A row written before
+ * Twilio was asked (no sid, no_status / failed) is not a call. An outcome
+ * only a ringing call can have counts too, for rows read without the sid.
+ */
+export function attemptRang(a: Pick<AttemptLite, "kind" | "outcome" | "providerCallSid">): boolean {
+  if (a.kind !== "call" && a.kind !== "warm_transfer") return false;
+  if (a.providerCallSid) return true;
+  if (a.kind === "warm_transfer" && a.outcome === "no_status") return true;
+  return RANG_OUTCOMES.has(a.outcome);
+}
+
+/** The plan's levels, or none when the stored JSON is not the shape we wrote. */
+function planLevels(esc: EscalationLite | null | undefined): Array<{ role?: string; providerId?: number; name?: string }> {
+  const lv = esc?.plan && typeof esc.plan === "object" ? (esc.plan as any).levels : undefined;
+  return Array.isArray(lv) ? lv.map((l) => (l && typeof l === "object" && !Array.isArray(l) ? l : {})) : [];
 }
 
 export interface CallBundle {
@@ -411,8 +435,8 @@ function nameFor(bundle: CallBundle, providerId: number | null | undefined, leve
     const n = bundle.providerNames.get(providerId);
     if (n) return n;
   }
-  const lvl = levelIndex !== undefined ? bundle.escalation?.plan?.levels?.[levelIndex] : undefined;
-  return lvl?.name ?? (providerId ? `provider #${providerId}` : "unknown");
+  const lvl = levelIndex !== undefined ? planLevels(bundle.escalation)[levelIndex] : undefined;
+  return (typeof lvl?.name === "string" ? lvl.name : null) ?? (providerId ? `provider #${providerId}` : "unknown");
 }
 
 function toolEvents(raw: unknown): Array<Record<string, any>> {
@@ -484,7 +508,11 @@ export function mergeTimeline(bundle: CallBundle): TimelineItem[] {
   }
 
   for (const e of toolEvents(cl?.toolTimeline)) {
-    const end = typeof e.at === "string" ? new Date(e.at).getTime() : NaN;
+    // The timeline writes ISO with a "Z"; a stamp with no zone is UTC, never the server's local time.
+    const end =
+      typeof e.at === "string"
+        ? new Date(/T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?$/.test(e.at.trim()) ? `${e.at.trim()}Z` : e.at).getTime()
+        : NaN;
     if (Number.isNaN(end)) continue;
     const ms = e.ms != null && Number.isFinite(Number(e.ms)) ? Number(e.ms) : 0;
     const tool = String(e.tool ?? e.name ?? "tool");
@@ -518,7 +546,7 @@ export function mergeTimeline(bundle: CallBundle): TimelineItem[] {
   const esc = bundle.escalation;
   if (esc) {
     const routing: Record<string, any> = esc.routing && typeof esc.routing === "object" ? esc.routing : {};
-    const levels = Array.isArray(esc.plan?.levels) ? esc.plan!.levels.filter((l) => l && typeof l === "object") : [];
+    const levels = planLevels(esc);
     const strings = (v: unknown) => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
     push({
       at: esc.createdAt.toISOString(),
@@ -647,13 +675,14 @@ export interface CallOutcome {
 
 export function outcomeSummary(bundle: Pick<CallBundle, "escalation" | "attempts" | "callLog" | "providerNames">): CallOutcome {
   const esc = bundle.escalation;
-  const calls = bundle.attempts.filter((a) => a.kind === "call" || a.kind === "warm_transfer").length;
+  // Only a call that rang counts (review of #520): the list's own rule.
+  const calls = bundle.attempts.filter(attemptRang).length;
   const texts = bundle.attempts.filter((a) => a.kind === "sms" || a.kind === "nudge_sms").length;
   const levelsReached = bundle.attempts.length ? Math.max(...bundle.attempts.map((a) => a.levelIndex)) + 1 : 0;
   const start = bundle.callLog?.startTime ?? bundle.callLog?.createdAt ?? esc?.createdAt ?? null;
   const accAttempt = esc?.acceptedAttemptId ? bundle.attempts.find((a) => a.id === esc.acceptedAttemptId) : undefined;
   const b = { ...bundle, turns: [], callEvents: [], extraEvents: [], callSid: esc?.callSid ?? "" } as CallBundle;
-  const first = esc?.plan?.levels?.[0];
+  const first = planLevels(esc)[0];
   return {
     status: esc?.status ?? "no_chain",
     acceptedByName: esc?.acceptedAt ? (accAttempt ? nameFor(b, accAttempt.providerId, accAttempt.levelIndex) : nameFor(b, esc.acceptedBy)) : null,
