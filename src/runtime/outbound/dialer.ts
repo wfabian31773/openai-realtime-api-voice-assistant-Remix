@@ -520,6 +520,15 @@ async function dialOne(
     );
     return nothing ? "no_opening" : "offer_unknown";
   }
+  // The offer check can take seconds, and the tick asks each candidate in turn
+  // under the one timestamp it started with: the window is read again on the
+  // clock as it is now, so nobody is rung after it has closed (review of #519).
+  const at = (deps.now ?? (() => new Date()))();
+  const stillOpen = mayDialNow(at, prior, policy.window, policy.caps);
+  if (!stillOpen.ok) {
+    await deps.store.releaseContact(contact.id, candidate.status, nextLookAt(at, stillOpen.reason, policy));
+    return stillOpen.reason;
+  }
 
   const attemptId = await deps.store.startAttempt(contact.id, campaignId, prior.length + 1);
   let call: { sid: string };

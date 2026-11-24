@@ -225,7 +225,7 @@ async function textOne(
   now: Date,
   deps: TextDeps,
   source: ContactSource | null,
-  policy: Pick<OutboundLanePolicy, "offerCheck" | "window">,
+  policy: Pick<OutboundLanePolicy, "offerCheck" | "window" | "caps">,
 ): Promise<string | null> {
   // A row the source never wrote has nothing to re-check against.
   if (source && !candidate.externalRef) return "not_from_source";
@@ -286,6 +286,19 @@ async function textOne(
       reason: nothing ? "no_opening" : "offer_unknown",
     });
     return nothing ? "no_opening" : "offer_unknown";
+  }
+  // The window again, on the clock as it is now: the tick checked it once at
+  // its start, and each offer check before this one can take seconds (review
+  // of #519). A text the window has closed on waits for tomorrow's opening.
+  const at = (deps.now ?? (() => new Date()))();
+  const stillOpen = mayDialNow(at, [], policy.window, policy.caps);
+  if (!stillOpen.ok) {
+    await deps.store.patchText(claimed.id, {
+      state: "retry",
+      retry_after: tomorrowAtOpening(at, policy.window.startHour).toISOString(),
+      reason: stillOpen.reason,
+    });
+    return stillOpen.reason;
   }
 
   const sender = await deps.sms();

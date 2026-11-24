@@ -67,6 +67,7 @@
  * from the demo seed; any one is enough, so a demo call never reaches a live
  * system because one of the three was missing.
  */
+import { createHash } from 'node:crypto';
 import { registerTool, type ToolFailure, type ToolResult } from './registry';
 import { readDobQuietly } from './dobParts';
 import { spokenDobFor } from './spokenDob';
@@ -487,12 +488,20 @@ export interface Availability {
 }
 export type AvailabilityLoad = Availability | { error: string };
 
-/** Keyed on the contact and the mode, so the agent factory can warm it before
- * any tool has opened a session. Holds no patient data: slots only. */
+/** Keyed on the contact, the mode and what the read asks NPX, so the agent
+ * factory can warm it before any tool has opened a session, and a record whose
+ * group, partners or appointment date changed reads afresh (review of #519).
+ * Holds no patient data: slots only, under a hashed key. */
 const availabilityCache = new Map<string, { at: number; load: Promise<AvailabilityLoad> }>();
 const MAX_AVAILABILITY_ENTRIES = 200;
 
-const availabilityKey = (c: OutboundContact, demo: boolean) => `${demo ? 'demo' : 'live'}:${c.contactId}`;
+const availabilityKey = (c: OutboundContact, demo: boolean) => {
+  const ask = offerAsk(c);
+  const asked = ask
+    ? createHash('sha256').update(JSON.stringify([ask.medicalGroupName, ask.partnerNames, ask.replacedAppointmentDate])).digest('hex').slice(0, 16)
+    : 'none';
+  return `${demo ? 'demo' : 'live'}:${c.contactId}:${asked}`;
+};
 
 export function offerAsk(c: OutboundContact): { medicalGroupName: string; partnerNames: string[]; replacedAppointmentDate: string } | null {
   const medicalGroupName = field(c, 'medical_group');

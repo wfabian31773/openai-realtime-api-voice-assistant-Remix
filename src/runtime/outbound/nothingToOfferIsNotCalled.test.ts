@@ -183,6 +183,40 @@ describe("the dialler asks the offer check last, and rings nobody it has nothing
     expect(createCall).not.toHaveBeenCalled();
   });
 
+  it("reads the window again after the offer check, and rings nobody once it has closed", async () => {
+    // Review of #519: the offer check can take seconds per person, under the
+    // tick's one timestamp. 7:59:58 PM Pacific when the tick starts; the
+    // window has closed by the time the check answers.
+    let clock = new Date("2041-03-06T03:59:58Z");
+    const { store, createCall, deps } = dialSetup();
+    store.addContact({ id: "c1", phone: "+15555550111", status: "voicemail", customData: OFFER_FIELDS });
+    const offerCheck = vi.fn(async (): Promise<OfferCheck> => {
+      clock = new Date("2041-03-06T04:00:05Z");
+      return "offerable";
+    });
+    const r = await runCampaignTick("test-lane", { ...basePolicy, offerCheck }, { ...deps, now: () => clock });
+    expect(offerCheck).toHaveBeenCalledTimes(1);
+    expect(r.held).toEqual({ outside_hours: 1 });
+    expect(createCall).not.toHaveBeenCalled();
+    expect(store.attempts.length).toBe(0);
+    expect(store.contacts.get("c1")).toMatchObject({ status: "voicemail" });
+    // Wednesday's opening hour, read from the clock as it is now (the tick's
+    // own timestamp would give 16:59:58, before the window opens).
+    expect(store.contacts.get("c1")!.nextAttemptAt!.toISOString()).toBe("2041-03-06T17:00:05.000Z");
+  });
+
+  it("still rings when the window is open on the clock as it is now", async () => {
+    let clock = new Date("2041-03-06T03:59:00Z");
+    const { store, createCall, deps } = dialSetup();
+    store.addContact({ id: "c1", phone: "+15555550111", customData: OFFER_FIELDS });
+    const offerCheck = vi.fn(async (): Promise<OfferCheck> => {
+      clock = new Date("2041-03-06T03:59:30Z");
+      return "offerable";
+    });
+    await runCampaignTick("test-lane", { ...basePolicy, offerCheck }, { ...deps, now: () => clock });
+    expect(createCall).toHaveBeenCalledTimes(1);
+  });
+
   it("reads today's fields from the source, over the row's own", async () => {
     const { store, deps } = dialSetup();
     store.addContact({
@@ -313,6 +347,24 @@ describe("the text tick asks the offer check before it sends", () => {
     });
   });
 
+  it("reads the window again after the offer check, and sends nothing once it has closed", async () => {
+    // Review of #519, the text tick's half: it checks the window once, at its start.
+    let clock = new Date("2041-03-06T03:59:58Z");
+    const { store, sent, deps, policy } = textSetup(async () => {
+      clock = new Date("2041-03-06T04:00:05Z");
+      return "offerable";
+    });
+    store.addContact({ id: "c1", phone: "+15555550111", customData: OFFER_FIELDS });
+    const r = await runTextTick("test-lane", policy, { ...deps, now: () => clock });
+    expect(r.held).toEqual({ outside_hours: 1 });
+    expect(sent).toEqual([]);
+    expect(textRecordOf(store.contacts.get("c1")!.customData)).toMatchObject({
+      state: "retry",
+      reason: "outside_hours",
+      retry_after: "2041-03-06T17:00:05.000Z",
+    });
+  });
+
   it("does not ask about a number on the do-not-contact list", async () => {
     const offerCheck = vi.fn(async (): Promise<OfferCheck> => "offerable");
     const { store, deps, policy } = textSetup(offerCheck);
@@ -392,6 +444,25 @@ describe("the NPX lane's offer check", () => {
     );
     expect("slots" in onTheCall && onTheCall.slots.map((s) => s.slotId)).toEqual(["s1"]);
     expect(npx.availability).toHaveBeenCalledTimes(1);
+  });
+
+  it("reads NPX afresh when the record's group, partners or appointment date changed", async () => {
+    // Review of #519: the dialler checks with today's fields from the source,
+    // and a cached answer for yesterday's fields is not an answer for these.
+    npx.availability.mockResolvedValueOnce({ ok: true, slots: [], truncated: false });
+    expect(await npxOfferCheck(row("c1"), NPX_OUTREACH_LIVE_CAMPAIGN_KEY)).toBe("nothing_to_offer");
+    npx.availability.mockResolvedValue({ ok: true, slots: [slot("s1")], truncated: false });
+    for (const changed of [
+      { ...OFFER_FIELDS, medical_group: "Another Synthetic Medical Group" },
+      { ...OFFER_FIELDS, partners: ["Synthetic Partner Eyecare", "Second Synthetic Partner"] },
+      { ...OFFER_FIELDS, appointment_date: "2041-05-11" },
+    ]) {
+      expect(await npxOfferCheck(row("c1", changed), NPX_OUTREACH_LIVE_CAMPAIGN_KEY)).toBe("offerable");
+    }
+    expect(npx.availability).toHaveBeenCalledTimes(4);
+    // The same fields again read the cache.
+    expect(await npxOfferCheck(row("c1"), NPX_OUTREACH_LIVE_CAMPAIGN_KEY)).toBe("nothing_to_offer");
+    expect(npx.availability).toHaveBeenCalledTimes(4);
   });
 
   it("reads the demo NPX for the demo campaign, never production", async () => {
