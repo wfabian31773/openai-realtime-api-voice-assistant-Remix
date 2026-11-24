@@ -114,6 +114,15 @@ describe("the Postgres admin store", () => {
     expect(ADMIN_SQL.callEvents).toMatch(/order by \(call_events\.at at time zone 'UTC'\), id/);
   });
 
+  // Review of #520: a refused escalate_to_human is not an urgent call. Only an
+  // outcome that dialled (success, or handoffFailed) counts.
+  it("lists only escalations that proceeded, never a bare escalate_to_human event", () => {
+    const sql = ADMIN_SQL.urgentWithoutChain;
+    expect(sql).not.toContain(`'[{"tool":"escalate_to_human"}]'`);
+    expect(sql).toContain(`'[{"tool":"escalate_to_human","outcome":{"success":true}}]'::jsonb`);
+    expect(sql).toContain(`'[{"tool":"escalate_to_human","outcome":{"handoffFailed":true}}]'::jsonb`);
+  });
+
   it("no statement reads a call_logs, call_turns or call_events time bare after its FROM", () => {
     const naive = /\bfrom\s+(call_logs|call_turns|call_events)\b/i;
     const checked: string[] = [];

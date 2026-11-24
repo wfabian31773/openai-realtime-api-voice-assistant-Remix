@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Express, RequestHandler } from "express";
 import { requireAuth, requireRole } from "./auth";
-import { EXTEND_PLAN_CHANGED, mountOnCallAdmin, ON_CALL_API, samePlan, sameOverlapIds, storePerPool } from "./onCallAdmin";
+import { EXTEND_PLAN_CHANGED, maskCallPhones, mountOnCallAdmin, ON_CALL_API, samePlan, sameOverlapIds, storePerPool } from "./onCallAdmin";
 import { emptyFakeState, FakeOnCallAdminStore, type FakeOptions, type FakeState } from "./onCallAdmin/store.fake";
 import { pacificWallToDate } from "./onCallAdmin/logic";
 
@@ -668,5 +668,45 @@ describe("the admin store follows the database pool", () => {
     const src = readFileSync(new URL("./routes.ts", import.meta.url), "utf8");
     expect(src).toContain("storePerPool(() => pool,");
     expect(src).not.toMatch(/onCallAdminStore\s*\?\?=/);
+  });
+});
+
+// Review of #520: call detail and the call list mask a phone in any common
+// written form to its last four, and leave dates, times, ticket numbers and
+// SIDs alone.
+describe("maskCallPhones in free text", () => {
+  it.each([
+    ["call me at (415) 555-0123 please", "call me at …0123 please"],
+    ["415-555-0123", "…0123"],
+    ["415.555.0123", "…0123"],
+    ["415 555 0123", "…0123"],
+    ["4155550123", "…0123"],
+    ["1-415-555-0123", "…0123"],
+    ["+1 (415) 555-0123", "…0123"],
+    ["+14155550123.", "…0123."],
+    ["it is 4 1 5 5 5 5 0 1 2 3 thanks", "it is …0123 thanks"],
+    ["4, 1, 5, 5, 5, 5, 0, 1, 2, 3", "…0123"],
+  ])("masks %j", (input, out) => {
+    expect(maskCallPhones(input)).toBe(out);
+  });
+
+  it.each([
+    "born 03/17/1973",
+    "DOB 1973-03-17",
+    "at 2026-12-05T06:00:40.000Z",
+    "at 10:30 PM",
+    "ticket VA-84772 and PCP-73679",
+    "CA0123456789abcdef0123456789abcdef",
+    "order 12345",
+    "12-05-2026",
+    "1 2 3",
+  ])("leaves %j alone", (input) => {
+    expect(maskCallPhones(input)).toBe(input);
+  });
+
+  it("masks every string in a nested call-detail shape", () => {
+    expect(
+      maskCallPhones({ timeline: [{ text: "my number is (415) 555-0123", data: { message: "dialled 415-555-0199" } }] }),
+    ).toEqual({ timeline: [{ text: "my number is …0123", data: { message: "dialled …0199" } }] });
   });
 });

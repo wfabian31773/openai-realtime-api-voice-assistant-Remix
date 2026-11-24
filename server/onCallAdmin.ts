@@ -271,8 +271,38 @@ function describe(ans: OnCallAnswer, data: RotationData, at: Date, fallbackPhone
  * Providers tab). Masks phone-named keys, and any full E.164 number inside a
  * string anywhere in the response (routing JSON, tool arguments, event data).
  */
+/**
+ * A phone number written inside free text (a transcript line, a summary, an
+ * event message), in the forms a transcriber or a person writes one:
+ * E.164 ("+14155550123"), US with an optional +1 / 1 and parentheses,
+ * spaces, dots or dashes ("(415) 555-0123", "1.415.555.0123"), ten or eleven
+ * bare digits, and digits read out one at a time ("4 1 5 5 5 5 0 1 2 3").
+ * Bounded by non-word characters, so a digit run inside a SID or a ticket
+ * number ("VA-84772") is left alone; dates ("03/17/1973", "2026-12-05"),
+ * times and ISO instants have the wrong grouping and do not match.
+ * Review of #520: only the bare "+" form was masked before.
+ */
+const PHONE_IN_TEXT = new RegExp(
+  [
+    String.raw`\+\d{10,15}`,
+    String.raw`(?:\+?1[\s.-]?)?(?:\(\d{3}\)\s?|\d{3}[\s.-]?)\d{3}[\s.-]?\d{4}`,
+    String.raw`(?:\d[ ,.-]{1,2}){9,10}\d`,
+  ]
+    .map((p) => `(?<![\\w+])${p}(?![\\w])`)
+    .join("|"),
+  "g",
+);
+
+function maskPhonesInText(s: string): string {
+  return s.replace(PHONE_IN_TEXT, (m) => {
+    const digits = m.replace(/\D/g, "");
+    const isPhone = m.startsWith("+") ? digits.length >= 10 : digits.length === 10 || (digits.length === 11 && digits[0] === "1");
+    return isPhone ? last4(digits) ?? m : m;
+  });
+}
+
 export function maskCallPhones(v: unknown): unknown {
-  if (typeof v === "string") return v.replace(/\+\d{10,15}\b/g, (m) => last4(m) ?? "");
+  if (typeof v === "string") return maskPhonesInText(v);
   if (Array.isArray(v)) return v.map(maskCallPhones);
   if (!v || typeof v !== "object") return v;
   return Object.fromEntries(

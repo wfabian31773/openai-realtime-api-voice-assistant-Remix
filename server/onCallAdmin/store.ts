@@ -341,7 +341,12 @@ export const ADMIN_SQL = {
   urgentWithoutChain: `select ${CALL_COLS} from call_logs c
       where c.agent_used = any($1::text[])
         and (c.created_at at time zone 'UTC') >= $2::timestamptz and (c.created_at at time zone 'UTC') < $3::timestamptz
-        and c.tool_timeline->'events' @> '[{"tool":"escalate_to_human"}]'::jsonb
+        -- Only an escalation that proceeded to a dial: escalate_to_human answered
+        -- success (transferred) or handoffFailed (dialled, not connected). A
+        -- refusal (refused code, need_identity, the duplicate refusal) answers
+        -- success false with neither, and is not an urgent call (review of #520).
+        and (c.tool_timeline->'events' @> '[{"tool":"escalate_to_human","outcome":{"success":true}}]'::jsonb
+          or c.tool_timeline->'events' @> '[{"tool":"escalate_to_human","outcome":{"handoffFailed":true}}]'::jsonb)
         and not exists (select 1 from on_call_escalations e where e.call_sid = c.call_sid)
       order by (c.created_at at time zone 'UTC') desc limit $4::integer`,
   turns: `select (at at time zone 'UTC') as at, role, coalesce(final_transcript, raw_transcript) as text from call_turns
