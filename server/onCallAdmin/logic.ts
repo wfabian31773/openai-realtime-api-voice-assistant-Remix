@@ -696,8 +696,10 @@ export interface CallOutcome {
 
 export function outcomeSummary(bundle: Pick<CallBundle, "escalation" | "attempts" | "callLog" | "providerNames">): CallOutcome {
   const esc = bundle.escalation;
-  // Only a call that rang counts (review of #520): the list's own rule.
-  const calls = bundle.attempts.filter(attemptRang).length;
+  // Match the list's dial rules; legacy handoffs may have no attempt rows.
+  const rangAttempts = bundle.attempts.filter(attemptRang).length;
+  const legacyDials = toolEvents(bundle.callLog?.toolTimeline).filter((e) => e.tool === "escalate_to_human" && e.outcome?.dialAttempted === true).length;
+  const calls = rangAttempts > 0 ? rangAttempts : legacyDials;
   const texts = bundle.attempts.filter((a) => a.kind === "sms" || a.kind === "nudge_sms").length;
   const levelsReached = bundle.attempts.length ? Math.max(...bundle.attempts.map((a) => a.levelIndex)) + 1 : 0;
   const start = bundle.callLog?.startTime ?? bundle.callLog?.createdAt ?? esc?.createdAt ?? null;

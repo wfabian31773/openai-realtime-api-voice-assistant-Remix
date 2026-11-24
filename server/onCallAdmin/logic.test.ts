@@ -281,6 +281,55 @@ describe("the per-call timeline", () => {
     expect(outcomeSummary(b).calls).toBe(3);
   });
 
+  it.each([1, 2])("counts %i legacy dials without a chain or attempt rows", (calls) => {
+    const toolTimeline = {
+      events: Array.from({ length: calls }, () => ({ tool: "escalate_to_human", outcome: { dialAttempted: true } })),
+    };
+    const b = { ...bundle, escalation: null, attempts: [], callLog: { ...bundle.callLog!, toolTimeline } };
+    expect(outcomeSummary(b).calls).toBe(calls);
+  });
+
+  it.each([
+    { tool: "escalate_to_human", outcome: { dialAttempted: false } },
+    { tool: "escalate_to_human", outcome: { handoffFailed: true } },
+    { tool: "escalate_to_human", outcome: { dialAttempted: "true" } },
+    { tool: "other_tool", outcome: { dialAttempted: true } },
+  ])("does not count a legacy event without matching dial telemetry: %j", (event) => {
+    const b = {
+      ...bundle,
+      escalation: null,
+      attempts: [],
+      callLog: { ...bundle.callLog!, toolTimeline: { events: [event] } },
+    };
+    expect(outcomeSummary(b).calls).toBe(0);
+  });
+
+  it.each([null, undefined, 42, "oops", {}, { events: null }, { events: {} }, { events: "oops" }, { events: [null] }])(
+    "ignores a malformed legacy tool timeline: %j",
+    (toolTimeline) => {
+      const b = { ...bundle, escalation: null, attempts: [], callLog: { ...bundle.callLog!, toolTimeline } };
+      expect(() => outcomeSummary(b)).not.toThrow();
+      expect(outcomeSummary(b).calls).toBe(0);
+    },
+  );
+
+  it("counts legacy dial telemetry when no attempt rang", () => {
+    const b = {
+      ...bundle,
+      attempts: [{ ...bundle.attempts[1], outcome: "failed", providerCallSid: null }],
+      callLog: { ...bundle.callLog!, toolTimeline: { events: [{ tool: "escalate_to_human", outcome: { dialAttempted: true } }] } },
+    };
+    expect(outcomeSummary(b).calls).toBe(1);
+  });
+
+  it("uses ringing attempt rows without adding legacy dial telemetry", () => {
+    const b = {
+      ...bundle,
+      callLog: { ...bundle.callLog!, toolTimeline: { events: [{ tool: "escalate_to_human", outcome: { dialAttempted: true } }] } },
+    };
+    expect(outcomeSummary(b).calls).toBe(2);
+  });
+
   it("survives a plan stored in the wrong shape", () => {
     for (const plan of [{ levels: "oops" }, { levels: [null, 5, "x"] }, { levels: { 0: "a" } }, null] as any[]) {
       const b = { ...bundle, escalation: { ...bundle.escalation!, plan } };
