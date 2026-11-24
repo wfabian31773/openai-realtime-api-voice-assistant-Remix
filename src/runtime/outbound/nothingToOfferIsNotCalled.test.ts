@@ -3,10 +3,12 @@
  *
  * Operator, 2026-11-24, on the patients NPX has no credentialed opening for:
  * "if they're not credentialed, then we shouldn't be calling those patients
- * anyway, right?" On 2026-11-23, 4 of the 18 NPX outreach calls that reached
- * describe_upcoming_appointment told the patient that nothing sooner was open
- * (the corpus below). The dialler now asks the lane's offer check after every
- * other check and before it rings; the text tick asks it before it sends.
+ * anyway, right?" On 2026-11-23 (UTC), 4 of the 17 NPX outreach calls that
+ * reached describe_upcoming_appointment told the patient nothing sooner was
+ * open: 2 of 8 dialled calls and 2 of 9 returned calls (the corpus below). The
+ * dialler now asks the lane's offer check after every other check and before
+ * it rings; the text tick asks it before it sends. A returned call is not
+ * stopped here: what stops is the dial or the text that would prompt one.
  *
  * Synthetic people, numbers and practices only.
  */
@@ -42,12 +44,15 @@ const NOW = new Date("2041-03-05T18:00:00Z");
 const TOMORROW_9AM = new Date("2041-03-06T17:00:00Z");
 const ON = { RUNTIME_OUTBOUND_DIALING: "1", OUTBOUND_CAMPAIGN_TEST: "1", OUTBOUND_TEST_FROM: "+15555550100", NPX_TEST_TEXTS: "1" };
 
-/** The four NPX calls of 2026-11-23 that heard "nothing sooner is open". */
+/** The four NPX calls of 2026-11-23 that heard "nothing sooner is open":
+ * two we dialled and two returned calls. Each stands in here as a contact
+ * the dialler would ring next, with a synthetic record whose group NPX has no
+ * opening for. */
 const NOTHING_SOONER_20261123 = [
-  "CAb506b033d3db0dac5b453870838ebe56",
-  "CA671b718383db52a068c5db9cfa7a42a8",
-  "CA9e63bfccce5eb227763f59ee0a89eac7",
-  "CA4c899a2f35b6a81a234a5bced588c034",
+  "CA671b718383db52a068c5db9cfa7a42a8", // dialled
+  "CA9e63bfccce5eb227763f59ee0a89eac7", // dialled
+  "CAb506b033d3db0dac5b453870838ebe56", // returned call
+  "CA4c899a2f35b6a81a234a5bced588c034", // returned call
 ] as const;
 
 /** What the movable list carries for an NPX outreach row: the offer's inputs. */
@@ -401,7 +406,7 @@ describe("the NPX lane's offer check", () => {
     expect(npx.availability).toHaveBeenCalledTimes(1);
   });
 
-  it("rings none of the four 2026-11-23 calls that heard nothing sooner was open, and rings the control", async () => {
+  it("rings none of the four 2026-11-23 shapes that heard nothing sooner was open, and rings the control", async () => {
     const { store, createCall, deps } = dialSetup();
     NOTHING_SOONER_20261123.forEach((sid, i) => {
       store.addContact({ id: `c${i}`, phone: `+1555555012${i}`, externalRef: `ref-${sid}`, customData: OFFER_FIELDS });

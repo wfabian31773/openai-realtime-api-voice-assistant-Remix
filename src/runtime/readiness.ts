@@ -2180,10 +2180,25 @@ import { callEnvironment } from "./callRecord";
  * writes it), and the prompt says a phone only as a tool gave it. Above
  * main's v269 (#517, `b56e438c`), which it contains along with v268 (#514,
  * `e6861203`) and v267 (#515, `32d0e528`); v245 is #488 on its open branch.
+ * No migration. On main since #518 (`990cdf0e`).
+ *
+ * v271 — NPX RINGS AND TEXTS NOBODY IT HAS NO OPENING FOR (2026-11-24).
+ * Operator, 2026-11-24: "if they're not credentialed, then we shouldn't be
+ * calling those patients anyway". On 2026-11-23 (UTC), 4 of the 17 NPX
+ * outreach calls that reached describe_upcoming_appointment told the patient
+ * nothing sooner was open (2 of 8 dialled, 2 of 9 returned). The dialler asks
+ * the lane's offer check (OutboundLanePolicy.offerCheck) after every other
+ * check and before it rings, and the text tick asks it before it sends; the
+ * NPX lane's check reads the same availability the call reads, through the
+ * same ten-minute cache, so the call that follows reuses the read. Nothing to
+ * offer waits until tomorrow's opening; an answer that cannot be read (NPX
+ * down, a timeout, a throw) waits the short retry and rings nobody. Above
+ * main's v270 (#518, `990cdf0e`), which it contains along with v269 (#517,
+ * `b56e438c`) and v268 (#514, `e6861203`); v245 is #488 on its open branch.
  * No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v270-the-npx-agent-gives-the-practice-phone-20261123";
+  "voice-runtime-v271-npx-calls-nobody-it-has-no-opening-for-20261124";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
