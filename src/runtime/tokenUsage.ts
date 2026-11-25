@@ -253,7 +253,7 @@ function counts(): Record<string, number> {
 }
 
 function bump(map: Record<string, number>, key: string): void {
-  if (Object.prototype.hasOwnProperty.call(map, key)) map[key] += 1;
+  if (key in map) map[key] += 1; // a null-prototype map: only own keys
   else if (Object.keys(map).length < MAX_KEYS) map[key] = 1;
 }
 

@@ -2220,8 +2220,10 @@ import { callEnvironment } from "./callRecord";
  * header were never kept. Now: a breakdown not reported stays NULL; the flat
  * counts, audio seconds, statuses and response ids go to one
  * provider_usage_summary call_events row per call; the close line and row
- * carry pingsReceived, msSinceServerPing and serverTiming. Above main's v272
- * (#521, `a73ee40f`). No migration.
+ * carry pingsReceived, msSinceServerPing and serverTiming. Billable audio
+ * seconds are xAI's running total per session, kept as the latest value and
+ * summed across reconnects, never summed per response (Codex P1 on #522).
+ * Above main's v272 (#521, `a73ee40f`). No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
   "voice-runtime-v273-what-xai-reports-is-kept-20261125";
