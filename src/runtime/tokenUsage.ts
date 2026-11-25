@@ -69,6 +69,17 @@ function plus(a: number | null, b: number | null): number | null {
   return a + b;
 }
 
+/**
+ * A TOTAL BUILT FROM ITS PARTS, known only when every part is (review of
+ * #522, head `08557218`). `plus` is for adding one counter across responses,
+ * where a response that did not report it adds nothing; a total made of two
+ * halves with one half missing is unknown, and `plus` would call the half
+ * the total, an undercount on the row.
+ */
+function both(a: number | null, b: number | null): number | null {
+  return a === null || b === null ? null : a + b;
+}
+
 function obj(v: unknown): Record<string, unknown> | undefined {
   return v !== null && typeof v === "object" ? (v as Record<string, unknown>) : undefined;
 }
@@ -125,7 +136,7 @@ export function readUsage(event: unknown): UsageTotals | null {
     inputAudioTokens: num(inDetails.audio_tokens),
     outputTextTokens: num(outDetails.text_tokens),
     outputAudioTokens: num(outDetails.audio_tokens),
-    inputCachedTokens: num(inDetails.cached_tokens) ?? plus(cachedText, cachedAudio),
+    inputCachedTokens: num(inDetails.cached_tokens) ?? both(cachedText, cachedAudio),
     inputCachedTextTokens: cachedText,
     inputCachedAudioTokens: cachedAudio,
   };
@@ -387,13 +398,13 @@ export function providerUsageMarker(s: ProviderUsageSummary): string {
 /** Printed at teardown, so the cache rate is readable per call in the log. */
 export function usageSummaryMarker(u: UsageTotals): string {
   const n = (v: number | null) => (v === null ? "none" : String(v));
-  const input = plus(u.inputTextTokens, u.inputAudioTokens);
+  const input = both(u.inputTextTokens, u.inputAudioTokens);
   const pct =
     input !== null && input > 0 && u.inputCachedTokens !== null
       ? `${Math.round((u.inputCachedTokens / input) * 1000) / 10}%`
       : "none";
   return (
     `[TOKENS] in ${n(input)} (text ${n(u.inputTextTokens)}, audio ${n(u.inputAudioTokens)}), ` +
-    `cached ${n(u.inputCachedTokens)} = ${pct}, out ${n(plus(u.outputTextTokens, u.outputAudioTokens))}`
+    `cached ${n(u.inputCachedTokens)} = ${pct}, out ${n(both(u.outputTextTokens, u.outputAudioTokens))}`
   );
 }

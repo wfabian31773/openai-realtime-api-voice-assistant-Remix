@@ -20,6 +20,7 @@ import {
   providerUsageMarker,
   readResponseFacts,
   readUsage,
+  usageSummaryMarker,
 } from "./tokenUsage";
 import { providerUsageEvent } from "./providerUsageTelemetry";
 import { toCallLogRow, toConflictUpdate } from "./callRecord";
@@ -70,6 +71,60 @@ describe("reading xAI's response.done", () => {
   it("still reads a split when one is sent", () => {
     const u = readUsage({ response: { usage: { input_tokens_details: { text_tokens: 5 } } } });
     expect(u?.inputTextTokens).toBe(5);
+  });
+
+  it("builds the cached total from its halves only when both were reported (#522 review, round 2)", () => {
+    const one = readUsage({
+      response: { usage: { input_tokens_details: { cached_tokens_details: { text_tokens: 7 } } } },
+    });
+    expect(one?.inputCachedTextTokens).toBe(7);
+    expect(one?.inputCachedAudioTokens).toBeNull();
+    // Half the total is not the total.
+    expect(one?.inputCachedTokens).toBeNull();
+
+    const two = readUsage({
+      response: {
+        usage: { input_tokens_details: { cached_tokens_details: { text_tokens: 7, audio_tokens: 3 } } },
+      },
+    });
+    expect(two?.inputCachedTokens).toBe(10);
+
+    // A total xAI reported stands, whatever the halves say.
+    const reported = readUsage({
+      response: {
+        usage: { input_tokens_details: { cached_tokens: 12, cached_tokens_details: { text_tokens: 7 } } },
+      },
+    });
+    expect(reported?.inputCachedTokens).toBe(12);
+  });
+
+  it("prints no cache rate over a partial input count (#522 review, round 2)", () => {
+    const partial = usageSummaryMarker({
+      inputTextTokens: 20,
+      inputAudioTokens: null,
+      outputTextTokens: 4,
+      outputAudioTokens: null,
+      inputCachedTokens: 50,
+      inputCachedTextTokens: null,
+      inputCachedAudioTokens: null,
+    });
+    expect(partial).toContain("in none (text 20, audio none)");
+    expect(partial).toContain("cached 50 = none");
+    expect(partial).toContain("out none");
+    expect(partial).not.toContain("250%");
+
+    const whole = usageSummaryMarker({
+      inputTextTokens: 20,
+      inputAudioTokens: 80,
+      outputTextTokens: 4,
+      outputAudioTokens: 6,
+      inputCachedTokens: 50,
+      inputCachedTextTokens: null,
+      inputCachedAudioTokens: null,
+    });
+    expect(whole).toContain("in 100 (text 20, audio 80)");
+    expect(whole).toContain("cached 50 = 50%");
+    expect(whole).toContain("out 10");
   });
 
   it("reads why a response did not complete", () => {
