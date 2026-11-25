@@ -101,6 +101,15 @@ export interface RuntimeCallLogRow {
    * and was parked (parkedRecordings.ts). Otherwise the callback writes the
    * column itself and this write must not touch it. */
   recordingUrl?: string;
+  /** Present ONLY when the provider reported a text/audio split (v273,
+   * tokenUsage.ts). Absent leaves the columns NULL: unknown, not zero. */
+  inputTextTokens?: number;
+  inputAudioTokens?: number;
+  outputTextTokens?: number;
+  outputAudioTokens?: number;
+  inputCachedTokens?: number;
+  inputCachedTextTokens?: number;
+  inputCachedAudioTokens?: number;
 }
 
 /**
@@ -146,6 +155,26 @@ export function toConflictUpdate(row: RuntimeCallLogRow): Partial<RuntimeCallLog
       : {}),
     ...(row.transcriptWindowSeconds !== undefined
       ? { transcriptWindowSeconds: row.transcriptWindowSeconds }
+      : {}),
+    /**
+     * THE TOKEN COLUMNS, when the provider reported a split (v273). The row
+     * is opened when the call starts, so the teardown write takes this update
+     * and not the insert; the token columns were left out of it, so on
+     * 1,500 of 1,500 runtime calls of 30 s or more in the three days to
+     * 2026-11-25 every token column read NULL whatever the provider said.
+     * Present only when the reader found a split, so unknown never
+     * overwrites known.
+     */
+    ...(row.inputTextTokens !== undefined
+      ? {
+          inputTextTokens: row.inputTextTokens,
+          inputAudioTokens: row.inputAudioTokens,
+          outputTextTokens: row.outputTextTokens,
+          outputAudioTokens: row.outputAudioTokens,
+          inputCachedTokens: row.inputCachedTokens,
+          inputCachedTextTokens: row.inputCachedTextTokens,
+          inputCachedAudioTokens: row.inputCachedAudioTokens,
+        }
       : {}),
   };
 }

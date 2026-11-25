@@ -236,6 +236,8 @@ interface Harness {
   /** Every caller-audio row the runtime wrote, in order (v64). */
   audioRows: Array<{ callSid: string; outcome: string; counts: unknown }>;
   closeRows: Array<{ callSid: string; outcome: string; stage?: string; diagnostics: unknown }>;
+  /** Every provider_usage_summary the runtime wrote, in order (v273). */
+  usageRows: Array<{ callSid: string; outcome: string; summary: unknown }>;
   /** Every provider_reconnect batch the runtime wrote, in order (v263). */
   reconnectRows: Array<{ callSid: string; events: unknown[] }>;
   /**
@@ -293,6 +295,7 @@ async function harness(
     gradeCall?: (record: unknown, ids: unknown) => Promise<unknown>;
     logFollowUps?: (record: unknown, ids: unknown) => Promise<unknown>;
     logCallerAudio?: (call: unknown, counts: unknown, ids: unknown) => Promise<unknown>;
+    logProviderUsage?: (call: unknown, summary: unknown, ids: unknown) => Promise<unknown>;
     logProviderClose?: (call: unknown, diagnostics: unknown, ids: unknown) => Promise<unknown>;
     logProviderReconnects?: (call: unknown, events: unknown, ids: unknown) => Promise<unknown>;
     startRecording?: (callSid: string, host: string | undefined) => Promise<unknown>;
@@ -321,6 +324,7 @@ async function harness(
   const persistedIdentity: Array<unknown> = [];
   const audioRows: Array<{ callSid: string; outcome: string; counts: unknown }> = [];
   const closeRows: Array<{ callSid: string; outcome: string; stage?: string; diagnostics: unknown }> = [];
+  const usageRows: Array<{ callSid: string; outcome: string; summary: unknown }> = [];
   const reconnectRows: Array<{ callSid: string; events: unknown[] }> = [];
   const swept: Array<Record<string, unknown>> = [];
   const pcpSwept: Array<Record<string, unknown>> = [];
@@ -394,6 +398,16 @@ async function harness(
         });
         return true;
       }),
+    logProviderUsage:
+      (over.logProviderUsage as never) ??
+      (async (call, summary) => {
+        usageRows.push({
+          callSid: (call as { callSid: string }).callSid,
+          outcome: (call as { outcome: string }).outcome,
+          summary,
+        });
+        return true;
+      }),
     logProviderClose:
       (over.logProviderClose as never) ??
       (async (call, diagnostics) => {
@@ -450,6 +464,7 @@ async function harness(
     persistedIdentity,
     audioRows,
     closeRows,
+    usageRows,
     reconnectRows,
     swept,
     pcpSwept,
@@ -735,6 +750,51 @@ describe("one whole call, end to end, offline", () => {
     ws.send(JSON.stringify({ event: "stop", streamSid: "MZ1" }));
     await settle();
     expect(h.registry.consumeOutcome("CA2")).toBe("caller_hangup");
+  });
+
+  it("hands what xAI reported on each response.done to the usage writer (v273)", async () => {
+    const h = await harness();
+    const answered = await post(h, "/voice/optical", { CallSid: "CA-usage1", From: "+15551234567", To: "+15559876543" });
+    const { ws } = await openStream(h, "CA-usage1", tokenFrom(answered.text));
+    await settle();
+    const grok = h.transports[0];
+    grok.emit({ type: "session.created" } as GrokServerEvent);
+    grok.emit({ type: "session.updated" } as GrokServerEvent);
+    // The shape probed on a test socket on 2026-11-25.
+    grok.emit({
+      type: "response.done",
+      response_id: "resp_one",
+      response: {
+        id: "resp_one",
+        status: "completed",
+        status_details: null,
+        output: [],
+        usage: { input_tokens: 40, output_tokens: 9, total_tokens: 49 },
+      },
+      usage: { output_audio_seconds: 2.54, billable_audio_seconds: 1 },
+    } as unknown as GrokServerEvent);
+    await settle();
+    ws.send(JSON.stringify({ event: "stop", streamSid: "MZ1" }));
+    await settle(8);
+
+    const row = h.usageRows.find((r) => r.callSid === "CA-usage1");
+    expect(row).toMatchObject({
+      outcome: "caller_hangup",
+      summary: {
+        responses: 1,
+        statuses: { completed: 1 },
+        inputTokens: 40,
+        outputTokens: 9,
+        totalTokens: 49,
+        outputAudioSeconds: 2.54,
+        billableAudioSeconds: 1,
+        lastResponseId: "resp_one",
+      },
+    });
+    // No split was reported, so the token columns stay NULL rather than 0.
+    const persisted = h.persisted.find((r) => r.callSid === "CA-usage1") as { usage?: unknown };
+    expect(persisted?.usage).toBeUndefined();
+    await h.close();
   });
 
   it("barges in with BOTH signals when the caller talks over the agent", async () => {
@@ -3049,9 +3109,15 @@ describe("the provider-close row (v259)", () => {
     expect(chain).toBeGreaterThan(-1);
     expect(chain).toBeLessThan(at);
     const reconnects = runtimeSource.slice(chain, at);
-    expect(reconnects).toContain("{ after: audioWritten }");
-    expect(reconnects).toContain(": audioWritten;");
-    expect(runtimeSource.indexOf("const audioWritten = logAudio(")).toBeLessThan(chain);
+    // v273: the provider-usage row sits between the caller-audio row and
+    // the reconnect rows on the same per-SID buffer.
+    expect(reconnects).toContain("{ after: usageWritten }");
+    expect(reconnects).toContain(": usageWritten;");
+    const usage = runtimeSource.indexOf("const usageWritten = logUsage(");
+    expect(usage).toBeGreaterThan(-1);
+    expect(usage).toBeLessThan(chain);
+    expect(runtimeSource.slice(usage, chain)).toContain("{ after: audioWritten }");
+    expect(runtimeSource.indexOf("const audioWritten = logAudio(")).toBeLessThan(usage);
   });
 });
 

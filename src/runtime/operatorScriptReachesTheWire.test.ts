@@ -132,7 +132,7 @@ async function placeCall(payload: Record<string, unknown>, extraEnv: Record<stri
     persistCall: vi.fn().mockResolvedValue(true), sweepCall: vi.fn().mockResolvedValue(undefined),
     sweepPcpFloor: vi.fn().mockResolvedValue(undefined), fileSetupFailure: vi.fn().mockResolvedValue(undefined),
     gradeCall: vi.fn().mockResolvedValue(undefined), openCallRow: async () => undefined, stampBuild: async () => true,
-    persistTurns: async () => {}, logCallerAudio: async () => {},
+    persistTurns: async () => {}, logCallerAudio: async () => {}, logProviderUsage: async () => {},
   });
 
   // Twilio answers the URL the commit dialled with.

@@ -286,6 +286,8 @@ import { makeRecordingStarter } from "./callRecording";
 import { gradeRuntimeCall } from "./runtimeGrading";
 import { logRuntimeFollowUps } from "./followUpTelemetry";
 import { logCallerAudio } from "./callerAudioTelemetry";
+import { logProviderUsage } from "./providerUsageTelemetry";
+import type { ProviderUsageSummary } from "./tokenUsage";
 import { logProviderClose, logProviderReconnects, type ProviderReconnectRow } from "./providerCloseTelemetry";
 import {
   ReconnectingSession,
@@ -555,6 +557,16 @@ export interface VoiceRuntimeOptions {
     opts?: { after?: Promise<unknown> },
   ) => Promise<unknown>;
   /**
+   * What xAI reported for the call's responses (v273,
+   * providerUsageTelemetry.ts) — one PHI-free row. Injected for tests.
+   */
+  logProviderUsage?: (
+    call: { callSid: string; outcome: string },
+    summary: ProviderUsageSummary | undefined,
+    ids: { callLogId?: string },
+    opts?: { after?: Promise<unknown> },
+  ) => Promise<unknown>;
+  /**
    * Why each ticket-tool call did or did not file (v166,
    * ticketToolTelemetry.ts) — one PHI-free row, only on calls that ran a
    * ticket tool. Injected for tests.
@@ -756,6 +768,7 @@ export function mountVoiceRuntime(
   const logIdentity = options.logIdentity ?? logRuntimeIdentity;
   const logAudio = options.logCallerAudio ?? logCallerAudio;
   const logTicketTools = options.logTicketTools ?? logTicketToolOutcomes;
+  const logUsage = options.logProviderUsage ?? logProviderUsage;
   const logClose = options.logProviderClose ?? logProviderClose;
   const logReconnects = options.logProviderReconnects ?? logProviderReconnects;
   let laneSourcePromise: Promise<LaneSource> | null = null;
@@ -2205,6 +2218,17 @@ export function mountVoiceRuntime(
             const audioWritten = logAudio(record, callerAudio.counts(), { callLogId }, { after: ticketToolsWritten })
               .catch(() => undefined);
             /**
+             * AND WHAT xAI REPORTED FOR THE CALL'S RESPONSES (v273): statuses,
+             * token totals, audio seconds and the last response id. Same
+             * discipline as the writers above; changes nothing a caller hears.
+             */
+            const usageWritten = logUsage(
+              { callSid: record.callSid, outcome: record.outcome },
+              record.providerUsage,
+              { callLogId },
+              { after: audioWritten },
+            ).catch(() => undefined);
+            /**
              * AND WHY THE xAI CONNECTION ENDED (v259), only on a call that
              * ended as `provider_failure`: the raw socket's signal, the
              * timings, the trace ids and how late the event loop ran. Read
@@ -2222,9 +2246,9 @@ export function mountVoiceRuntime(
                   { callSid: record.callSid },
                   reconnecting.reconnectEvents(),
                   { callLogId },
-                  { after: audioWritten },
+                  { after: usageWritten },
                 ).catch(() => undefined)
-              : audioWritten;
+              : usageWritten;
             void logClose(
               { callSid: record.callSid, outcome: record.outcome },
               closeDiagnosticsOf(reconnecting?.currentTransport() ?? transport),
