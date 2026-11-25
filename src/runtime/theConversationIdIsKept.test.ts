@@ -287,6 +287,18 @@ describe("an id that is not text is never kept (#521 review)", () => {
 });
 
 describe("a reconnecting call keeps the ids of the socket in use", () => {
+  it("forwards every transport method a session calls, the trace id's included (#521 review)", () => {
+    const session = readFileSync(join(__dirname, "grokSession.ts"), "utf8");
+    const called = new Set(
+      [...session.matchAll(/this\.transport\.([A-Za-z]+)/g)].map((m) => m[1]),
+    );
+    expect(called.has("upgradeHeaders")).toBe(true);
+    const src = readFileSync(join(__dirname, "reconnectingSession.ts"), "utf8");
+    const start = src.indexOf("private guardedTransport(");
+    const proxy = src.slice(start, src.indexOf("return proxy;", start));
+    for (const method of called) expect(proxy, method).toMatch(new RegExp(`\\b${method}:`));
+  });
+
   it("passes the ids through the reconnect wrapper's transport", () => {
     const src = readFileSync(join(__dirname, "reconnectingSession.ts"), "utf8");
     const proxy = src.slice(src.indexOf("private guardedTransport("));
