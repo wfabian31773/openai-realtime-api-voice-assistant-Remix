@@ -83,7 +83,7 @@ function boot(enabled = true, env: Record<string, string | undefined> = {}) {
     operatorInboundStore: store, operatorInboundNotifier: notify, outboundStore: outbound,
     fetchPrecontext, resolveGreeting, startRecording, persistCall, sweepCall, sweepPcpFloor, fileSetupFailure, gradeCall,
     createTransport: () => provider, openCallRow: async () => undefined, stampBuild: async () => true,
-    persistTurns: async () => {}, logCallerAudio: async () => {},
+    persistTurns: async () => {}, logCallerAudio: async () => {}, logProviderUsage: async () => {},
   });
   async function post(path: string, body: Record<string, string>, valid = true) {
     const route = routes.find((r) => r.method === "post" && r.path === path)!;

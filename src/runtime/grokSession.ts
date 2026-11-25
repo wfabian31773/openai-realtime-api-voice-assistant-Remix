@@ -164,6 +164,19 @@ export interface ProviderCloseDiagnostics {
    */
   providerSessionId: string | null;
   providerConversationId: string | null;
+  /**
+   * v273: xAI's `ping` events on this socket, about one every ten seconds
+   * (probed 2026-11-25), and how long before the close the last one came.
+   * A drop whose pings stopped well before it is a different drop from one
+   * whose pings arrived up to the end.
+   */
+  pingsReceived: number;
+  msSinceServerPing: number | null;
+  /**
+   * v273: the upgrade response's `server-timing` header, capped. On the
+   * probe it named Cloudflare's edge and origin times for the handshake.
+   */
+  serverTiming: string | null;
 }
 
 /**
@@ -184,6 +197,28 @@ function capText(value: unknown, max: number): string | null {
   const flat = text.replace(/\s+/g, " ").trim();
   if (!flat) return null;
   return flat.length > max ? `${flat.slice(0, max)}…` : flat;
+}
+
+/**
+ * True for a frame that is one of xAI's `ping` events (v273). A ping is a
+ * small frame (`{"type":"ping","event_id":…,"timestamp":…}`, about 90
+ * characters), so only small frames are read: an audio delta is never parsed
+ * twice. A small frame naming `ping` is parsed and counts only when its
+ * TOP-LEVEL type is `ping`, whatever the spacing (#522 review: a substring
+ * match missed `"type": "ping"` and counted a nested one).
+ */
+export function isPingFrame(data: string): boolean {
+  if (data.length >= 300 || !data.includes("ping")) return false;
+  try {
+    const event: unknown = JSON.parse(data);
+    return (
+      event !== null &&
+      typeof event === "object" &&
+      (event as { type?: unknown }).type === "ping"
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**
@@ -1169,6 +1204,10 @@ export class WebSocketGrokTransport implements GrokTransport {
   // v272: xAI's own ids for this socket (see noteProviderIds).
   private providerSessionId: string | null = null;
   private providerConversationId: string | null = null;
+  // v273: xAI's pings and the handshake's server-timing header.
+  private pingsReceived = 0;
+  private lastPingAtMs: number | null = null;
+  private serverTiming: string | null = null;
   // v259: how this socket ended. See ProviderCloseDiagnostics.
   private openedAtMs: number | null = null;
   private lastInboundAtMs: number | null = null;
@@ -1227,6 +1266,7 @@ export class WebSocketGrokTransport implements GrokTransport {
           Array.isArray(v) ? v[0] : v;
         const trace = headerValue(raw["x-trace-id"]);
         const ray = headerValue(raw["cf-ray"]);
+        this.serverTiming = capText(headerValue(raw["server-timing"]), 200);
         this.headers = {
           ...(trace ? { xTraceId: trace } : {}),
           ...(ray ? { cfRay: ray } : {}),
@@ -1324,6 +1364,8 @@ export class WebSocketGrokTransport implements GrokTransport {
       `ray=${d.cfRay ?? "?"}`,
       `conversation=${d.providerConversationId ?? "?"}`,
       `session=${d.providerSessionId ?? "?"}`,
+      `pings=${d.pingsReceived}`,
+      `lastPing=${ms(d.msSinceServerPing)}`,
     ].join(" ");
   }
 
@@ -1367,11 +1409,18 @@ export class WebSocketGrokTransport implements GrokTransport {
       cfRay: this.headers.cfRay ?? null,
       providerSessionId: this.providerSessionId,
       providerConversationId: this.providerConversationId,
+      pingsReceived: this.pingsReceived,
+      msSinceServerPing: since(this.lastPingAtMs),
+      serverTiming: this.serverTiming,
     };
   }
 
   private handleInbound(data: string): void {
     this.lastInboundAtMs = Date.now();
+    if (isPingFrame(data)) {
+      this.pingsReceived += 1;
+      this.lastPingAtMs = this.lastInboundAtMs;
+    }
     // The ids are the socket's, not the session's: read them as the frame
     // arrives, before it waits in the buffer, so a drop before
     // commitBuffered() still names them on the close line and row (#521

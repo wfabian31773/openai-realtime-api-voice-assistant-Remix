@@ -115,7 +115,13 @@ import { noteCallerTranscript } from "../services/symptomCorroboration";
 import { noteCallLanguage } from "../services/callLanguage";
 import { ghostCallRefusal } from "../services/ghostCallProtection";
 import { callerConclusion, completesGoodbye, type CallerConclusion } from "./goodbye";
-import { CallUsage, usageSummaryMarker, type UsageTotals } from "./tokenUsage";
+import {
+  CallUsage,
+  providerUsageMarker,
+  usageSummaryMarker,
+  type ProviderUsageSummary,
+  type UsageTotals,
+} from "./tokenUsage";
 import type { TwilioInboundFrame, TwilioOutboundFrame } from "./twilioFrames";
 import {
   ToolCallCeiling,
@@ -703,6 +709,12 @@ export interface VoiceCallRecord {
    * nothing. Undefined leaves the columns NULL on purpose — see CallUsage.
    */
   usage?: UsageTotals;
+  /**
+   * Every `response.done` on the call as xAI reported it (v273): statuses,
+   * the flat token totals, the audio seconds and the last response id.
+   * Undefined when no response finished. Goes to `call_events`, not the row.
+   */
+  providerUsage?: ProviderUsageSummary;
   /** The tool follow-up bookkeeping (v55) — see FollowUpStats. Optional only
    * so older fixtures still type-check; the bridge always sets it. */
   followUps?: FollowUpStats;
@@ -2052,6 +2064,9 @@ export class VoiceCallBridge {
    * is therefore said in full before the conversation goes on (P1).
    */
   private handleProviderDrop(): void {
+    // The session that dropped kept its own running billable total; the new
+    // one starts again from nothing (#522 review).
+    this.usage.newSession();
     if (this.ended) return;
     const greeting = this.greetingLine;
     const greetingText =
@@ -3492,6 +3507,8 @@ export class VoiceCallBridge {
 
     const usageAtTeardown = this.usage.result();
     if (usageAtTeardown) console.info(usageSummaryMarker(usageAtTeardown));
+    const providerUsage = this.usage.summary();
+    if (providerUsage) console.info(providerUsageMarker(providerUsage));
 
     if (this.deps.persistCallRecord) {
       const persist = this.deps.persistCallRecord;
@@ -3510,6 +3527,7 @@ export class VoiceCallBridge {
         turns: this.transcriptLog.turns(),
         toolEvents: [...this.toolEvents],
         ...(usageAtTeardown ? { usage: usageAtTeardown } : {}),
+        ...(providerUsage ? { providerUsage } : {}),
         agentTurns: this.agentTurns,
         interruptions: this.interruptions,
         hangupsHeld: this.hangupsHeld,

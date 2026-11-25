@@ -101,6 +101,15 @@ export interface RuntimeCallLogRow {
    * and was parked (parkedRecordings.ts). Otherwise the callback writes the
    * column itself and this write must not touch it. */
   recordingUrl?: string;
+  /** Present ONLY when the provider reported a text/audio split (v273,
+   * tokenUsage.ts). Absent leaves the columns NULL: unknown, not zero. */
+  inputTextTokens?: number;
+  inputAudioTokens?: number;
+  outputTextTokens?: number;
+  outputAudioTokens?: number;
+  inputCachedTokens?: number;
+  inputCachedTextTokens?: number;
+  inputCachedAudioTokens?: number;
 }
 
 /**
@@ -147,7 +156,48 @@ export function toConflictUpdate(row: RuntimeCallLogRow): Partial<RuntimeCallLog
     ...(row.transcriptWindowSeconds !== undefined
       ? { transcriptWindowSeconds: row.transcriptWindowSeconds }
       : {}),
+    /**
+     * THE TOKEN COLUMNS, when the provider reported a split (v273). The row
+     * is opened when the call starts, so the teardown write takes this update
+     * and not the insert; the token columns were left out of it, so on
+     * 1,500 of 1,500 runtime calls of 30 s or more in the three days to
+     * 2026-11-25 every token column read NULL whatever the provider said.
+     * Only the counters the provider reported, so unknown never overwrites
+     * known (#522 review: a partial breakdown names some and not others).
+     */
+    ...knownTokenColumns(row),
   };
+}
+
+/** The token columns, in the order the row declares them. */
+const TOKEN_COLUMNS = [
+  "inputTextTokens",
+  "inputAudioTokens",
+  "outputTextTokens",
+  "outputAudioTokens",
+  "inputCachedTokens",
+  "inputCachedTextTokens",
+  "inputCachedAudioTokens",
+] as const;
+
+type TokenColumn = (typeof TOKEN_COLUMNS)[number];
+
+/**
+ * The token counters that carry a number, and nothing else (#522 review). A
+ * counter the provider did not report is null on the usage and absent here,
+ * so its column is left as it is (NULL on a runtime row) rather than written
+ * as a zero nobody measured.
+ */
+export function knownTokenColumns(
+  source: Partial<Record<TokenColumn, number | null | undefined>> | undefined,
+): Partial<Record<TokenColumn, number>> {
+  const out: Partial<Record<TokenColumn, number>> = {};
+  if (!source) return out;
+  for (const k of TOKEN_COLUMNS) {
+    const v = source[k];
+    if (typeof v === "number") out[k] = v;
+  }
+  return out;
 }
 
 /**
@@ -317,17 +367,7 @@ export function toCallLogRow(
      * input tokens served from cache. Zeros here would have made a missing
      * feed look like a free call and hidden it again.
      */
-    ...(record.usage
-      ? {
-          inputTextTokens: record.usage.inputTextTokens,
-          inputAudioTokens: record.usage.inputAudioTokens,
-          outputTextTokens: record.usage.outputTextTokens,
-          outputAudioTokens: record.usage.outputAudioTokens,
-          inputCachedTokens: record.usage.inputCachedTokens,
-          inputCachedTextTokens: record.usage.inputCachedTextTokens,
-          inputCachedAudioTokens: record.usage.inputCachedAudioTokens,
-        }
-      : {}),
+    ...knownTokenColumns(record.usage),
     // Counted from real wire events, not estimated from wall time — the
     // distinction the column exists to record.
     telemetrySource: "realtime_events",
