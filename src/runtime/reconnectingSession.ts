@@ -394,6 +394,7 @@ export class ReconnectingSession implements BridgeSession {
       close: () => transport.close(),
       onMessage: (cb) => transport.onMessage(cb),
       noteProviderError: (type, code) => transport.noteProviderError?.(type, code),
+      noteProviderIds: (ids) => transport.noteProviderIds?.(ids),
       closeDiagnostics: transport.closeDiagnostics ? () => transport.closeDiagnostics!() : undefined,
       onClose: (cb) =>
         transport.onClose(() => {

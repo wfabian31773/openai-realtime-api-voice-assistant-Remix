@@ -641,8 +641,8 @@ import { callEnvironment } from "./callRecord";
  * bounded at 5000 ms (`RUNTIME_WS_HANDSHAKE_TIMEOUT_MS`, clamp 2000–15000).
  * Inbound frames buffer until `commitBuffered` after the session binds
  * `onMessage`, so a late-commit first event is not dropped. Upgrade headers
- * (`x-trace-id`, `CF-RAY`) and `[SESSION] created session=… conversation=…`
- * are logged PHI-free. When every retry stalls, `runSetupFailureFloor` files
+ * (`x-trace-id`, `CF-RAY`) and `[SESSION] created session=…` are logged
+ * PHI-free (and, since v272, `[SESSION] conversation=…`). When every retry stalls, `runSetupFailureFloor` files
  * one ticket in the lane's department (optical Other 66/536, Unnamed/Caller,
  * `call-<sid>-setup-failure`) and the TwiML speaks the technical-trouble
  * apology. Defaults work; no new secret is required.
@@ -2195,10 +2195,24 @@ import { callEnvironment } from "./callRecord";
  * down, a timeout, a throw) waits the short retry and rings nobody. Above
  * main's v270 (#518, `990cdf0e`), which it contains along with v269 (#517,
  * `b56e438c`) and v268 (#514, `e6861203`); v245 is #488 on its open branch.
- * No migration.
+ * No migration. On main since #519 (`e6d4c376`).
+ *
+ * v272 — THE CONVERSATION ID IS KEPT (2026-11-25). LOGGING ONLY. xAI support
+ * (ticket T-L27235) asks for a dropped call's `conversation.id`, from the
+ * `conversation.created` event. The session ignored that event and read
+ * `session.created` for a `conversation.id` it never carries, so every
+ * runtime call logged `session=none conversation=none` (the three drops of
+ * 2026-11-25 03:01..03:18 UTC among them). The session now reads
+ * `session.id` from `session.created` and `conversation.id` from
+ * `conversation.created` (probed on a test socket 2026-11-25), logs
+ * `[SESSION] conversation=… session=… trace=…`, and the transport carries both
+ * ids onto the `[SESSION] closed` line and the provider_close_summary row
+ * (providerSessionId, providerConversationId). Above main's v271 (#519,
+ * `e6d4c376`), which it contains along with the on-call admin page (#520,
+ * `5e52d10c`). No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v271-npx-calls-nobody-it-has-no-opening-for-20261124";
+  "voice-runtime-v272-the-conversation-id-is-kept-20261125";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

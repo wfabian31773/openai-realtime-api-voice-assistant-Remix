@@ -86,6 +86,12 @@ export interface GrokTransport {
    * code only: the message can echo what the caller said (v259).
    */
   noteProviderError?(type: unknown, code: unknown): void;
+  /**
+   * xAI's own ids for this socket's session and conversation (v272), from
+   * `session.created` and `conversation.created`. xAI support looks a drop
+   * up by the conversation id. Ids only, never content.
+   */
+  noteProviderIds?(ids: { sessionId?: unknown; conversationId?: unknown }): void;
   /** How the socket ended, for the provider-close row (v259). PHI-free. */
   closeDiagnostics?(): ProviderCloseDiagnostics;
 }
@@ -151,6 +157,13 @@ export interface ProviderCloseDiagnostics {
   msSinceLoopTick: number | null;
   xTraceId: string | null;
   cfRay: string | null;
+  /**
+   * xAI's `session.id` and `conversation.id` for this socket (v272). xAI
+   * support asks for the conversation id to look a dropped call up; until
+   * v272 neither was kept (the log read `session=none conversation=none`).
+   */
+  providerSessionId: string | null;
+  providerConversationId: string | null;
 }
 
 /**
@@ -625,12 +638,28 @@ export class GrokVoiceSession {
     switch (event.type) {
       case "session.created":
         this.state = "connected";
-        this.sessionId = event.conversation?.id ?? null;
+        // xAI puts the session's id on `session.id`; the conversation's id
+        // arrives in the next event, `conversation.created` (probed
+        // 2026-11-25). Until v272 this read `event.conversation`, which
+        // session.created never carries, so both logged as none.
+        this.sessionId = capText(event.session?.id, 100);
+        this.transport.noteProviderIds?.({ sessionId: this.sessionId });
         console.log(
-          `[SESSION] created session=${this.sessionId ?? "none"} conversation=${event.conversation?.id ?? "none"}`,
+          `[SESSION] created session=${this.sessionId ?? "none"} trace=${this.transport.upgradeHeaders?.().xTraceId ?? "?"}`,
         );
         this.send({ type: "session.update", session: this.sessionConfig });
         break;
+      case "conversation.created": {
+        // The id xAI support looks a call up by (ticket T-L27235). Logged
+        // beside the session id and the upgrade's trace id, so a drop on the
+        // close row or in the log can be handed to them as it is.
+        const conversationId = capText(event.conversation?.id, 100);
+        this.transport.noteProviderIds?.({ conversationId });
+        console.log(
+          `[SESSION] conversation=${conversationId ?? "none"} session=${this.sessionId ?? "none"} trace=${this.transport.upgradeHeaders?.().xTraceId ?? "?"}`,
+        );
+        break;
+      }
       case "session.updated":
         this.state = "configured";
         // Only the FIRST one is the handshake. A later acknowledgement is a
@@ -1100,6 +1129,9 @@ export class WebSocketGrokTransport implements GrokTransport {
   private committed = false;
   private firstEventWaiters: Array<(arrived: boolean) => void> = [];
   private headers: { xTraceId?: string; cfRay?: string } = {};
+  // v272: xAI's own ids for this socket (see noteProviderIds).
+  private providerSessionId: string | null = null;
+  private providerConversationId: string | null = null;
   // v259: how this socket ended. See ProviderCloseDiagnostics.
   private openedAtMs: number | null = null;
   private lastInboundAtMs: number | null = null;
@@ -1253,7 +1285,16 @@ export class WebSocketGrokTransport implements GrokTransport {
       `peer=${d.remoteAddress ?? "?"}`,
       `trace=${d.xTraceId ?? "?"}`,
       `ray=${d.cfRay ?? "?"}`,
+      `conversation=${d.providerConversationId ?? "?"}`,
+      `session=${d.providerSessionId ?? "?"}`,
     ].join(" ");
+  }
+
+  noteProviderIds(ids: { sessionId?: unknown; conversationId?: unknown }): void {
+    const session = capText(ids.sessionId, 100);
+    const conversation = capText(ids.conversationId, 100);
+    if (session) this.providerSessionId = session;
+    if (conversation) this.providerConversationId = conversation;
   }
 
   noteProviderError(type: unknown, code: unknown): void {
@@ -1287,6 +1328,8 @@ export class WebSocketGrokTransport implements GrokTransport {
       msSinceLoopTick: loop.msSinceLastTick,
       xTraceId: this.headers.xTraceId ?? null,
       cfRay: this.headers.cfRay ?? null,
+      providerSessionId: this.providerSessionId,
+      providerConversationId: this.providerConversationId,
     };
   }
 

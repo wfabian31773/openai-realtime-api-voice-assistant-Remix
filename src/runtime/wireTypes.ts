@@ -147,7 +147,8 @@ export interface GrokToolCallEvent {
 }
 
 export type GrokServerEvent =
-  | { type: "session.created"; conversation?: { id: string } }
+  | { type: "session.created"; session?: { id?: unknown }; conversation?: { id?: unknown } }
+  | { type: "conversation.created"; conversation?: { id?: unknown } }
   | { type: "session.updated" }
   | { type: "input_audio_buffer.speech_started" }
   | { type: "input_audio_buffer.speech_stopped" }
