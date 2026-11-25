@@ -23,7 +23,7 @@ import {
 } from "./tokenUsage";
 import { providerUsageEvent } from "./providerUsageTelemetry";
 import { toCallLogRow, toConflictUpdate } from "./callRecord";
-import type { VoiceCallRecord } from "./mediaStreamBridge";
+import { VoiceCallBridge, type BridgeSessionHandlers, type VoiceCallRecord } from "./mediaStreamBridge";
 
 /** The probed shape, verbatim but for the ids. */
 function xaiDone(over: { id?: string; status?: string; details?: unknown; input?: number; output?: number; total?: number; audio?: number; billable?: number } = {}) {
@@ -123,10 +123,13 @@ describe("one call's responses", () => {
 
   it("sums every response, counts the statuses and keeps the last id", () => {
     const u = new CallUsage();
+    // billable_audio_seconds is the session's running total (probed
+    // 2026-11-25), so three responses ending 1, 8 and 14 seconds in report
+    // 1, 8 and 14, and the call was billed 14, not 23.
     u.add(xaiDone({ id: "resp_a", input: 100, output: 10, total: 110, audio: 2.54, billable: 1 }));
-    u.add(xaiDone({ id: "resp_b", input: 140, output: 12, total: 152, audio: 1.21, billable: 2 }));
+    u.add(xaiDone({ id: "resp_b", input: 140, output: 12, total: 152, audio: 1.21, billable: 8 }));
     u.add(
-      xaiDone({ id: "resp_c", status: "cancelled", details: { type: "cancelled", reason: "turn_detected" }, audio: 0.3, billable: 0 }),
+      xaiDone({ id: "resp_c", status: "cancelled", details: { type: "cancelled", reason: "turn_detected" }, audio: 0.3, billable: 14 }),
     );
     expect(u.summary()).toEqual({
       responses: 3,
@@ -136,11 +139,60 @@ describe("one call's responses", () => {
       outputTokens: 22,
       totalTokens: 262,
       outputAudioSeconds: 4.05,
-      billableAudioSeconds: 3,
+      billableAudioSeconds: 14,
       lastResponseId: "resp_c",
     });
     // And the split stays unknown: xAI sent none.
     expect(u.result()).toBeUndefined();
+  });
+
+  it("bills each session's running total once, and adds sessions across a reconnect (Codex P1, #522)", () => {
+    const u = new CallUsage();
+    u.add(xaiDone({ billable: 1 }));
+    u.add(xaiDone({ billable: 3 }));
+    // The bridge is told of the drop; the new session's total starts again,
+    // and its first report is higher than the old session's last.
+    u.newSession();
+    u.add(xaiDone({ billable: 10 }));
+    u.add(xaiDone({ billable: 12 }));
+    expect(u.summary()!.billableAudioSeconds).toBe(15);
+  });
+
+  it("banks a running total that went down, a new session nobody announced", () => {
+    const u = new CallUsage();
+    u.add(xaiDone({ billable: 8 }));
+    u.add(xaiDone({ billable: 3 }));
+    expect(u.summary()!.billableAudioSeconds).toBe(11);
+  });
+
+  it("does not count a session twice when it is announced twice", () => {
+    const u = new CallUsage();
+    u.add(xaiDone({ billable: 5 }));
+    u.newSession();
+    u.newSession();
+    u.add(xaiDone({ billable: 2 }));
+    expect(u.summary()!.billableAudioSeconds).toBe(7);
+  });
+
+  it("keeps billable null when no session reported it, even after a reconnect", () => {
+    const u = new CallUsage();
+    u.add({ type: "response.done", response: { id: "r", status: "completed" } });
+    u.newSession();
+    expect(u.summary()!.billableAudioSeconds).toBeNull();
+  });
+
+  it("counts a status whose name is an inherited property like any other (#522 review)", () => {
+    const u = new CallUsage();
+    u.add(xaiDone({ status: "constructor", details: { reason: "toString" } }));
+    u.add(xaiDone({ status: "constructor", details: { reason: "toString" } }));
+    u.add(xaiDone({ status: "__proto__", details: { reason: "hasOwnProperty" } }));
+    const s = u.summary()!;
+    expect(s.statuses.constructor).toBe(2);
+    expect(s.statusReasons.toString).toBe(2);
+    expect(Object.prototype.hasOwnProperty.call(s.statuses, "__proto__")).toBe(true);
+    // As written to the row (an object literal cannot spell an own __proto__).
+    expect(JSON.stringify(s.statuses)).toBe('{"constructor":2,"__proto__":1}');
+    expect(s.statusReasons.hasOwnProperty).toBe(1);
   });
 
   it("is undefined when no response finished", () => {
@@ -256,6 +308,38 @@ describe("the call row", () => {
     expect(toConflictUpdate(toCallLogRow(record({ usage }), {}))).toMatchObject(usage);
   });
 
+  it("writes only the counters a partial split reported (#522 review)", () => {
+    const u = new CallUsage();
+    vi.spyOn(console, "info").mockImplementation(() => {});
+    u.add({ type: "response.done", response: { usage: { input_token_details: { text_tokens: 7 } } } });
+    u.add({ type: "response.done", response: { usage: { output_token_details: { audio_tokens: 3 } } } });
+    const usage = u.result()!;
+    expect(usage).toEqual({
+      inputTextTokens: 7,
+      inputAudioTokens: null,
+      outputTextTokens: null,
+      outputAudioTokens: 3,
+      inputCachedTokens: null,
+      inputCachedTextTokens: null,
+      inputCachedAudioTokens: null,
+    });
+    const row = toCallLogRow(record({ usage }), {}) as unknown as Record<string, unknown>;
+    const update = toConflictUpdate(toCallLogRow(record({ usage }), {})) as Record<string, unknown>;
+    for (const written of [row, update]) {
+      expect(written.inputTextTokens).toBe(7);
+      expect(written.outputAudioTokens).toBe(3);
+      for (const key of ["inputAudioTokens", "outputTextTokens", "inputCachedTokens", "inputCachedTextTokens", "inputCachedAudioTokens"]) {
+        expect(key in written).toBe(false);
+      }
+    }
+    vi.restoreAllMocks();
+  });
+
+  it("reads an empty breakdown as no usage at all (#522 review)", () => {
+    expect(readUsage({ response: { usage: { input_token_details: {}, output_token_details: {} } } })).toBeNull();
+    expect(readUsage({ response: { usage: { input_token_details: { text_tokens: "lots" } } } })).toBeNull();
+  });
+
   it("the teardown write leaves the token columns alone when no split was reported", () => {
     const update = toConflictUpdate(toCallLogRow(record(), {})) as Record<string, unknown>;
     for (const key of [
@@ -308,6 +392,17 @@ describe("xAI's pings and the handshake's server-timing reach the close row (v27
     expect(isPingFrame(nested)).toBe(false);
   });
 
+  it("reads the top-level type, whatever the spacing, and not a nested one (#522 review)", () => {
+    expect(isPingFrame('{ "type" : "ping", "event_id": "evt_p", "timestamp": 1764060000000 }')).toBe(true);
+    // Small, and an object inside it is typed "ping": not a ping.
+    const smallNested = JSON.stringify({ type: "conversation.item.added", item: { type: "ping" } });
+    expect(smallNested.length).toBeLessThan(300);
+    expect(isPingFrame(smallNested)).toBe(false);
+    expect(isPingFrame('{"type":"ping"')).toBe(false); // not JSON
+    expect(isPingFrame("null")).toBe(false);
+    expect(isPingFrame('"ping"')).toBe(false);
+  });
+
   it("counts the pings a socket received and how long before the close the last came", async () => {
     const url = await xaiLike((socket) => {
       socket.send(JSON.stringify(XAI_PING));
@@ -351,5 +446,36 @@ describe("xAI's pings and the handshake's server-timing reach the close row (v27
     expect(line).toMatch(/lastPing=\d+ms/);
     log.mockRestore();
     warn.mockRestore();
+  });
+});
+
+describe("the bridge tells the usage of a reconnect (#522 review)", () => {
+  it("adds the dropped session's billable seconds to the new session's", async () => {
+    vi.spyOn(console, "info").mockImplementation(() => {});
+    let handlers!: BridgeSessionHandlers;
+    const records: VoiceCallRecord[] = [];
+    const session = {
+      appendAudio: vi.fn(), cancelResponse: vi.fn(), sendToolResult: vi.fn(),
+      requestResponse: vi.fn(), speakNatural: vi.fn(), speak: vi.fn(), close: vi.fn(),
+      getResponseEpoch: () => 0, isResponseActive: () => false, setSpokenLanguage: vi.fn(),
+    };
+    const bridge = new VoiceCallBridge({
+      context: { callSid: "CA00000000000000000000000000000273", streamSid: "MZ-test", slug: "no-ivr", callerPhone: "", dialedNumber: "" },
+      agent: { instructions: "", tools: [], guardrails: [], toolNames: [], skipped: [],
+        dispatch: vi.fn(async () => ({ ok: true, output: '{"success":true}' })) },
+      createSession: (h) => { handlers = h; return session; },
+      twilio: { sendFrame: vi.fn(), close: vi.fn() },
+      onOutcome: vi.fn(),
+      persistCallRecord: async (r) => { records.push(r); },
+    });
+    handlers.onResponseDone(xaiDone({ billable: 3 }));
+    handlers.onProviderDrop!();
+    // Higher than the old session's last, so only the bridge's word that a
+    // new session began keeps the 3 seconds.
+    handlers.onResponseDone(xaiDone({ billable: 10 }));
+    bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" });
+    await vi.waitFor(() => expect(records).toHaveLength(1));
+    expect(records[0].providerUsage?.billableAudioSeconds).toBe(13);
+    vi.restoreAllMocks();
   });
 });

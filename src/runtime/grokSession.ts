@@ -202,11 +202,23 @@ function capText(value: unknown, max: number): string | null {
 /**
  * True for a frame that is one of xAI's `ping` events (v273). A ping is a
  * small frame (`{"type":"ping","event_id":…,"timestamp":…}`, about 90
- * characters), so only small frames are scanned: an audio delta is never
- * read twice.
+ * characters), so only small frames are read: an audio delta is never parsed
+ * twice. A small frame naming `ping` is parsed and counts only when its
+ * TOP-LEVEL type is `ping`, whatever the spacing (#522 review: a substring
+ * match missed `"type": "ping"` and counted a nested one).
  */
 export function isPingFrame(data: string): boolean {
-  return data.length < 300 && data.includes('"type":"ping"');
+  if (data.length >= 300 || !data.includes("ping")) return false;
+  try {
+    const event: unknown = JSON.parse(data);
+    return (
+      event !== null &&
+      typeof event === "object" &&
+      (event as { type?: unknown }).type === "ping"
+    );
+  } catch {
+    return false;
+  }
 }
 
 /**

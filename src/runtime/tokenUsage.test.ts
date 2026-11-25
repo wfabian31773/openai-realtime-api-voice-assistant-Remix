@@ -92,10 +92,9 @@ describe("reading usage off a response", () => {
     const u = readUsage({
       response: { usage: { input_token_details: { text_tokens: "lots", audio_tokens: -5, cached_tokens: null } } },
     });
-    expect(u).toEqual({
-      inputTextTokens: 0, inputAudioTokens: 0, outputTextTokens: 0, outputAudioTokens: 0,
-      inputCachedTokens: 0, inputCachedTextTokens: 0, inputCachedAudioTokens: 0,
-    });
+    // Every counter was malformed, so nothing was reported: null, not a row
+    // of zeros (#522 review).
+    expect(u).toBeNull();
   });
 });
 

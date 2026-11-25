@@ -162,21 +162,42 @@ export function toConflictUpdate(row: RuntimeCallLogRow): Partial<RuntimeCallLog
      * and not the insert; the token columns were left out of it, so on
      * 1,500 of 1,500 runtime calls of 30 s or more in the three days to
      * 2026-11-25 every token column read NULL whatever the provider said.
-     * Present only when the reader found a split, so unknown never
-     * overwrites known.
+     * Only the counters the provider reported, so unknown never overwrites
+     * known (#522 review: a partial breakdown names some and not others).
      */
-    ...(row.inputTextTokens !== undefined
-      ? {
-          inputTextTokens: row.inputTextTokens,
-          inputAudioTokens: row.inputAudioTokens,
-          outputTextTokens: row.outputTextTokens,
-          outputAudioTokens: row.outputAudioTokens,
-          inputCachedTokens: row.inputCachedTokens,
-          inputCachedTextTokens: row.inputCachedTextTokens,
-          inputCachedAudioTokens: row.inputCachedAudioTokens,
-        }
-      : {}),
+    ...knownTokenColumns(row),
   };
+}
+
+/** The token columns, in the order the row declares them. */
+const TOKEN_COLUMNS = [
+  "inputTextTokens",
+  "inputAudioTokens",
+  "outputTextTokens",
+  "outputAudioTokens",
+  "inputCachedTokens",
+  "inputCachedTextTokens",
+  "inputCachedAudioTokens",
+] as const;
+
+type TokenColumn = (typeof TOKEN_COLUMNS)[number];
+
+/**
+ * The token counters that carry a number, and nothing else (#522 review). A
+ * counter the provider did not report is null on the usage and absent here,
+ * so its column is left as it is (NULL on a runtime row) rather than written
+ * as a zero nobody measured.
+ */
+export function knownTokenColumns(
+  source: Partial<Record<TokenColumn, number | null | undefined>> | undefined,
+): Partial<Record<TokenColumn, number>> {
+  const out: Partial<Record<TokenColumn, number>> = {};
+  if (!source) return out;
+  for (const k of TOKEN_COLUMNS) {
+    const v = source[k];
+    if (typeof v === "number") out[k] = v;
+  }
+  return out;
 }
 
 /**
@@ -346,17 +367,7 @@ export function toCallLogRow(
      * input tokens served from cache. Zeros here would have made a missing
      * feed look like a free call and hidden it again.
      */
-    ...(record.usage
-      ? {
-          inputTextTokens: record.usage.inputTextTokens,
-          inputAudioTokens: record.usage.inputAudioTokens,
-          outputTextTokens: record.usage.outputTextTokens,
-          outputAudioTokens: record.usage.outputAudioTokens,
-          inputCachedTokens: record.usage.inputCachedTokens,
-          inputCachedTextTokens: record.usage.inputCachedTextTokens,
-          inputCachedAudioTokens: record.usage.inputCachedAudioTokens,
-        }
-      : {}),
+    ...knownTokenColumns(record.usage),
     // Counted from real wire events, not estimated from wall time — the
     // distinction the column exists to record.
     telemetrySource: "realtime_events",

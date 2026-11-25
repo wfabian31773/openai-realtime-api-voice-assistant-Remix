@@ -29,28 +29,44 @@
  * is the provider's rather than ours.
  */
 
+/**
+ * A null counter is one the provider did not report (v273 review): an empty
+ * or partial details block names some counters and not others, and an
+ * omitted counter is unknown, not zero, so it stays null and its column stays
+ * NULL.
+ */
 export interface UsageTotals {
-  inputTextTokens: number;
-  inputAudioTokens: number;
-  outputTextTokens: number;
-  outputAudioTokens: number;
-  inputCachedTokens: number;
-  inputCachedTextTokens: number;
-  inputCachedAudioTokens: number;
+  inputTextTokens: number | null;
+  inputAudioTokens: number | null;
+  outputTextTokens: number | null;
+  outputAudioTokens: number | null;
+  inputCachedTokens: number | null;
+  inputCachedTextTokens: number | null;
+  inputCachedAudioTokens: number | null;
 }
 
-export const ZERO_USAGE: UsageTotals = {
-  inputTextTokens: 0,
-  inputAudioTokens: 0,
-  outputTextTokens: 0,
-  outputAudioTokens: 0,
-  inputCachedTokens: 0,
-  inputCachedTextTokens: 0,
-  inputCachedAudioTokens: 0,
+export const NO_USAGE: UsageTotals = {
+  inputTextTokens: null,
+  inputAudioTokens: null,
+  outputTextTokens: null,
+  outputAudioTokens: null,
+  inputCachedTokens: null,
+  inputCachedTextTokens: null,
+  inputCachedAudioTokens: null,
 };
 
-function num(v: unknown): number {
-  return typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.round(v) : 0;
+const USAGE_KEYS = Object.keys(NO_USAGE) as (keyof UsageTotals)[];
+
+/** A counter the provider sent, rounded, or null when it sent none. */
+function num(v: unknown): number | null {
+  return typeof v === "number" && Number.isFinite(v) && v >= 0 ? Math.round(v) : null;
+}
+
+/** Null plus null is null; a known count plus an unknown one is the known. */
+function plus(a: number | null, b: number | null): number | null {
+  if (a === null) return b;
+  if (b === null) return a;
+  return a + b;
 }
 
 function obj(v: unknown): Record<string, unknown> | undefined {
@@ -99,24 +115,22 @@ export function readUsage(event: unknown): UsageTotals | null {
   const cachedDetails =
     obj(inDetails.cached_tokens_details) ?? obj(inDetails.cached_token_details) ?? {};
 
-  const inputTextTokens = num(inDetails.text_tokens);
-  const inputAudioTokens = num(inDetails.audio_tokens);
   const cachedText = num(cachedDetails.text_tokens);
   const cachedAudio = num(cachedDetails.audio_tokens);
   // The total is reported directly on most shapes; where it is not, the two
   // halves are the total. Never the other way round — a reported total that
   // disagrees with its parts is the provider's arithmetic, not ours to correct.
-  const cachedTotal = num(inDetails.cached_tokens) || cachedText + cachedAudio;
-
-  return {
-    inputTextTokens,
-    inputAudioTokens,
+  const usage: UsageTotals = {
+    inputTextTokens: num(inDetails.text_tokens),
+    inputAudioTokens: num(inDetails.audio_tokens),
     outputTextTokens: num(outDetails.text_tokens),
     outputAudioTokens: num(outDetails.audio_tokens),
-    inputCachedTokens: cachedTotal,
+    inputCachedTokens: num(inDetails.cached_tokens) ?? plus(cachedText, cachedAudio),
     inputCachedTextTokens: cachedText,
     inputCachedAudioTokens: cachedAudio,
   };
+  // An empty or unreadable breakdown reported nothing at all.
+  return USAGE_KEYS.some((k) => usage[k] !== null) ? usage : null;
 }
 
 /**
@@ -205,7 +219,9 @@ export function readResponseFacts(event: unknown): ResponseFacts {
  */
 export interface ProviderUsageSummary {
   responses: number;
-  /** Responses by `response.status` (`completed`, `cancelled`, …). */
+  /** Responses by `response.status` (`completed`, `cancelled`, …). Kept on
+   * an object with no prototype, so a status named `constructor` is counted
+   * like any other (v273 review). */
   statuses: Record<string, number>;
   /** Responses that did not complete, by why (`statusReason`). */
   statusReasons: Record<string, number>;
@@ -213,6 +229,14 @@ export interface ProviderUsageSummary {
   outputTokens: number | null;
   totalTokens: number | null;
   outputAudioSeconds: number | null;
+  /**
+   * The seconds xAI counted as billable. `billable_audio_seconds` is a RUNNING
+   * TOTAL for the session, and it follows the session's wall clock (probed
+   * 2026-11-25: responses ending 1.2 s, 8.4 s and 14.8 s into one session
+   * reported 1, 8 and 14), so summing the reports overstates it (Codex P1 on
+   * #522). This is each session's latest total, added across sessions,
+   * because a reconnect opens a new session whose total starts again.
+   */
   billableAudioSeconds: number | null;
   /** The last response's id, for a support ticket beside the conversation id. */
   lastResponseId: string | null;
@@ -222,8 +246,20 @@ export interface ProviderUsageSummary {
  * that puts something unexpected in the field cannot grow the row. */
 const MAX_KEYS = 12;
 
+/** A counting object with no prototype, so no provider string can name an
+ * inherited property (`constructor`, `__proto__`). */
+function counts(): Record<string, number> {
+  return Object.create(null) as Record<string, number>;
+}
+
 function bump(map: Record<string, number>, key: string): void {
-  if (key in map || Object.keys(map).length < MAX_KEYS) map[key] = (map[key] ?? 0) + 1;
+  if (Object.prototype.hasOwnProperty.call(map, key)) map[key] += 1;
+  else if (Object.keys(map).length < MAX_KEYS) map[key] = 1;
+}
+
+/** A copy that is still prototype-free. */
+function copyCounts(map: Record<string, number>): Record<string, number> {
+  return Object.assign(counts(), map);
 }
 
 function addTo(total: number | null, v: number | null): number | null {
@@ -234,15 +270,15 @@ function addTo(total: number | null, v: number | null): number | null {
 
 /** Sums usage across a call's responses. */
 export class CallUsage {
-  private totals: UsageTotals = { ...ZERO_USAGE };
+  private totals: UsageTotals = { ...NO_USAGE };
   /** True once any response reported usage at all. */
   private sawAny = false;
   /** The first shape seen, logged once so a live call settles the schema. */
   private describedOnce = false;
   private facts: ProviderUsageSummary = {
     responses: 0,
-    statuses: {},
-    statusReasons: {},
+    statuses: counts(),
+    statusReasons: counts(),
     inputTokens: null,
     outputTokens: null,
     totalTokens: null,
@@ -260,15 +296,19 @@ export class CallUsage {
     const u = readUsage(event);
     if (!u) return;
     this.sawAny = true;
-    this.totals = {
-      inputTextTokens: this.totals.inputTextTokens + u.inputTextTokens,
-      inputAudioTokens: this.totals.inputAudioTokens + u.inputAudioTokens,
-      outputTextTokens: this.totals.outputTextTokens + u.outputTextTokens,
-      outputAudioTokens: this.totals.outputAudioTokens + u.outputAudioTokens,
-      inputCachedTokens: this.totals.inputCachedTokens + u.inputCachedTokens,
-      inputCachedTextTokens: this.totals.inputCachedTextTokens + u.inputCachedTextTokens,
-      inputCachedAudioTokens: this.totals.inputCachedAudioTokens + u.inputCachedAudioTokens,
-    };
+    const next = { ...this.totals };
+    for (const k of USAGE_KEYS) next[k] = plus(this.totals[k], u[k]);
+    this.totals = next;
+  }
+
+  /**
+   * The provider session was replaced (a reconnect, v263). Its running
+   * billable total is banked, because the new session's starts again from
+   * nothing.
+   */
+  newSession(): void {
+    this.billableBanked = addTo(this.billableBanked, this.billableThisSession);
+    this.billableThisSession = null;
   }
 
   /**
@@ -282,6 +322,19 @@ export class CallUsage {
     return this.sawAny ? { ...this.totals } : undefined;
   }
 
+  /** Billable seconds from sessions that have ended, and the running total
+   * of the session in use. */
+  private billableBanked: number | null = null;
+  private billableThisSession: number | null = null;
+
+  private addBillable(v: number | null): void {
+    if (v === null) return;
+    // A total that went DOWN is a new session the bridge was not told of: the
+    // old session's total is banked as on a reconnect.
+    if (this.billableThisSession !== null && v < this.billableThisSession) this.newSession();
+    this.billableThisSession = v;
+  }
+
   private addFacts(f: ResponseFacts): void {
     const s = this.facts;
     s.responses += 1;
@@ -291,7 +344,7 @@ export class CallUsage {
     s.outputTokens = addTo(s.outputTokens, f.outputTokens);
     s.totalTokens = addTo(s.totalTokens, f.totalTokens);
     s.outputAudioSeconds = addTo(s.outputAudioSeconds, f.outputAudioSeconds);
-    s.billableAudioSeconds = addTo(s.billableAudioSeconds, f.billableAudioSeconds);
+    this.addBillable(f.billableAudioSeconds);
     if (f.responseId) s.lastResponseId = f.responseId;
   }
 
@@ -300,7 +353,12 @@ export class CallUsage {
   summary(): ProviderUsageSummary | undefined {
     const s = this.facts;
     if (s.responses === 0) return undefined;
-    return { ...s, statuses: { ...s.statuses }, statusReasons: { ...s.statusReasons } };
+    return {
+      ...s,
+      statuses: copyCounts(s.statuses),
+      statusReasons: copyCounts(s.statusReasons),
+      billableAudioSeconds: addTo(this.billableBanked, this.billableThisSession),
+    };
   }
 }
 
@@ -328,10 +386,14 @@ export function providerUsageMarker(s: ProviderUsageSummary): string {
 
 /** Printed at teardown, so the cache rate is readable per call in the log. */
 export function usageSummaryMarker(u: UsageTotals): string {
-  const input = u.inputTextTokens + u.inputAudioTokens;
-  const pct = input > 0 ? Math.round((u.inputCachedTokens / input) * 1000) / 10 : 0;
+  const n = (v: number | null) => (v === null ? "none" : String(v));
+  const input = plus(u.inputTextTokens, u.inputAudioTokens);
+  const pct =
+    input !== null && input > 0 && u.inputCachedTokens !== null
+      ? `${Math.round((u.inputCachedTokens / input) * 1000) / 10}%`
+      : "none";
   return (
-    `[TOKENS] in ${input} (text ${u.inputTextTokens}, audio ${u.inputAudioTokens}), ` +
-    `cached ${u.inputCachedTokens} = ${pct}%, out ${u.outputTextTokens + u.outputAudioTokens}`
+    `[TOKENS] in ${n(input)} (text ${n(u.inputTextTokens)}, audio ${n(u.inputAudioTokens)}), ` +
+    `cached ${n(u.inputCachedTokens)} = ${pct}, out ${n(plus(u.outputTextTokens, u.outputAudioTokens))}`
   );
 }

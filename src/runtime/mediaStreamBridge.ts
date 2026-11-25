@@ -2064,6 +2064,9 @@ export class VoiceCallBridge {
    * is therefore said in full before the conversation goes on (P1).
    */
   private handleProviderDrop(): void {
+    // The session that dropped kept its own running billable total; the new
+    // one starts again from nothing (#522 review).
+    this.usage.newSession();
     if (this.ended) return;
     const greeting = this.greetingLine;
     const greetingText =
