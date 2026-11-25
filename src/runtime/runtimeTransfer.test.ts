@@ -173,6 +173,37 @@ describe("the whole transfer, side channel to bridge", () => {
     expect(ended).toEqual(["CAoffice"]); // the leg the caller never joined
   });
 
+  // Review of #520, round 7: the provider answered and pressed a key, then
+  // redirecting the caller failed. The slug is FAILED, and the error says a
+  // provider call was created; one refused before any call says it was not.
+  it("marks a FAILED whose provider call was created, and not one where none was", async () => {
+    const { ops } = fakeOps();
+    const transfer = transferWith({
+      ...ops,
+      redirectCallerToConference: async () => {
+        throw new Error("call already completed");
+      },
+    });
+    escalationDetailsMap.set("CAcaller", { callerType: "patient_urgent" });
+    const outcome = transfer.handoffFor("no-ivr", META)();
+    await vi.waitFor(() => expect(transfer.pendingAccepts()).toBe(1));
+    transfer.handleAccept(signedAccept({ CallSid: "CAoffice", Digits: "1" }));
+    await expect(outcome).rejects.toThrow(/handoff_failed:FAILED/);
+    await expect(outcome).rejects.toMatchObject({ providerCallCreated: true });
+
+    const { ops: refusing } = fakeOps();
+    const refused = transferWith({
+      ...refusing,
+      createOfficeLeg: async () => {
+        throw new Error("Twilio refused");
+      },
+    });
+    escalationDetailsMap.set("CAcaller", { callerType: "patient_urgent" });
+    const none = refused.handoffFor("no-ivr", META)();
+    await expect(none).rejects.toThrow(/handoff_failed:FAILED/);
+    await expect(none).rejects.toMatchObject({ providerCallCreated: false });
+  });
+
   it("drops the office-conference mapping after the wait, win or lose", async () => {
     const { ops } = fakeOps();
     const transfer = transferWith(ops);
@@ -360,6 +391,8 @@ describe("the caller ending abandons the office leg (Codex, PR #230 round 2)", (
     transfer.abandonFor("CAcaller"); // teardown — nothing registered yet
     resolveCreate({ sid: "CAoffice" });
     await expect(outcome).rejects.toThrow(/handoff_failed:NO_ANSWER/);
+    // A provider call was created, so the error carries it (review of #520, round 7).
+    await expect(outcome).rejects.toMatchObject({ providerCallCreated: true });
     expect(ended).toEqual(["CAoffice"]);
     expect(transfer.pendingAccepts()).toBe(0);
     expect(transfer.pendingConferences()).toBe(0);

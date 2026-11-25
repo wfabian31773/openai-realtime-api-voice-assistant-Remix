@@ -76,7 +76,7 @@ describe("with the rotation switched off (the default)", () => {
       expect(w.transfer).toBeNull();
       expect(w.runner).not.toBeNull();
       expect(w.runner!.draining).toBe(true);
-      expect(w.health).toEqual({ mode: "off", testPhones: 0, requireKept: false, running: false });
+      expect(w.health).toEqual({ mode: "off", testPhones: 0, requireKept: false, finalFallback: { configured: false }, running: false });
     }
     expect(tw.factory).not.toHaveBeenCalled();
     expect(hub).not.toHaveBeenCalled();
@@ -251,7 +251,7 @@ describe("running", () => {
       ON_CALL_TEST_PHONES: "+15550002222,+15550003333",
       ON_CALL_POST_OP_REQUIRE_KEPT: "1",
     });
-    expect(w.health).toEqual({ mode: "test", testPhones: 2, requireKept: true, running: true });
+    expect(w.health).toEqual({ mode: "test", testPhones: 2, requireKept: true, finalFallback: { configured: false }, running: true });
     expect(JSON.stringify(w.health)).not.toMatch(/\d{7}/);
   });
 

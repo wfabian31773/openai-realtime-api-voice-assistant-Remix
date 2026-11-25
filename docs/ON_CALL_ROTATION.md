@@ -257,7 +257,8 @@ ring comes from the rotation. With the rotation off, an unset
 | 0:00 | text + in-call warm transfer to the on-call provider (or the surgeon) |
 | after it rings out, at least 1:00 later, no later than 4:00 | second call + reminder text |
 | next | region director: text + call, then a second call + reminder text |
-| last | Dr. Logan: text + call, then a second call + reminder text |
+| next | Dr. Logan: text + call, then a second call + reminder text |
+| last, only when `ON_CALL_FINAL_FALLBACK_NUMBER` is set | the operations fallback (Wayne): text + call, then a second call + reminder text |
 | after the last call | the escalation is marked `exhausted` |
 
 A level with no dialable number on file (a provider, surgeon or director whose
@@ -335,6 +336,7 @@ sets them.
 | `ON_CALL_ROTATION_MODE` | `off` (default), `test`, `live` | `off`: today's behaviour. `test`: the whole chain runs, but every call and text goes to a test number. `live`: the rotation's own numbers. |
 | `ON_CALL_TEST_PHONES` | comma list of phone numbers | Test mode only, and required there. The levels that will ring take the numbers in order: the first level rung rings the first number, the next the second, the next the third; a shorter list reuses its last number. A level with no number of its own is skipped, as it would be live, and takes no test number. |
 | `ON_CALL_CALLER_ID` | a phone number | The number provider calls and texts come from. Defaults to `TWILIO_PHONE_NUMBER` when unset or blank. **Refused if it is the Wayne Operator Line** (`OPERATOR_LINE_FROM_NUMBER`), and refused if it is set but is not a phone number. |
+| `ON_CALL_FINAL_FALLBACK_NUMBER` | a phone number, or unset | The operations fallback (Wayne). When set, one more level is rung after the final director, on the regular and the post-op chain alike, before the chain closes `exhausted`: the details text, the call, then a second call and a reminder text, on the same timing as every level (`role` = `operations_fallback` in the attempt log, no provider id; labelled "Operations fallback (Wayne)" on texts and the admin page). In test mode it rings the next test number. A number the chain already rings is not rung twice (`operations_fallback_already_in_chain` in the plan's notes). A plan with no level at all still takes today's fixed-number path. **Unset, or not a phone number, or the rotation's own caller ID: no extra level**, and an exhausted chain only texts `URGENT_NOTIFICATION_NUMBER`, exactly as before. A bad value never turns the rotation off; `/voice/health` and the admin page say why it was not used. After the fallback is not taken either, `URGENT_NOTIFICATION_NUMBER` still gets the "nobody took it" text. |
 | `ON_CALL_POST_OP_REQUIRE_KEPT` | `1` or unset | Unset: a booked surgery in the last 7 days goes to the surgeon even if NextGen has not marked it kept yet (the note on the text says so). `1`: only a surgery marked kept goes to the surgeon. See section 8. |
 
 If any setting cannot be honoured (an unknown mode, no caller ID, a caller ID
@@ -357,8 +359,13 @@ The boot log prints one of:
 `/voice/health` carries an `onCall` block:
 
 ```json
-"onCall": { "mode": "test", "testPhones": 3, "requireKept": false, "running": true }
+"onCall": { "mode": "test", "testPhones": 3, "requireKept": false,
+            "finalFallback": { "configured": true, "last4": "1234" }, "running": true }
 ```
+
+`finalFallback` is `{ "configured": false }` when `ON_CALL_FINAL_FALLBACK_NUMBER`
+is unset (with a `problem` when it is set and not usable); only the last four
+digits are ever shown.
 
 `running: false` with a `disabledBecause` or `blockedBy` says why it is off.
 Phone numbers are never shown there, only how many test numbers are set.
@@ -424,13 +431,31 @@ one provider (case and spacing aside). `--out` works as it does for the first
 load: never inside the repository, and the file readable only by you.
 
 ```sh
-npx tsx scripts/on-call-change.ts <command> [options] [--out ~/change.sql]
+npx tsx scripts/on-call-change.ts <command> [options] --reason "<why>" [--actor "<name or email>"] [--out ~/change.sql]
 ```
+
+**Every change is audited, from now on** (operator, 2026-11-24). Each command
+needs `--reason`, and takes `--actor` (your name or email; the OS user when it
+is not given). The SQL writes one `on_call_audit_log` row in the same
+transaction as the change, with the action names the admin page writes
+(`schedule.swap_week`, `override.create`, `provider.create`,
+`schedule.extend`, `provider.deactivate`, `provider.activate`,
+`director.set`), the actor as `<actor> (scripts/on-call-change.ts)`, the
+reason, and the row before and after as JSON where the SQL can read it (a new
+provider, cover or extension has no "before"). **It needs
+`migrations/add_on_call_admin.sql` applied**: without the audit table the SQL
+refuses before it changes anything. On a cover, `--reason` is also the
+cover's own reason.
+
+The same changes can be made on the Operations Hub's **After-Hours On-Call**
+page (`/on-call`, admins only), which writes the same audit rows; see
+section 9. Changes made with this script before 2026-11-24 are not in the
+audit log.
 
 ### A swap for a whole week
 
 ```sh
-npx tsx scripts/on-call-change.ts swap --week 2026-12-08 --to "Dr. Name" --note "traded with Dr. Other"
+npx tsx scripts/on-call-change.ts swap --week 2026-12-08 --to "Dr. Name" --note "traded with Dr. Other" --reason "traded weeks"
 ```
 
 The week is the Tuesday it starts. The whole week (Tuesday 5:00 PM to the
@@ -449,7 +474,7 @@ one entered last wins.
 
 ```sh
 npx tsx scripts/on-call-change.ts add-provider --name "Dr. Name" --phone "909-555-0100" \
-  --region "Inland Empire" --email name@example.com --npi 1234567890
+  --region "Inland Empire" --email name@example.com --npi 1234567890 --reason "new hire"
 ```
 
 A new provider goes to **the end of the rotation**. No week already on the
@@ -461,23 +486,26 @@ A name already on file is refused: a provider who comes back is `activate`.
 A new medical director who takes escalations and no weeks:
 
 ```sh
-npx tsx scripts/on-call-change.ts add-provider --name "Dr. Name" --phone "..." --region "Los Angeles" --escalation-only
+npx tsx scripts/on-call-change.ts add-provider --name "Dr. Name" --phone "..." --region "Los Angeles" --escalation-only --reason "new RMD"
 ```
 
 ### More weeks
 
 ```sh
-npx tsx scripts/on-call-change.ts extend --weeks 8
+npx tsx scripts/on-call-change.ts extend --weeks 8 --reason "schedule through March"
 ```
 
 Adds weeks after the last one on the schedule, continuing the rotation order
-among active providers (new providers included, at the end).
+among active providers (new providers included, at the end). **Refused, with
+nothing added, if any provider who would get a week has no dialable phone
+number**: the error names them (operator, 2026-11-24). Fix the number, or
+deactivate them, and run it again.
 
 ### A provider leaving, or coming back
 
 ```sh
-npx tsx scripts/on-call-change.ts deactivate "Dr. Name"
-npx tsx scripts/on-call-change.ts activate "Dr. Name"
+npx tsx scripts/on-call-change.ts deactivate "Dr. Name" --reason "left the practice"
+npx tsx scripts/on-call-change.ts activate "Dr. Name" --reason "back from leave"
 ```
 
 A deactivated provider is skipped by `extend`, and a swap or cover to them is
@@ -490,8 +518,8 @@ and the lookup and the alert say so (`override_provider_inactive` or
 ### A region's director
 
 ```sh
-npx tsx scripts/on-call-change.ts set-director --region "Orange County" --director "Dr. Name"
-npx tsx scripts/on-call-change.ts set-director --region FINAL --director "Dr. Dwayne K. Logan"
+npx tsx scripts/on-call-change.ts set-director --region "Orange County" --director "Dr. Name" --reason "new RMD"
+npx tsx scripts/on-call-change.ts set-director --region FINAL --director "Dr. Dwayne K. Logan" --reason "final director"
 ```
 
 `FINAL` is the last rung after every region's director. A region not on file
@@ -543,6 +571,8 @@ seen; every provider call and text goes to the test numbers.
    - then the second test phone (the region director's level), text, call,
      second call, reminder.
    - then the third (Dr. Logan's level).
+   - with `ON_CALL_FINAL_FALLBACK_NUMBER` set, then the fourth (the operations
+     fallback's level), so give four test numbers to hear it on its own phone.
 
    The test phones go to the levels that ring, in order. A level with no
    number of its own (a director not yet entered) is skipped, as it would be
@@ -569,7 +599,9 @@ FROM on_call_escalations
 WHERE call_sid = '<CallSid>';
 ```
 
-`role` is `on_call`, `surgeon`, `region_director` or `final`. `kind` is
+`role` is `on_call`, `surgeon`, `region_director`, `final` or
+`operations_fallback` (Wayne, after the final director, when
+`ON_CALL_FINAL_FALLBACK_NUMBER` is set; its `provider_id` is NULL). `kind` is
 `warm_transfer`, `call`, `sms` or `nudge_sms`. `outcome` is `accepted`,
 `no_answer` (it rang out), `declined` (the phone was picked up, by a person
 or a voicemail, and no key was pressed, including a hang-up during the
@@ -695,3 +727,79 @@ by the switched-off deployment rather than left open (review of #514, round
 7. **A closed holiday on a Tuesday.** Its daytime hours go to the outgoing
    week's provider, because the week turns over at 5:00 PM. If the incoming
    provider should take those hours, that is an override for the day.
+
+### Closed
+
+- **A final fallback to Wayne after the final director. CLOSED (operator,
+  2026-11-24): call, via `ON_CALL_FINAL_FALLBACK_NUMBER`.** The operations
+  fallback level is rung after the final director with the same cadence as
+  every level, and the chain closes `exhausted` (and texts
+  `URGENT_NOTIFICATION_NUMBER`) only after it is not taken either. Unset, the
+  chain is as it was. See section 2.
+- **`extend` and a provider with no phone. CLOSED (operator, 2026-11-24):
+  refuse.** See section 9.
+- **CLI changes in the audit log. CLOSED (operator, 2026-11-24): audited.**
+  See section 4.
+- **Full phone numbers in the audit log. CLOSED (operator, 2026-11-24): kept
+  as they are.** The audit log is admin-only staff data; the Audit tab shows
+  phones as their last four digits.
+
+---
+
+## 9. Admin page (`/on-call`)
+
+The Operations Hub's **After-Hours On-Call** page, in the admin section of
+the menu. Every route behind it (`/api/on-call/*`, `server/onCallAdmin.ts`)
+needs a login with the **admin** role and is never cached. Who is on call is
+computed with the runtime's own `onCallAt` and `planChain` over the same
+tables the voice agent reads, so the page and a call cannot disagree. The page
+changes no phone routing and nothing under `src/runtime/`.
+
+### Apply order
+
+1. `migrations/add_on_call_rotation.sql` (section 3), then the seed.
+2. `migrations/add_on_call_admin.sql`: the audit log (`on_call_audit_log`)
+   and the placeholder `on_call_call_events`. Not applied by the repo.
+
+Without (1) the page shows a banner and nothing else. With (1) and not (2) it
+shows everything but **refuses every change**, because each change writes its
+audit row in the same transaction and there is nowhere to write it. The SQL
+`scripts/on-call-change.ts` prints refuses the same way until (2) is applied.
+
+### Tabs
+
+| tab | what | wired? |
+|---|---|---|
+| Overview | mode, test phones, caller ID and urgent number (last four digits only), go-live countdown; who is on call now, tonight and next week, the chain a non-post-op call would ring (levels with no dialable number flagged), and a "who would be called at…" preview | wired |
+| Schedule | weeks (Tuesday 5 PM to Tuesday 8 AM PT), gaps in red, this week highlighted, overrides overlaid; swap a week, fill a gap, swap two weeks, extend (the same weeks as `on-call-change.ts extend`, with a preview), cover part of a week, cancel a cover (upcoming: deleted; running: ended now; past: kept) | wired |
+| Providers | full phone numbers (the only place they appear), add, edit, deactivate / reactivate (with the weeks, covers and director rows still pointing at them), delete only when never referenced, reorder the rotation | wired |
+| Escalation | region → director, FINAL included (the runtime reads it); the environment and the cadence, read-only; the open decisions in section 8 | wired (env and cadence read-only) |
+| Calls | every on-call chain that placed a call (a `warm_transfer` attempt that rang, or a background `call` attempt with a Twilio call sid; a queued or text-only chain is not listed, filtered before the 300-row limit), plus after-hours calls with no chain whose escalation placed a dial (`escalate_to_human` recorded `dialAttempted: true`: a transfer, or a dial that rang out or was declined; an UNAVAILABLE handoff, a chain already running or pending, a `CHAIN_STARTED` or `FAILED` slug (neither proves a dial; a `CHAIN_STARTED` call has a chain and is listed from it), a refused escalation, an identity ask or a duplicate refusal is not listed; `dialAttempted` is on the timeline from this build on, so older calls are not listed, which loses nothing because the rotation was not live before it); every phone in any text the tab returns (transcript, summaries, event messages, tool arguments) is shown by its last four, in E.164, formatted international ("+44 20 7946 0958"), US formatted, bare or read-out-digit form; each opens a timeline merging `call_logs`, transcript lines, tool calls, `call_events`, the chain, every attempt and the call's tickets, with a link to the call details page | wired; "not captured yet" panel lists what is not recorded |
+| Audit log | every change from the page and, from 2026-11-24, from `scripts/on-call-change.ts` (actor shown as `<actor> (scripts/on-call-change.ts)`): who, when, before and after, reason; filters | wired |
+
+### Rules the page enforces (the CLI's, plus a few)
+
+- A reason is required for every change.
+- A week starts on a Tuesday. A provider given a week, a cover or a director
+  row must be active and have a dialable phone.
+- A region must already have a director unless it is marked new; `FINAL` is
+  not a region a provider works in. Phones are stored E.164 via the runtime's
+  `e164`.
+- A cover that overlaps another needs an explicit confirmation (the latest
+  start wins). A cover entirely in the past is refused.
+- `extend` gives the same weeks as the CLI, and like the CLI it is **refused**,
+  adding nothing, when any provider who would get a week has no dialable
+  phone; the preview shows the weeks and the refusal naming each such
+  provider and week (operator, 2026-11-24: refuse, not warn).
+- Reorder moves rotation places without two rows ever holding one number
+  (`rotation_order` is UNIQUE): every moving row is cleared, then placed.
+
+### Not captured yet (placeholders)
+
+`on_call_call_events` exists for per-call facts the runtime does not record
+today: Twilio SMS delivery status, the provider's key press and its timing, a
+provider's post-call note, and each change of a chain's status (only the
+current status and the row's last update are kept). **Nothing writes it yet**;
+the page reads it and labels the section "placeholder". Wiring writes from the
+runtime (`appendOnCallCallEvent` in `server/onCallAdmin/store.ts` is the
+store method) is a follow-up.

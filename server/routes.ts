@@ -16,6 +16,9 @@ import { mountOperatorLineSettings } from './operatorLineSettings';
 import { mountNpxOutreachTracking } from './observatory/npxOutreach';
 import { boundPluginStore } from '../src/plugin/bindings';
 import { normalizeCallLog } from './callLogShape';
+import { mountOnCallAdmin, storePerPool } from './onCallAdmin';
+import { createPgOnCallAdminStore, type OnCallAdminStore } from './onCallAdmin/store';
+import { pool } from './db';
 
 // Hybrid authentication middleware - supports both Replit Auth and custom auth
 const isAuthenticated = (req: Request, res: Response, next: NextFunction) => {
@@ -52,6 +55,29 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // blind here"). Read only: who was outreached, the result, the booking and
   // its Azul cancel, staff tickets and opt-outs. server/observatory/npxOutreach.ts.
   mountNpxOutreachTracking(app, { authenticate: isAuthenticated });
+
+  // After-hours on-call admin page (/on-call): who is on call, swaps, covers,
+  // providers, directors, an audit log and each urgent call's timeline.
+  // Admin only. server/onCallAdmin.ts; docs/ON_CALL_ROTATION.md "Admin page".
+  // `pool` is a live binding that db.ts reassigns on failover or recycle.
+  mountOnCallAdmin(app, {
+    authenticate: isAuthenticated,
+    admin: requireRole('admin'),
+    env: process.env,
+    store: storePerPool(() => pool, (p): OnCallAdminStore => createPgOnCallAdminStore(p as any)),
+    actor: async (req) => {
+      const userId = (req.session?.userId ?? (req.user as any)?.claims?.sub ?? null) as string | null;
+      let email: string | null = null;
+      if (userId) {
+        try {
+          email = (await storage.getUser(userId))?.email ?? null;
+        } catch {
+          email = null;
+        }
+      }
+      return { userId, email };
+    },
+  });
 
   // ==================== Observatory (docs/observatory/) ====================
   // OBS-0 health: proves both data planes before any widget ships — this

@@ -32,7 +32,25 @@
  * Every name must match exactly one provider (case and spacing aside), and
  * every command runs in one transaction that raises before it writes anything
  * if it does not.
+ *
+ * EVERY COMMAND IS AUDITED (operator, 2026-11-24). Each needs --reason "<why>"
+ * and takes --actor "<name or email>" (the OS user when it is not given). The
+ * SQL inserts an on_call_audit_log row in the same transaction, with the
+ * action names the admin page writes (schedule.swap_week, override.create,
+ * provider.create, schedule.extend, provider.deactivate, provider.activate,
+ * director.set), so it needs migrations/add_on_call_admin.sql applied: without
+ * it the SQL refuses before changing anything.
+ *
+ * THE ROTATION'S CALLER ID (review of #520). swap, cover, extend and
+ * set-director refuse, in their SQL, a provider whose phone on file is the
+ * rotation's own caller ID, or who has no dialable phone (the admin page's
+ * `ringableProvider`); add-provider refuses the caller ID as the new phone up
+ * front. The caller ID is read the way the admin page reads it
+ * (`rotationCallerId`: ON_CALL_CALLER_ID, else TWILIO_PHONE_NUMBER), or given
+ * as --caller-id <E.164>. When neither names one, the command still prints
+ * its SQL and warns on stderr that the caller-ID check was skipped.
  */
+import { userInfo } from "node:os";
 import {
   activateSql,
   addProviderSql,
@@ -43,21 +61,32 @@ import {
   setDirectorSql,
   swapWeekSql,
 } from "../src/runtime/onCall/seed";
-import { insideRepo, writePrivate, type ScriptResult } from "./on-call-seed";
+import { CALLER_ID_SKIPPED, insideRepo, resolveCallerId, writePrivate, type ScriptResult } from "./on-call-seed";
 
-const USAGE = `usage: npx tsx scripts/on-call-change.ts <command> [options] [--out file.sql]
+/**
+ * The commands that give a provider a week, a cover, a director rung or a
+ * phone: each refuses a phone that is the rotation's caller ID, as the admin
+ * page does. deactivate and activate give no role and need no caller ID.
+ */
+const NEEDS_CALLER_ID = new Set(["swap", "cover", "add-provider", "extend", "set-director"]);
+
+const USAGE = `usage: npx tsx scripts/on-call-change.ts <command> [options] --reason "<why>" [--actor "<name or email>"] [--out file.sql]
   swap --week <Tuesday> --to "<name>" [--note "<text>"]
-  cover --from "<YYYY-MM-DD HH:MM>" --to "<YYYY-MM-DD HH:MM>" --by "<name>" [--reason "<text>"]
+  cover --from "<YYYY-MM-DD HH:MM>" --to "<YYYY-MM-DD HH:MM>" --by "<name>"
   add-provider --name "<name>" --phone "<phone>" --region "<region>" [--email <email>] [--npi <npi>] [--escalation-only] [--new-region]
   extend --weeks <n>
   deactivate "<name>"
   activate "<name>"
   set-director --region "<region>" --director "<name>" [--new-region]
+Every command writes an on_call_audit_log row (migrations/add_on_call_admin.sql must be applied).
+--reason is required; --actor defaults to the OS user.
+swap, cover, add-provider, extend and set-director refuse a provider whose phone is the rotation's caller ID,
+read from ON_CALL_CALLER_ID / TWILIO_PHONE_NUMBER or given as --caller-id <E.164>; without either the check is skipped, with a warning.
 `;
 
 const OPTIONS: Record<string, { required: string[]; optional: string[]; flags?: string[]; positional?: true }> = {
   swap: { required: ["week", "to"], optional: ["note"] },
-  cover: { required: ["from", "to", "by"], optional: ["reason"] },
+  cover: { required: ["from", "to", "by"], optional: [] },
   "add-provider": { required: ["name", "phone", "region"], optional: ["email", "npi"], flags: ["escalation-only", "new-region"] },
   extend: { required: ["weeks"], optional: [] },
   deactivate: { required: [], optional: [], positional: true },
@@ -65,14 +94,33 @@ const OPTIONS: Record<string, { required: string[]; optional: string[]; flags?: 
   "set-director": { required: ["region", "director"], optional: [], flags: ["new-region"] },
 };
 
+/** Every command's audit options: --reason is required, --actor is not. */
+const AUDIT_REQUIRED = ["reason"];
+const AUDIT_OPTIONAL = ["actor"];
+
+/** The OS user, the actor when --actor is not given; empty when it cannot be read. */
+export function osUser(env: Record<string, string | undefined> = process.env): string {
+  try {
+    const u = userInfo().username;
+    if (u) return u;
+  } catch {
+    // no passwd entry: fall through to the environment
+  }
+  return (env.USER ?? env.LOGNAME ?? env.USERNAME ?? "").trim();
+}
+
 function fail(message: string): ScriptResult {
   return { code: 2, stdout: "", stderr: `${message}\n${USAGE}` };
 }
 
-export function run(args: string[]): ScriptResult {
+export function run(
+  args: string[],
+  deps: { osUser?: () => string; env?: Record<string, string | undefined> } = {},
+): ScriptResult {
   const [command, ...rest] = args;
-  const spec = command ? OPTIONS[command] : undefined;
-  if (!spec) return fail(command ? `unknown command ${command}` : "no command");
+  const base = command ? OPTIONS[command] : undefined;
+  if (!base) return fail(command ? `unknown command ${command}` : "no command");
+  const spec = { ...base, required: [...base.required, ...AUDIT_REQUIRED], optional: [...base.optional, ...AUDIT_OPTIONAL] };
 
   const values: Record<string, string> = {};
   const set = new Set<string>();
@@ -88,7 +136,8 @@ export function run(args: string[]): ScriptResult {
       set.add(name);
       continue;
     }
-    if (name !== "out" && !spec.required.includes(name) && !spec.optional.includes(name)) {
+    const global = name === "out" || (name === "caller-id" && NEEDS_CALLER_ID.has(command));
+    if (!global && !spec.required.includes(name) && !spec.optional.includes(name)) {
       return fail(`${command} takes no --${name}`);
     }
     const v = rest[i + 1];
@@ -104,15 +153,27 @@ export function run(args: string[]): ScriptResult {
   if (values.out && insideRepo(values.out)) {
     return fail(`--out ${values.out} is inside the repository; write it outside`);
   }
+  if (!values.reason.trim()) return fail(`${command} needs a --reason that is not blank`);
+  const actor = (values.actor ?? (deps.osUser ?? osUser)()).trim();
+  if (!actor) return fail("no actor: pass --actor <name or email> (the OS user could not be read)");
+  const audit = { actor, reason: values.reason };
+  let callerId: string | null = null;
+  let skipped = "";
+  if (NEEDS_CALLER_ID.has(command)) {
+    const caller = resolveCallerId(values["caller-id"], deps.env ?? process.env);
+    if (caller.problem) return fail(caller.problem);
+    callerId = caller.callerId;
+    if (!callerId) skipped = `${CALLER_ID_SKIPPED}\n`;
+  }
 
   let sql: string;
   try {
     switch (command) {
       case "swap":
-        sql = swapWeekSql({ week: values.week, to: values.to, note: values.note });
+        sql = swapWeekSql({ week: values.week, to: values.to, note: values.note, audit, callerId });
         break;
       case "cover":
-        sql = coverSql({ from: values.from, to: values.to, by: values.by, reason: values.reason });
+        sql = coverSql({ from: values.from, to: values.to, by: values.by, reason: values.reason, audit, callerId });
         break;
       case "add-provider":
         sql = addProviderSql({
@@ -123,21 +184,23 @@ export function run(args: string[]): ScriptResult {
           npi: values.npi,
           escalationOnly: set.has("escalation-only"),
           newRegion: set.has("new-region"),
+          audit,
+          callerId,
         });
         break;
       case "extend": {
         const weeks = /^\d+$/.test(values.weeks) ? Number(values.weeks) : Number.NaN;
-        sql = extendScheduleSql(weeks);
+        sql = extendScheduleSql(weeks, audit, { callerId });
         break;
       }
       case "deactivate":
-        sql = deactivateSql(positional[0]);
+        sql = deactivateSql(positional[0], audit);
         break;
       case "activate":
-        sql = activateSql(positional[0]);
+        sql = activateSql(positional[0], audit);
         break;
       default:
-        sql = setDirectorSql({ region: values.region, director: values.director, newRegion: set.has("new-region") });
+        sql = setDirectorSql({ region: values.region, director: values.director, newRegion: set.has("new-region"), audit, callerId });
     }
   } catch (e) {
     if (e instanceof SeedError) return { code: 1, stdout: "", stderr: `Nothing written:\n  - ${e.problems.join("\n  - ")}\n` };
@@ -146,9 +209,9 @@ export function run(args: string[]): ScriptResult {
 
   if (values.out) {
     writePrivate(values.out, sql);
-    return { code: 0, stdout: "", stderr: `Wrote ${values.out}. Read it, then run it on the Hub.\n` };
+    return { code: 0, stdout: "", stderr: `${skipped}Wrote ${values.out}. Read it, then run it on the Hub.\n` };
   }
-  return { code: 0, stdout: sql, stderr: "" };
+  return { code: 0, stdout: sql, stderr: skipped };
 }
 
 const isMain = process.argv[1] && /on-call-change\.ts$/.test(process.argv[1]);

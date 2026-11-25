@@ -22,6 +22,9 @@ import {
   onCallAt,
   pacificMinute,
   planChain,
+  withOperationsFallback,
+  OPERATIONS_FALLBACK_NAME,
+  OPERATIONS_FALLBACK_PROVIDER_ID,
   type ChainPlan,
   type OnCallAnswer,
   type RotationData,
@@ -133,15 +136,23 @@ function isEmpty(data: RotationData): boolean {
 /** The synthetic chain test mode runs on before the rotation is imported. */
 export function syntheticTestPlan(config: OnCallConfig): ChainPlan {
   const roles = ["on_call", "region_director", "final"] as const;
-  return {
-    levels: roles.map((role, i) => ({
-      role,
-      providerId: -(i + 1),
-      name: `Test level ${i + 1}`,
-      phone: testPhoneFor(config, i),
-    })),
-    notes: ["synthetic_test_chain"],
-  };
+  const levels: ChainPlan["levels"] = roles.map((role, i) => ({
+    role,
+    providerId: -(i + 1),
+    name: `Test level ${i + 1}`,
+    phone: testPhoneFor(config, i),
+  }));
+  // The operations fallback is heard on the test chain too, on the next test
+  // number, when ON_CALL_FINAL_FALLBACK_NUMBER is configured.
+  if (config.finalFallbackPhone) {
+    levels.push({
+      role: "operations_fallback",
+      providerId: OPERATIONS_FALLBACK_PROVIDER_ID,
+      name: OPERATIONS_FALLBACK_NAME,
+      phone: testPhoneFor(config, levels.length),
+    });
+  }
+  return { levels, notes: ["synthetic_test_chain"] };
 }
 
 /**
@@ -266,7 +277,13 @@ export async function decideRoute(input: RouteInput): Promise<RouteDecision> {
     }
     const chain = planChain(first, data);
     notes.push(...chain.notes);
-    const plan = withTestPhones({ levels: chain.levels, notes }, config);
+    // The operations fallback (Wayne) after the final director, decided on the
+    // live numbers so a fallback number already in the plan is never added a
+    // second time; test mode then swaps every level's number for a test one.
+    const plan = withTestPhones(
+      withOperationsFallback({ levels: chain.levels, notes }, config.finalFallbackPhone),
+      config,
+    );
     // The rotation's own note says why the person rung is who they are (an
     // empty week, a stale cover); on the surgeon route the rotation was not
     // used, so only the post-op note applies.
@@ -279,7 +296,7 @@ export async function decideRoute(input: RouteInput): Promise<RouteDecision> {
       reason,
       postOp: postOpFacts(postOp),
       ...(alertNote ? { note: alertNote } : {}),
-      notes,
+      notes: plan.notes,
     };
     if (plan.levels.length === 0) return { kind: "legacy", because: "no_levels", routing };
     return { kind: "rotation", plan, routing, ...(alertNote ? { alertNote } : {}) };

@@ -30,6 +30,7 @@ import TestingPage from '@/pages/TestingPage'
 import { OperationsMonitorPage } from '@/pages/OperationsMonitorPage'
 import ObservatoryPage from '@/pages/ObservatoryPage'
 import { SdPilotPage } from '@/pages/SdPilotPage'
+import { OnCallPage } from '@/pages/OnCallPage'
 
 function ProtectedRoute({ children }: { children: React.ReactNode }) {
   const { isAuthenticated, isLoading } = useAuth()
@@ -156,8 +157,16 @@ function AppRoutes() {
             </RoleProtectedRoute>
           } 
         />
-        <Route 
-          path="/twilio" 
+        <Route
+          path="/on-call"
+          element={
+            <RoleProtectedRoute allowedRoles={['admin']}>
+              <OnCallPage />
+            </RoleProtectedRoute>
+          }
+        />
+        <Route
+          path="/twilio"
           element={
             <RoleProtectedRoute allowedRoles={['admin']}>
               <TwilioPage />

@@ -601,6 +601,30 @@ export const HANDOFF_NOT_PLACED_DIRECTIVE =
   'they were connected or that their request was submitted before create_ticket returns success.';
 
 /**
+ * Whether a failed handoff placed a dial to a person, read from the transfer
+ * layer's fixed slug. Recorded on the escalate_to_human result as
+ * `dialAttempted` (review of #520): `handoffFailed` alone is also set when
+ * nothing rang. Rang and not taken: NO_ANSWER, DECLINED. Nothing rang:
+ * UNAVAILABLE, CHAIN_RUNNING, CHAIN_PENDING. CHAIN_STARTED, FAILED and anything
+ * else read false, because the slug cannot prove a dial: CHAIN_STARTED is also
+ * returned when the in-call transfer was unavailable or failed before dialling
+ * and the background chain carried on (review of #520, round 3), and FAILED
+ * also covers a dial Twilio refused to create. A CHAIN_STARTED call has an
+ * on_call_escalations row, so the Calls tab lists it from the chain's own
+ * attempts. Telemetry only: it changes nothing said or routed.
+ *
+ * `providerCallCreated` (review of #520, round 7): the transfer layer marks
+ * its thrown error when Twilio created a call to the provider (an office call
+ * SID exists), so a FAILED whose provider answered and whose caller redirect
+ * then failed still reads true. FAILED with no provider call stays false.
+ */
+export function dialWasPlaced(failure: string, providerCallCreated = false): boolean {
+  return providerCallCreated
+    || failure === 'handoff_failed:NO_ANSWER'
+    || failure === 'handoff_failed:DECLINED';
+}
+
+/**
  * A second escalation on a call whose on-call chain is already running (v268):
  * nothing new was dialled, but the chain is still calling the on-call provider
  * and then the directors on its own. No claim that anyone answered, and none
@@ -3368,7 +3392,9 @@ PREREQUISITE: one quick ask for name and DOB; transfer even if unavailable. Clin
           }
         })();
 
-        return { success: true, message: "Call transferred to on-call provider." };
+        // dialAttempted: a dial to a person was placed (the on-call admin's
+        // Calls tab lists only these). Telemetry only, never spoken.
+        return { success: true, dialAttempted: true, message: "Call transferred to on-call provider." };
       } catch (handoffError) {
         finishRecordFiling(false);
         console.error("[HANDOFF] ✗ handoffToHuman() threw error:", handoffError);
@@ -3388,7 +3414,13 @@ PREREQUISITE: one quick ask for name and DOB; transfer even if unavailable. Clin
         const message = Object.prototype.hasOwnProperty.call(directives, failure)
           ? directives[failure]
           : HANDOFF_ERROR_DIRECTIVE;
-        return { success: false, handoffFailed: true, message };
+        // The transfer layer's error says whether a provider call was created
+        // (warmTransfer.ts handoffFailure); read without importing the runtime.
+        const providerCallCreated = Boolean(
+          handoffError && typeof handoffError === 'object'
+            && (handoffError as { providerCallCreated?: unknown }).providerCallCreated === true,
+        );
+        return { success: false, handoffFailed: true, dialAttempted: dialWasPlaced(failure, providerCallCreated), message };
       }
     },
   });

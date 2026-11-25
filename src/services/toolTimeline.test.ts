@@ -559,6 +559,17 @@ describe('classifyFleetCall — "promised and filed" vs "promised and did not"',
   const ev = (tool: string, outcome: Record<string, unknown> = {}, args: Record<string, unknown> = {}) =>
     ({ at: '', tool, args, outcome, ms: 1 });
 
+  it('records handoffFailed on escalate_to_human, a boolean only', async () => {
+    const callId = freshCall();
+    const wrapped = recordingExecute({ callId, agentSlug: 'no-ivr' }, 'escalate_to_human', async () => ({
+      success: false, handoffFailed: true, dialAttempted: false, message: 'Synthetic directive',
+    }));
+    await wrapped({});
+    const events = getAzulTimeline(callId)!;
+    expect(events[0].outcome).toMatchObject({ success: false, handoffFailed: true, dialAttempted: false });
+    expect(JSON.stringify(events)).not.toContain('Synthetic directive');
+  });
+
   it('records and classifies the explicit answered-without-ticket result', async () => {
     const callId = freshCall();
     const wrapped = recordingExecute({ callId, agentSlug: 'no-ivr' }, 'create_ticket', async () => ({

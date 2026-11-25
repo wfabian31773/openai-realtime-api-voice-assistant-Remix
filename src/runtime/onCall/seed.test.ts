@@ -14,6 +14,7 @@ import {
   buildSeedSql,
   coverSql,
   deactivateSql,
+  doBlock,
   extendScheduleSql,
   lit,
   readDate,
@@ -25,6 +26,7 @@ import {
   type SeedInput,
 } from "./seed";
 import { FINAL_REGION } from "./rotation";
+import { ON_CALL_ADMIN_WRITE_LOCK_SQL } from "./adminLock";
 
 const POOL = [
   "Provider,Cell Phone,Email,Region,Escalation Director,NPI",
@@ -396,6 +398,30 @@ describe("changes after the seed", () => {
     expect(() => extendScheduleSql(104)).not.toThrow();
   });
 
+  it("writes an audit row only when told who and why, and refuses a blank actor or reason", () => {
+    expect(swapWeekSql({ week: "2026-12-08", to: "Ben Ortiz" })).not.toContain("on_call_audit_log");
+    expect(extendScheduleSql(2)).not.toContain("on_call_audit_log");
+    const audited = swapWeekSql({ week: "2026-12-08", to: "Ben Ortiz", audit: { actor: "ops", reason: "it's a trade" } });
+    expect(audited).toContain("'it''s a trade'");
+    expect(problemsOf(() => swapWeekSql({ week: "2026-12-08", to: "Ben Ortiz", audit: { actor: " ", reason: "" } }))).toEqual([
+      "no actor: pass --actor <name or email>",
+      'no reason: pass --reason "<why>"',
+    ]);
+  });
+
+  it("refuses, naming them, an extension that gives a week to a provider with no dialable phone", () => {
+    const sql = extendScheduleSql(4);
+    const check = sql.indexOf("RAISE EXCEPTION 'extend refused:");
+    const insert = sql.indexOf("INSERT INTO on_call_schedule");
+    // The check runs first, in the same transaction, over the same planned weeks.
+    expect(check).toBeGreaterThan(0);
+    expect(check).toBeLessThan(insert);
+    expect(sql).toContain("string_agg(DISTINCT p.full_name");
+    expect(sql).toContain("p.phone IS NULL OR p.phone !~ '^\\+[0-9]{10,15}$'");
+    expect(sql).toContain("SELECT week, provider_id, 'added by scripts/on-call-change.ts extend' FROM planned");
+    expect(sql.match(/generate_series\(1, 4\)/g)).toHaveLength(2);
+  });
+
   it("swaps a whole week to one active provider, and refuses a week that is not a Tuesday", () => {
     const sql = swapWeekSql({ week: "12/8/2026", to: "Ben  Ortiz" });
     expect(sql).toContain("WHERE week_starts_on = '2026-12-08'");
@@ -455,6 +481,34 @@ describe("changes after the seed", () => {
   });
 });
 
+describe("every CLI transaction takes the admin page's write lock first", () => {
+  const audit = { actor: "ops", reason: "test" };
+  const cases: Array<[string, string]> = [
+    ["seed", seed().sql],
+    ["add-provider", addProviderSql({ name: "Kim Ruiz", phone: "555-010-0012", region: "Orange County", audit })],
+    ["extend", extendScheduleSql(4, audit)],
+    ["swap", swapWeekSql({ week: "2026-12-08", to: "Ben Ortiz", audit })],
+    ["cover", coverSql({ from: "2026-12-10 17:00", to: "2026-12-11 08:00", by: "Ada Lin", audit })],
+    ["deactivate", deactivateSql("Ada Lin", audit)],
+    ["activate", activateSql("Ada Lin", audit)],
+    ["set-director", setDirectorSql({ region: "Orange County", director: "Dr. Kim Ruiz", audit })],
+    ["swap, unaudited", swapWeekSql({ week: "2026-12-08", to: "Ben Ortiz" })],
+  ];
+
+  it("is the one shared constant, the admin page's advisory xact lock", () => {
+    expect(ON_CALL_ADMIN_WRITE_LOCK_SQL).toBe(`select pg_advisory_xact_lock(hashtext('on_call_admin_write'))`);
+  });
+
+  it.each(cases)("%s: the statement after BEGIN is the lock, before any check, read or write", (_name, sql) => {
+    const lines = sql.split("\n").map((l) => l.trim()).filter((l) => l && !l.startsWith("--"));
+    const begin = lines.indexOf("BEGIN;");
+    expect(begin).toBeGreaterThanOrEqual(0);
+    expect(lines.indexOf("BEGIN;", begin + 1)).toBe(-1);
+    expect(lines[begin + 1]).toBe(`${ON_CALL_ADMIN_WRITE_LOCK_SQL};`);
+    expect(sql.split(ON_CALL_ADMIN_WRITE_LOCK_SQL).length).toBe(2);
+  });
+});
+
 describe("a file that is not a CSV", () => {
   it("is a problem named by file and line, quoting no cell", () => {
     const problems = problemsOf(() => seed({ poolCsv: 'Name,Phone,Region,Director\nAda Lin,"555-010-0001,Inland Empire,Cara Pell\nBen "Ortiz,555-010-0002,x,y' }));
@@ -467,5 +521,120 @@ describe("a file that is not a CSV", () => {
     const pool = ["Name,Phone,Region,Director,Email,NPI", "Ada Lin,555-010-0001,Inland Empire,Ada Lin"].join("\n");
     const r = buildSeedSql({ poolCsv: pool, scheduleCsv: "Week,Name\n2026-12-01,Ada Lin", final: "Ada Lin", generatedAt: AT });
     expect(r.providers[0].email).toBeNull();
+  });
+});
+
+describe("a value that holds a dollar-quote tag cannot end a DO block", () => {
+  // Every user-supplied value carries the fixed tag, a bare $$, the next tag the
+  // helper would try, and a single quote.
+  const evil = "x$oncall$; DROP TABLE on_call_providers; -- $$ $oncall_1$ O'Brien";
+  const audit = { actor: `ops ${evil}`, reason: `reason ${evil}` };
+
+  /** Each DO block's body (between its opening and its END) never contains its tag. */
+  function doBlocksAreClosedOnlyByTheirEnd(sql: string) {
+    const opens = [...sql.matchAll(/^DO (\$[a-z0-9_]*\$) /gm)];
+    expect(opens.length).toBeGreaterThan(0);
+    for (const m of opens) {
+      const tag = m[1];
+      const start = m.index! + m[0].length;
+      const end = sql.indexOf(`\nEND ${tag};`, start);
+      expect(end).toBeGreaterThan(start);
+      expect(sql.slice(start, end).includes(tag)).toBe(false);
+    }
+  }
+
+  const cases: Array<[string, () => string]> = [
+    ["swap", () => swapWeekSql({ week: "2026-12-08", to: `Ben ${evil}`, note: `note ${evil}`, audit })],
+    ["cover", () => coverSql({ from: "2026-12-10 17:00", to: "2026-12-11 08:00", by: `Ben ${evil}`, reason: `cover ${evil}`, audit })],
+    ["deactivate", () => deactivateSql(`Ben ${evil}`, audit)],
+    ["activate", () => activateSql(`Ben ${evil}`, audit)],
+    ["set-director, new region", () => setDirectorSql({ region: `Inland ${evil}`, director: `Ben ${evil}`, newRegion: true, audit })],
+    ["set-director", () => setDirectorSql({ region: `Inland ${evil}`, director: `Ben ${evil}`, audit })],
+    ["add-provider", () => addProviderSql({ name: `Ben ${evil}`, phone: "555-010-0009", email: `b${evil}@x`, region: `Inland ${evil}`, audit })],
+    ["extend", () => extendScheduleSql(2, audit)],
+  ];
+
+  for (const [name, build] of cases) {
+    it(`${name}: picks a tag absent from the body and keeps the values in quoted literals`, () => {
+      const sql = build();
+      // A block that carries no value (the audit-table check) keeps $oncall$;
+      // one that carries a value gets a tag the value does not contain.
+      doBlocksAreClosedOnlyByTheirEnd(sql);
+      expect(sql).toContain(lit(`reason ${evil}`));
+      expect(sql).toContain(lit(`ops ${evil} (scripts/on-call-change.ts)`));
+      // The single quote is always doubled, so no value leaves its literal.
+      expect(sql).toContain("O''Brien");
+      expect(sql).not.toMatch(/[^']O'Brien/);
+    });
+  }
+
+  it("keeps the fixed $oncall$ tag when nothing in the body holds it", () => {
+    const sql = swapWeekSql({ week: "2026-12-08", to: "Ben Ortiz", audit: { actor: "ops", reason: "it's a trade" } });
+    expect(sql).toMatch(/^DO \$oncall\$ DECLARE n int; who int; prev jsonb; nxt jsonb; BEGIN$/m);
+    expect(sql).toMatch(/^END \$oncall\$;$/m);
+  });
+
+  it("doBlock skips every tag the body contains", () => {
+    const lines = doBlock("", ["  -- $oncall$ $oncall_1$ $oncall_2$"]);
+    expect(lines[0]).toBe("DO $oncall_3$ BEGIN");
+    expect(lines[lines.length - 1]).toBe("END $oncall_3$;");
+  });
+});
+
+// Review of #520: the admin page refuses a provider whose phone is the
+// rotation's caller ID (Twilio refuses a call from a number to itself), and a
+// provider with no dialable phone; the CLI's builders refuse the same.
+describe("a provider whose phone is the rotation's caller ID", () => {
+  const CID = "+15550100002"; // Ben Ortiz's phone in the fixtures
+
+  it("extend refuses a week to them, beside the no-dialable-phone check", () => {
+    const sql = extendScheduleSql(4, undefined, { callerId: "(555) 010-0002" });
+    expect(sql).toContain(`p.phone IS NULL OR p.phone !~ '^\\+[0-9]{10,15}$' OR p.phone = '${CID}'`);
+    expect(sql).toMatch(/RAISE EXCEPTION 'extend refused: .*rotation''s own caller ID/);
+    // Without a caller ID the dialable check stands and no caller-ID clause is written.
+    expect(extendScheduleSql(4)).not.toContain("OR p.phone = '");
+  });
+
+  const BUILDERS: Array<[string, (cid: string | null) => string]> = [
+    ["swap", (cid) => swapWeekSql({ week: "2026-12-08", to: "Ben Ortiz", callerId: cid })],
+    ["cover", (cid) => coverSql({ from: "2026-12-10 17:00", to: "2026-12-11 08:00", by: "Ben Ortiz", callerId: cid })],
+    ["set-director", (cid) => setDirectorSql({ region: "FINAL", director: "Ben Ortiz", callerId: cid })],
+  ];
+  for (const [name, build] of BUILDERS) {
+    it(`${name} refuses them, and a provider with no dialable phone, before writing`, () => {
+      const sql = build(CID);
+      const dialable = sql.indexOf("AND phone ~ '^\\+[0-9]{10,15}$'");
+      const self = sql.indexOf(`AND phone = '${CID}'`);
+      const write = Math.max(sql.indexOf("UPDATE on_call_"), sql.indexOf("INSERT INTO on_call_overrides"));
+      expect(dialable).toBeGreaterThan(0);
+      expect(self).toBeGreaterThan(dialable);
+      expect(write).toBeGreaterThan(self);
+      expect(sql).toMatch(/has the rotation''s own caller ID as their phone/);
+      expect(sql).toMatch(/has no dialable phone number on file/);
+      // Unknown caller ID: the dialable check stays, the caller-ID clause is not written.
+      const unknown = build(null);
+      expect(unknown).toContain("AND phone ~ '^\\+[0-9]{10,15}$'");
+      expect(unknown).not.toMatch(/own caller ID as their phone/);
+    });
+  }
+
+  it("add-provider refuses it as the new provider's phone", () => {
+    expect(problemsOf(() => addProviderSql({ name: "Kim Ruiz", phone: "555-010-0002", region: "San Diego", callerId: CID }))).toEqual([
+      "that phone is the rotation's own caller ID (ON_CALL_CALLER_ID or TWILIO_PHONE_NUMBER); the chain cannot call a number from itself",
+    ]);
+    expect(addProviderSql({ name: "Kim Ruiz", phone: "555-010-0012", region: "San Diego", callerId: CID })).toContain("'+15550100012'");
+  });
+
+  it("the first-load seed refuses a provider who has it", () => {
+    expect(problemsOf(() => seed({ callerId: CID }))).toEqual([
+      `"Ben Ortiz" has the rotation's own caller ID as their phone; the chain cannot call a number from itself`,
+    ]);
+    expect(seed({ callerId: "+15550100099" }).sql).toContain("INSERT INTO on_call_schedule");
+  });
+
+  it("refuses a caller ID that is not a phone rather than skipping the check", () => {
+    expect(problemsOf(() => swapWeekSql({ week: "2026-12-08", to: "Ben Ortiz", callerId: "on-call" }))).toEqual([
+      'the caller ID "on-call" is not a phone number',
+    ]);
   });
 });

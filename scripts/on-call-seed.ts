@@ -25,8 +25,31 @@
  */
 import { closeSync, fchmodSync, openSync, readFileSync, writeSync } from "node:fs";
 import { relative, resolve, isAbsolute } from "node:path";
-import { buildSeedSql, SeedError } from "../src/runtime/onCall/seed";
+import { buildSeedSql, readPhone, SeedError } from "../src/runtime/onCall/seed";
 import { FINAL_REGION } from "../src/runtime/onCall/rotation";
+import { rotationCallerId } from "../src/runtime/onCall/config";
+
+/** The warning printed when neither --caller-id nor the environment names the rotation's caller ID. */
+export const CALLER_ID_SKIPPED =
+  "WARNING: the rotation's caller ID is not known (no --caller-id, and ON_CALL_CALLER_ID / TWILIO_PHONE_NUMBER " +
+  "is not set to a phone number here), so the check that no provider's phone is the caller ID was SKIPPED. " +
+  "Pass --caller-id <E.164> to include it.";
+
+/**
+ * The rotation's caller ID for a script: `--caller-id` when given (and a
+ * phone), else what the runtime and the admin page read (`rotationCallerId`).
+ * Unknown is not a refusal; the caller prints CALLER_ID_SKIPPED.
+ */
+export function resolveCallerId(
+  flag: string | undefined,
+  env: Record<string, string | undefined>,
+): { callerId: string | null; problem?: string } {
+  if (flag !== undefined) {
+    const v = readPhone(flag);
+    return v ? { callerId: v } : { callerId: null, problem: `--caller-id ${flag} is not a phone number` };
+  }
+  return { callerId: rotationCallerId(env) };
+}
 
 export interface ScriptResult {
   code: number;
@@ -37,7 +60,7 @@ export interface ScriptResult {
 const REPO_ROOT = resolve(__dirname, "..");
 
 const USAGE =
-  'usage: npx tsx scripts/on-call-seed.ts <pool.csv> <schedule.csv> --final "<name>" [--directors <file.csv>] [--out <file.sql>]';
+  'usage: npx tsx scripts/on-call-seed.ts <pool.csv> <schedule.csv> --final "<name>" [--directors <file.csv>] [--caller-id <E.164>] [--out <file.sql>]';
 
 /** True when `path` is the repository or inside it. */
 export function insideRepo(path: string, root = REPO_ROOT): boolean {
@@ -81,9 +104,11 @@ function flags(args: string[], names: string[]): { values: Record<string, string
   return { values, rest };
 }
 
-export function run(args: string[]): ScriptResult {
-  const parsed = flags(args, ["final", "directors", "out"]);
+export function run(args: string[], deps: { env?: Record<string, string | undefined> } = {}): ScriptResult {
+  const parsed = flags(args, ["final", "directors", "out", "caller-id"]);
   if (parsed.problem) return { code: 2, stdout: "", stderr: `${parsed.problem}\n${USAGE}\n` };
+  const caller = resolveCallerId(parsed.values["caller-id"], deps.env ?? process.env);
+  if (caller.problem) return { code: 2, stdout: "", stderr: `${caller.problem}\n${USAGE}\n` };
   const [poolPath, schedulePath, extra] = parsed.rest;
   if (!poolPath || !schedulePath || extra || !parsed.values.final) {
     return { code: 2, stdout: "", stderr: `${USAGE}\n` };
@@ -104,6 +129,7 @@ export function run(args: string[]): ScriptResult {
       scheduleCsv: readFileSync(schedulePath, "utf8"),
       directorsCsv: parsed.values.directors ? readFileSync(parsed.values.directors, "utf8") : undefined,
       final: parsed.values.final,
+      callerId: caller.callerId,
     });
   } catch (e) {
     if (e instanceof SeedError) {
@@ -124,6 +150,7 @@ export function run(args: string[]): ScriptResult {
       `  ${region === FINAL_REGION ? "final (after every region's director)" : region}: ${byId.get(id)?.fullName ?? "?"}`,
     ),
   ];
+  if (!caller.callerId) lines.push(CALLER_ID_SKIPPED);
   if (result.warnings.length) lines.push(`Read before running it:`, ...result.warnings.map((w) => `  - ${w}`));
   lines.push(out ? `Wrote ${out}. Run it on the Hub after migrations/add_on_call_rotation.sql.` : `SQL on stdout.`);
 
