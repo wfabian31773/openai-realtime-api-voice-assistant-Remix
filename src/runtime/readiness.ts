@@ -2210,9 +2210,21 @@ import { callEnvironment } from "./callRecord";
  * (providerSessionId, providerConversationId). Above main's v271 (#519,
  * `e6d4c376`), which it contains along with the on-call admin page (#520,
  * `5e52d10c`). No migration.
+ *
+ * v273 — WHAT xAI REPORTS IS KEPT (2026-11-25). LOGGING ONLY. Every runtime
+ * call row read NULL in every token column (1,500 of 1,500 calls of 30 s or
+ * more in the 3 days to 2026-11-25: toConflictUpdate left them out), and the
+ * totals the bridge computed were zero (readUsage looked for a breakdown xAI
+ * never sends). The top-level `usage` with the audio seconds, each
+ * response's status and id, xAI's pings and the upgrade's server-timing
+ * header were never kept. Now: a breakdown not reported stays NULL; the flat
+ * counts, audio seconds, statuses and response ids go to one
+ * provider_usage_summary call_events row per call; the close line and row
+ * carry pingsReceived, msSinceServerPing and serverTiming. Above main's v272
+ * (#521, `a73ee40f`). No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v272-the-conversation-id-is-kept-20261125";
+  "voice-runtime-v273-what-xai-reports-is-kept-20261125";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
