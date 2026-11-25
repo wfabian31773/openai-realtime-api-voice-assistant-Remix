@@ -114,6 +114,13 @@ describe("one call's responses", () => {
   beforeEach(() => vi.spyOn(console, "info").mockImplementation(() => {}));
   afterEach(() => vi.restoreAllMocks());
 
+  it("counts a reason only for a response that did not complete", () => {
+    const u = new CallUsage();
+    u.add(xaiDone({ status: "completed", details: { type: "completed", reason: "done" } }));
+    u.add(xaiDone({ status: "incomplete", details: { type: "incomplete", reason: "max_output_tokens" } }));
+    expect(u.summary()!.statusReasons).toEqual({ max_output_tokens: 1 });
+  });
+
   it("sums every response, counts the statuses and keeps the last id", () => {
     const u = new CallUsage();
     u.add(xaiDone({ id: "resp_a", input: 100, output: 10, total: 110, audio: 2.54, billable: 1 }));
@@ -294,6 +301,11 @@ describe("xAI's pings and the handshake's server-timing reach the close row (v27
     // An audio delta is large; it is never scanned, even if it mentions a ping.
     const big = JSON.stringify({ type: "response.output_audio.delta", delta: "A".repeat(400) + '"type":"ping"' });
     expect(isPingFrame(big)).toBe(false);
+    // A large frame is never counted, even when an object inside it is typed
+    // "ping": only xAI's own ~90-character ping events are.
+    const nested = JSON.stringify({ type: "conversation.item.added", item: { type: "ping" }, pad: "A".repeat(400) });
+    expect(nested).toContain('"type":"ping"');
+    expect(isPingFrame(nested)).toBe(false);
   });
 
   it("counts the pings a socket received and how long before the close the last came", async () => {
