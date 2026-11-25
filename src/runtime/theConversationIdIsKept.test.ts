@@ -14,10 +14,15 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
+import type { AddressInfo } from "node:net";
+import type WebSocket from "ws";
+import { WebSocketServer } from "ws";
 import {
   GrokVoiceSession,
   WebSocketGrokTransport,
   buildSessionConfig,
+  providerIdText,
+  providerIdsInFrame,
 } from "./grokSession";
 import type { GrokTransport } from "./grokSession";
 import { loadGrokRuntimeVoiceConfig } from "./config";
@@ -66,7 +71,24 @@ function makeSession() {
   return { transport, session };
 }
 
-afterEach(() => vi.restoreAllMocks());
+const servers: WebSocketServer[] = [];
+
+afterEach(async () => {
+  while (servers.length) {
+    const wss = servers.pop()!;
+    for (const c of wss.clients) c.terminate();
+    await new Promise<void>((r) => wss.close(() => r()));
+  }
+  vi.restoreAllMocks();
+});
+
+async function server(onConnect: (socket: WebSocket) => void): Promise<string> {
+  const wss = new WebSocketServer({ port: 0 });
+  servers.push(wss);
+  wss.on("connection", onConnect);
+  await new Promise<void>((r) => wss.once("listening", () => r()));
+  return `ws://127.0.0.1:${(wss.address() as AddressInfo).port}/realtime`;
+}
 
 describe("the session reads xAI's ids where xAI puts them", () => {
   it("takes the session id from session.created's session", () => {
@@ -156,6 +178,111 @@ describe("the transport carries the ids onto the close row and the close line", 
     const src = readFileSync(join(__dirname, "grokSession.ts"), "utf8");
     const closeLine = src.slice(src.indexOf("private closeLine(): string"));
     expect(closeLine.slice(0, 1500)).toContain("`conversation=${d.providerConversationId ?? \"?\"}`");
+  });
+});
+
+describe("the ids are the socket's, read before the session takes the buffer (#521 review)", () => {
+  it("keeps both ids when xAI closes before commitBuffered() ever runs", async () => {
+    const url = await server((socket) => {
+      socket.send(JSON.stringify(XAI_SESSION_CREATED));
+      socket.send(JSON.stringify(XAI_CONVERSATION_CREATED));
+      setTimeout(() => socket.terminate(), 50);
+    });
+    const t = new WebSocketGrokTransport("key", "model", url);
+    const closed = new Promise<void>((r) => t.onClose(() => r()));
+    await t.connect();
+    await closed;
+    // Nothing committed the buffer, so no session ever read these events.
+    const d = t.closeDiagnostics();
+    expect(d.providerSessionId).toBe("sess_abc123");
+    expect(d.providerConversationId).toBe("conv_def456");
+  });
+
+  it("stops reading frames for ids once it holds both, so a later frame changes nothing", async () => {
+    const url = await server((socket) => {
+      socket.send(JSON.stringify(XAI_SESSION_CREATED));
+      socket.send(JSON.stringify(XAI_CONVERSATION_CREATED));
+      socket.send(JSON.stringify({ ...XAI_SESSION_CREATED, session: { id: "sess_late" } }));
+      setTimeout(() => socket.terminate(), 50);
+    });
+    const t = new WebSocketGrokTransport("key", "model", url);
+    const closed = new Promise<void>((r) => t.onClose(() => r()));
+    await t.connect();
+    await closed;
+    expect(t.closeDiagnostics().providerSessionId).toBe("sess_abc123");
+  });
+
+  it("reads the id off session.created and conversation.created frames only", () => {
+    expect(providerIdsInFrame(JSON.stringify(XAI_SESSION_CREATED))).toEqual({
+      sessionId: "sess_abc123",
+    });
+    expect(providerIdsInFrame(JSON.stringify(XAI_CONVERSATION_CREATED))).toEqual({
+      conversationId: "conv_def456",
+    });
+    expect(
+      providerIdsInFrame(JSON.stringify({ type: "response.output_audio.delta", delta: "AAAA" })),
+    ).toBeNull();
+    // A transcript that only mentions the event name is not that event.
+    expect(
+      providerIdsInFrame(
+        JSON.stringify({
+          type: "response.output_audio_transcript.delta",
+          delta: 'said "conversation.created" aloud',
+          conversation: { id: "conv_from_text" },
+        }),
+      ),
+    ).toBeNull();
+    // A quoted event name inside JSON text is escaped, so the prefilter skips
+    // it; a field whose VALUE is the event name gets parsed, and the type
+    // still decides.
+    expect(
+      providerIdsInFrame(
+        JSON.stringify({
+          type: "conversation.item.added",
+          after: "conversation.created",
+          session: { id: "sess_other" },
+          conversation: { id: "conv_other" },
+        }),
+      ),
+    ).toBeNull();
+    expect(providerIdsInFrame('{"type":"conversation.created",')).toBeNull();
+  });
+
+  it("does not parse a frame that names neither event", () => {
+    const parse = vi.spyOn(JSON, "parse");
+    providerIdsInFrame(JSON.stringify({ type: "response.output_audio.delta", delta: "AAAA" }));
+    expect(parse).not.toHaveBeenCalled();
+  });
+});
+
+describe("an id that is not text is never kept (#521 review)", () => {
+  it("refuses a number or a boolean as an id", () => {
+    expect(providerIdText(123)).toBeNull();
+    expect(providerIdText(false)).toBeNull();
+    expect(providerIdText(true)).toBeNull();
+    expect(providerIdText("conv_def456")).toBe("conv_def456");
+  });
+
+  it("logs none and notes none for a numeric or boolean id from xAI", () => {
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const { transport, session } = makeSession();
+    transport.emit({ type: "session.created", session: { id: false } });
+    transport.emit({ type: "conversation.created", conversation: { id: 123 } });
+    expect(session.getSessionId()).toBeNull();
+    expect(transport.ids).toEqual([{ sessionId: null }, { conversationId: null }]);
+    const lines = log.mock.calls.map((c) => String(c[0]));
+    expect(lines.some((l) => l.includes("session=false") || l.includes("conversation=123"))).toBe(false);
+  });
+
+  it("keeps none on the transport for a numeric or boolean id", () => {
+    const t = new WebSocketGrokTransport("key", "model");
+    t.noteProviderIds({ sessionId: false, conversationId: 123 });
+    const d = t.closeDiagnostics();
+    expect(d.providerSessionId).toBeNull();
+    expect(d.providerConversationId).toBeNull();
+    expect(providerIdsInFrame(JSON.stringify({ type: "conversation.created", conversation: { id: 123 } }))).toEqual({
+      conversationId: null,
+    });
   });
 });
 

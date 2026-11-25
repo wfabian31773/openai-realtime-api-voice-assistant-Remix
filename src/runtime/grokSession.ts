@@ -186,6 +186,43 @@ function capText(value: unknown, max: number): string | null {
   return flat.length > max ? `${flat.slice(0, max)}…` : flat;
 }
 
+/**
+ * xAI's own session or conversation id (v272), or null. Only TEXT counts: a
+ * number or a boolean in that field is malformed, and turning it into
+ * `session=false` or `conversation=123` would hand xAI support an id that
+ * names nothing (#521 review, P3). Capped like every other field we keep.
+ */
+export function providerIdText(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  return capText(value, 100);
+}
+
+/**
+ * The id a raw inbound frame names, read before the frame is buffered, so a
+ * socket that closes before the session commits its buffer still keeps the
+ * id xAI already sent (#521 review, P2). Cheap: only a frame that names one
+ * of the two events is parsed, and only until both ids are held.
+ */
+export function providerIdsInFrame(
+  data: string,
+): { sessionId?: string | null; conversationId?: string | null } | null {
+  const names =
+    data.includes('"session.created"') || data.includes('"conversation.created"');
+  if (!names) return null;
+  let event: { type?: unknown; session?: { id?: unknown }; conversation?: { id?: unknown } };
+  try {
+    event = JSON.parse(data);
+  } catch {
+    return null;
+  }
+  if (!event || typeof event !== "object") return null;
+  if (event.type === "session.created") return { sessionId: providerIdText(event.session?.id) };
+  if (event.type === "conversation.created") {
+    return { conversationId: providerIdText(event.conversation?.id) };
+  }
+  return null;
+}
+
 /** xAI sockets open in this process. Counted for the close row. */
 let openGrokSockets = 0;
 
@@ -642,7 +679,7 @@ export class GrokVoiceSession {
         // arrives in the next event, `conversation.created` (probed
         // 2026-11-25). Until v272 this read `event.conversation`, which
         // session.created never carries, so both logged as none.
-        this.sessionId = capText(event.session?.id, 100);
+        this.sessionId = providerIdText(event.session?.id);
         this.transport.noteProviderIds?.({ sessionId: this.sessionId });
         console.log(
           `[SESSION] created session=${this.sessionId ?? "none"} trace=${this.transport.upgradeHeaders?.().xTraceId ?? "?"}`,
@@ -653,7 +690,7 @@ export class GrokVoiceSession {
         // The id xAI support looks a call up by (ticket T-L27235). Logged
         // beside the session id and the upgrade's trace id, so a drop on the
         // close row or in the log can be handed to them as it is.
-        const conversationId = capText(event.conversation?.id, 100);
+        const conversationId = providerIdText(event.conversation?.id);
         this.transport.noteProviderIds?.({ conversationId });
         console.log(
           `[SESSION] conversation=${conversationId ?? "none"} session=${this.sessionId ?? "none"} trace=${this.transport.upgradeHeaders?.().xTraceId ?? "?"}`,
@@ -1291,8 +1328,8 @@ export class WebSocketGrokTransport implements GrokTransport {
   }
 
   noteProviderIds(ids: { sessionId?: unknown; conversationId?: unknown }): void {
-    const session = capText(ids.sessionId, 100);
-    const conversation = capText(ids.conversationId, 100);
+    const session = providerIdText(ids.sessionId);
+    const conversation = providerIdText(ids.conversationId);
     if (session) this.providerSessionId = session;
     if (conversation) this.providerConversationId = conversation;
   }
@@ -1335,6 +1372,14 @@ export class WebSocketGrokTransport implements GrokTransport {
 
   private handleInbound(data: string): void {
     this.lastInboundAtMs = Date.now();
+    // The ids are the socket's, not the session's: read them as the frame
+    // arrives, before it waits in the buffer, so a drop before
+    // commitBuffered() still names them on the close line and row (#521
+    // review, P2).
+    if (this.providerSessionId === null || this.providerConversationId === null) {
+      const ids = providerIdsInFrame(data);
+      if (ids) this.noteProviderIds(ids);
+    }
     if (!this.firstEventArrived) {
       this.firstEventArrived = true;
       this.wakeFirstEventWaiters(true);
