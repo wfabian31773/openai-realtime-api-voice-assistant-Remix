@@ -86,6 +86,12 @@ export interface GrokTransport {
    * code only: the message can echo what the caller said (v259).
    */
   noteProviderError?(type: unknown, code: unknown): void;
+  /**
+   * xAI's own ids for this socket's session and conversation (v272), from
+   * `session.created` and `conversation.created`. xAI support looks a drop
+   * up by the conversation id. Ids only, never content.
+   */
+  noteProviderIds?(ids: { sessionId?: unknown; conversationId?: unknown }): void;
   /** How the socket ended, for the provider-close row (v259). PHI-free. */
   closeDiagnostics?(): ProviderCloseDiagnostics;
 }
@@ -151,6 +157,13 @@ export interface ProviderCloseDiagnostics {
   msSinceLoopTick: number | null;
   xTraceId: string | null;
   cfRay: string | null;
+  /**
+   * xAI's `session.id` and `conversation.id` for this socket (v272). xAI
+   * support asks for the conversation id to look a dropped call up; until
+   * v272 neither was kept (the log read `session=none conversation=none`).
+   */
+  providerSessionId: string | null;
+  providerConversationId: string | null;
 }
 
 /**
@@ -171,6 +184,43 @@ function capText(value: unknown, max: number): string | null {
   const flat = text.replace(/\s+/g, " ").trim();
   if (!flat) return null;
   return flat.length > max ? `${flat.slice(0, max)}…` : flat;
+}
+
+/**
+ * xAI's own session or conversation id (v272), or null. Only TEXT counts: a
+ * number or a boolean in that field is malformed, and turning it into
+ * `session=false` or `conversation=123` would hand xAI support an id that
+ * names nothing (#521 review, P3). Capped like every other field we keep.
+ */
+export function providerIdText(value: unknown): string | null {
+  if (typeof value !== "string") return null;
+  return capText(value, 100);
+}
+
+/**
+ * The id a raw inbound frame names, read before the frame is buffered, so a
+ * socket that closes before the session commits its buffer still keeps the
+ * id xAI already sent (#521 review, P2). Cheap: only a frame that names one
+ * of the two events is parsed, and only until both ids are held.
+ */
+export function providerIdsInFrame(
+  data: string,
+): { sessionId?: string | null; conversationId?: string | null } | null {
+  const names =
+    data.includes('"session.created"') || data.includes('"conversation.created"');
+  if (!names) return null;
+  let event: { type?: unknown; session?: { id?: unknown }; conversation?: { id?: unknown } };
+  try {
+    event = JSON.parse(data);
+  } catch {
+    return null;
+  }
+  if (!event || typeof event !== "object") return null;
+  if (event.type === "session.created") return { sessionId: providerIdText(event.session?.id) };
+  if (event.type === "conversation.created") {
+    return { conversationId: providerIdText(event.conversation?.id) };
+  }
+  return null;
 }
 
 /** xAI sockets open in this process. Counted for the close row. */
@@ -625,12 +675,28 @@ export class GrokVoiceSession {
     switch (event.type) {
       case "session.created":
         this.state = "connected";
-        this.sessionId = event.conversation?.id ?? null;
+        // xAI puts the session's id on `session.id`; the conversation's id
+        // arrives in the next event, `conversation.created` (probed
+        // 2026-11-25). Until v272 this read `event.conversation`, which
+        // session.created never carries, so both logged as none.
+        this.sessionId = providerIdText(event.session?.id);
+        this.transport.noteProviderIds?.({ sessionId: this.sessionId });
         console.log(
-          `[SESSION] created session=${this.sessionId ?? "none"} conversation=${event.conversation?.id ?? "none"}`,
+          `[SESSION] created session=${this.sessionId ?? "none"} trace=${this.transport.upgradeHeaders?.().xTraceId ?? "?"}`,
         );
         this.send({ type: "session.update", session: this.sessionConfig });
         break;
+      case "conversation.created": {
+        // The id xAI support looks a call up by (ticket T-L27235). Logged
+        // beside the session id and the upgrade's trace id, so a drop on the
+        // close row or in the log can be handed to them as it is.
+        const conversationId = providerIdText(event.conversation?.id);
+        this.transport.noteProviderIds?.({ conversationId });
+        console.log(
+          `[SESSION] conversation=${conversationId ?? "none"} session=${this.sessionId ?? "none"} trace=${this.transport.upgradeHeaders?.().xTraceId ?? "?"}`,
+        );
+        break;
+      }
       case "session.updated":
         this.state = "configured";
         // Only the FIRST one is the handshake. A later acknowledgement is a
@@ -1100,6 +1166,9 @@ export class WebSocketGrokTransport implements GrokTransport {
   private committed = false;
   private firstEventWaiters: Array<(arrived: boolean) => void> = [];
   private headers: { xTraceId?: string; cfRay?: string } = {};
+  // v272: xAI's own ids for this socket (see noteProviderIds).
+  private providerSessionId: string | null = null;
+  private providerConversationId: string | null = null;
   // v259: how this socket ended. See ProviderCloseDiagnostics.
   private openedAtMs: number | null = null;
   private lastInboundAtMs: number | null = null;
@@ -1253,7 +1322,16 @@ export class WebSocketGrokTransport implements GrokTransport {
       `peer=${d.remoteAddress ?? "?"}`,
       `trace=${d.xTraceId ?? "?"}`,
       `ray=${d.cfRay ?? "?"}`,
+      `conversation=${d.providerConversationId ?? "?"}`,
+      `session=${d.providerSessionId ?? "?"}`,
     ].join(" ");
+  }
+
+  noteProviderIds(ids: { sessionId?: unknown; conversationId?: unknown }): void {
+    const session = providerIdText(ids.sessionId);
+    const conversation = providerIdText(ids.conversationId);
+    if (session) this.providerSessionId = session;
+    if (conversation) this.providerConversationId = conversation;
   }
 
   noteProviderError(type: unknown, code: unknown): void {
@@ -1287,11 +1365,21 @@ export class WebSocketGrokTransport implements GrokTransport {
       msSinceLoopTick: loop.msSinceLastTick,
       xTraceId: this.headers.xTraceId ?? null,
       cfRay: this.headers.cfRay ?? null,
+      providerSessionId: this.providerSessionId,
+      providerConversationId: this.providerConversationId,
     };
   }
 
   private handleInbound(data: string): void {
     this.lastInboundAtMs = Date.now();
+    // The ids are the socket's, not the session's: read them as the frame
+    // arrives, before it waits in the buffer, so a drop before
+    // commitBuffered() still names them on the close line and row (#521
+    // review, P2).
+    if (this.providerSessionId === null || this.providerConversationId === null) {
+      const ids = providerIdsInFrame(data);
+      if (ids) this.noteProviderIds(ids);
+    }
     if (!this.firstEventArrived) {
       this.firstEventArrived = true;
       this.wakeFirstEventWaiters(true);

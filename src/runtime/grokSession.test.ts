@@ -183,13 +183,14 @@ describe("GrokVoiceSession lifecycle", () => {
 
   it("moves to connected on session.created and immediately sends session.update", () => {
     const { transport, session } = makeSession();
-    transport.emit({ type: "session.created", conversation: { id: "sess-1" } });
+    // xAI's shape (probed 2026-11-25): the id is on `session`, not `conversation`.
+    transport.emit({ type: "session.created", session: { id: "sess-1" } });
     expect(session.getState()).toBe("connected");
     expect(session.getSessionId()).toBe("sess-1");
     expect(transport.sent[0].type).toBe("session.update");
   });
 
-  it("tolerates a session.created without a conversation id", () => {
+  it("tolerates a session.created without a session id", () => {
     const { transport, session } = makeSession();
     transport.emit({ type: "session.created" });
     expect(session.getState()).toBe("connected");

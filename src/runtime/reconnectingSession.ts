@@ -394,6 +394,10 @@ export class ReconnectingSession implements BridgeSession {
       close: () => transport.close(),
       onMessage: (cb) => transport.onMessage(cb),
       noteProviderError: (type, code) => transport.noteProviderError?.(type, code),
+      noteProviderIds: (ids) => transport.noteProviderIds?.(ids),
+      // The session logs the upgrade's trace id beside xAI's ids (v272); a
+      // proxy that drops it logs trace=? on every reconnect lane (#521 review).
+      upgradeHeaders: transport.upgradeHeaders ? () => transport.upgradeHeaders!() : undefined,
       closeDiagnostics: transport.closeDiagnostics ? () => transport.closeDiagnostics!() : undefined,
       onClose: (cb) =>
         transport.onClose(() => {

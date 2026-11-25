@@ -399,6 +399,7 @@ describe("why an xAI socket ended (v259)", () => {
       "socketEndReceived", "wsErrorMessage", "providerErrorType", "providerErrorCode",
       "closedByUs", "openForMs", "msSinceServerEvent", "msSinceClientSend", "bufferedAmount",
       "openSockets", "remoteAddress", "eventLoopMaxMs", "msSinceLoopTick", "xTraceId", "cfRay",
+      "providerSessionId", "providerConversationId",
     ];
     const d = new WebSocketGrokTransport("key", "model").closeDiagnostics();
     expect(Object.keys(d).sort()).toEqual([...fields].sort());
