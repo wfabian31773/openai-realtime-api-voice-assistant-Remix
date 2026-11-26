@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import {
   classifyVoiceUrl,
+  isRuntimeNumberWebhook,
   configureForAgentRefusal,
   isPhoneLineRefusal,
   PhoneLineRefusal,
@@ -126,6 +127,20 @@ describe('webhookWriteRefusal: an explicit URL on a runtime number', () => {
     );
   });
 
+  it.each([
+    `${PUBLISHED}/voice/records/incoming`,
+    `${PUBLISHED}/voice/records/after`,
+    `${PUBLISHED}/voice/outbound/si-assistant`,
+    `${PUBLISHED}/voice/outbound`,
+    `${PUBLISHED}/voice/health`,
+    `${PUBLISHED}/voice/stream`,
+    `${PUBLISHED}/voice/`,
+    `${PUBLISHED}/api/voice/operator-line/inbound/status`,
+  ])('refuses moving a runtime number to %s, which takes no new call', (target) => {
+    const r = webhookWriteRefusal('+1', { ok: true, url: `${PUBLISHED}/voice/records` }, target);
+    expect(r?.reason).toBe('runtime_line_needs_runtime_url');
+  });
+
   it('allows a runtime number to move to another runtime URL', () => {
     expect(webhookWriteRefusal('+1', { ok: true, url: `${PUBLISHED}/voice/surgery` }, `${PUBLISHED}/voice/records`)).toBeNull();
   });
@@ -137,6 +152,28 @@ describe('webhookWriteRefusal: an explicit URL on a runtime number', () => {
 
   it('refuses when the current URL cannot be read', () => {
     expect(webhookWriteRefusal('+1', { ok: false }, `${PUBLISHED}/voice/records`)?.reason).toBe('voice_url_unreadable');
+  });
+});
+
+describe('isRuntimeNumberWebhook: only the paths that take a new call', () => {
+  it.each([
+    `${PUBLISHED}/voice/records`,
+    `${PUBLISHED}/Voice/Records/`,
+    `${WORKSPACE}/voice/no-ivr?x=1`,
+    `${PUBLISHED}/api/voice/operator-line/inbound`,
+  ])('%s is one', (url) => {
+    expect(isRuntimeNumberWebhook(url)).toBe(true);
+  });
+
+  it.each([
+    `${PUBLISHED}/voice/records/incoming`,
+    `${PUBLISHED}/voice/health`,
+    `${PUBLISHED}/voice/outbound/x`,
+    `${PUBLISHED}/api/voice/records`,
+    STUDIO,
+    'not a url',
+  ])('%s is not', (url) => {
+    expect(isRuntimeNumberWebhook(url)).toBe(false);
   });
 });
 

@@ -27,8 +27,9 @@
  * a preview and a confirmation, is a separate decision left to him.
  *
  * `updatePhoneEndpointWebhook` (the admin-only update-webhook route, which
- * writes a URL the caller gives) keeps working, but it may not move a number
- * answered by the runtime to anything that is not the runtime.
+ * writes a URL the caller gives) keeps working, but it may move a number
+ * answered by the runtime only to another runtime number webhook
+ * (`/voice/<lane>`, or the operator line's inbound path).
  */
 
 /** What a Voice URL is answered by. */
@@ -80,6 +81,30 @@ export function classifyVoiceUrl(url: string | null | undefined): VoiceUrlClass 
   if (runtime) return { kind: 'runtime', lane: runtime[1] };
   if (path === '/api/voice' || path.startsWith('/api/voice/')) return { kind: 'retired' };
   return { kind: 'other' };
+}
+
+/** Single-segment `/voice/<x>` paths the runtime mounts that are not a
+ * number's webhook: `GET /voice/health`, the outbound dialler's prefix, the
+ * media stream. */
+const NOT_A_LANE = new Set(['health', 'outbound', 'stream']);
+
+/**
+ * Is this URL something a number's Voice URL can be pointed at on the
+ * runtime? Only `POST /voice/:slug` (one segment) and the operator line's
+ * inbound webhook take a new call. `/voice/<slug>/after`, the outbound
+ * dialler's callbacks and anything longer are continuations or 404s
+ * (Codex P1 on #528: `/voice/records/incoming` read as a runtime URL).
+ *
+ * The slug is not checked against the registered lanes: that list lives in
+ * the agent config, which this module must not import. A mistyped lane name
+ * reaches the runtime's own fail-closed line for an unknown lane.
+ */
+export function isRuntimeNumberWebhook(url: string): boolean {
+  const path = pathOf(url.trim());
+  if (path === null) return false;
+  if (RUNTIME_PATHS_UNDER_API_VOICE.has(path)) return true;
+  const lane = /^\/voice\/([a-z0-9][a-z0-9-]*)$/.exec(path);
+  return lane !== null && !NOT_A_LANE.has(lane[1]);
 }
 
 /** Why nothing was changed. */
@@ -203,10 +228,10 @@ export function webhookWriteRefusal(
   }
   const now = classifyVoiceUrl(current.url);
   if (now.kind !== 'runtime') return null;
-  if (classifyVoiceUrl(target).kind === 'runtime') return null;
+  if (isRuntimeNumberWebhook(target)) return null;
   return new PhoneLineRefusal(
     'runtime_line_needs_runtime_url',
-    `${phoneNumber} is answered by the voice runtime (lane "${now.lane}", ${current.url}), and ${target} is not a runtime URL. ` +
+    `${phoneNumber} is answered by the voice runtime (lane "${now.lane}", ${current.url}), and ${target} is not a runtime number webhook (https://<host>/voice/<lane>). ` +
       `${NOT_CHANGED} ${WHERE_TO_REPOINT}`,
     current.url,
     target,
