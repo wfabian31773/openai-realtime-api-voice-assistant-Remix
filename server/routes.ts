@@ -24,6 +24,7 @@ import { opsHubAgentScorecards, todayOverview } from './observatory/queries';
 import { mountOperationsMonitor, readOperations } from './observatory/operations';
 import { urgentCondition, urgentFields, urgentWindow } from './urgentCalls';
 import { withRuntimeCounts } from './campaignCounts';
+import { runtimeCampaignControl, runtimeCampaignEditRefusal, type RuntimeCampaignAction } from './runtimeCampaignControls';
 
 // Hybrid authentication middleware - supports both Replit Auth and custom auth
 const isAuthenticated = (req: Request, res: Response, next: NextFunction) => {
@@ -864,6 +865,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Update campaign
   app.patch('/api/campaigns/:id', isAuthenticated, async (req, res) => {
     try {
+      // A runtime campaign keeps the name, type and agent the voice runtime
+      // finds it by, and its deleted mark (server/runtimeCampaignControls.ts).
+      const refusal = runtimeCampaignEditRefusal(await storage.getCampaign(req.params.id), req.body);
+      if (refusal) return res.status(409).json({ success: false, message: refusal });
       const campaign = await storage.updateCampaign(req.params.id, req.body);
       res.json(campaign);
     } catch (error) {
@@ -1360,11 +1365,24 @@ export async function registerRoutes(app: Express): Promise<Server> {
   });
 
   // ==================== Campaign Execution Control ====================
+
+  // A runtime outbound campaign (NPX outreach and the rest) is dialled by the
+  // voice runtime, which reads the row's status every tick: these routes
+  // answer for it before the old executor is reached (v277,
+  // server/runtimeCampaignControls.ts). Null for every other campaign.
+  const runtimeControlFor = (action: RuntimeCampaignAction, campaign: Awaited<ReturnType<typeof storage.getCampaign>>) =>
+    runtimeCampaignControl(action, campaign, {
+      update: (id, updates) => storage.updateCampaign(id, updates as Parameters<typeof storage.updateCampaign>[1]),
+    });
+  const runtimeControl = async (action: RuntimeCampaignAction, campaignId: string) =>
+    runtimeControlFor(action, await storage.getCampaign(campaignId));
   
   // Start campaign execution
   app.post('/api/campaigns/:id/start', isAuthenticated, requireRole('admin', 'manager'), async (req, res) => {
     try {
       const campaignId = req.params.id;
+      const runtime = await runtimeControl('start', campaignId);
+      if (runtime) return res.status(runtime.status).json(runtime.body);
       const { campaignExecutor } = await import('./services/campaignExecutor');
       
       // Execute campaign asynchronously
@@ -1391,6 +1409,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.post('/api/campaigns/:id/pause', isAuthenticated, requireRole('admin', 'manager'), async (req, res) => {
     try {
       const campaignId = req.params.id;
+      const runtime = await runtimeControl('pause', campaignId);
+      if (runtime) return res.status(runtime.status).json(runtime.body);
       const { campaignExecutor } = await import('./services/campaignExecutor');
       
       await campaignExecutor.pauseCampaign(campaignId);
@@ -1414,6 +1434,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.post('/api/campaigns/:id/resume', isAuthenticated, requireRole('admin', 'manager'), async (req, res) => {
     try {
       const campaignId = req.params.id;
+      const runtime = await runtimeControl('resume', campaignId);
+      if (runtime) return res.status(runtime.status).json(runtime.body);
       const { campaignExecutor } = await import('./services/campaignExecutor');
       
       // Resume campaign asynchronously
@@ -1440,6 +1462,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.post('/api/campaigns/:id/cancel', isAuthenticated, requireRole('admin', 'manager'), async (req, res) => {
     try {
       const campaignId = req.params.id;
+      const runtime = await runtimeControl('cancel', campaignId);
+      if (runtime) return res.status(runtime.status).json(runtime.body);
       const { campaignExecutor } = await import('./services/campaignExecutor');
       
       await campaignExecutor.cancelCampaign(campaignId);
@@ -1468,6 +1492,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (!campaign) {
         return res.status(404).json({ success: false, message: 'Campaign not found' });
       }
+
+      // A runtime campaign is never deleted: its contacts, attempts and
+      // opt-outs are the record of who was called (v277).
+      const runtime = await runtimeControlFor('delete', campaign);
+      if (runtime) return res.status(runtime.status).json(runtime.body);
       
       // Don't allow deleting running campaigns
       if (campaign.status === 'running') {
@@ -1525,12 +1554,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
       }
       // A runtime outbound campaign is dialled by the voice runtime, never by
       // this scheduler (src/services/outboundCampaignScheduler.ts refuses it
-      // too). Refused here, before a scheduler is created and remembered.
+      // too). Refused here, before a scheduler is created and remembered;
+      // the message points at Resume (v277).
       if (campaign.campaignType === 'runtime_outbound') {
-        return res.status(409).json({
-          success: false,
-          message: 'This is a runtime outbound campaign; the voice runtime dials it. It cannot be started here.',
-        });
+        const refused = await runtimeControlFor('start', campaign);
+        return res.status(refused?.status ?? 409).json(refused?.body ?? { success: false });
       }
       
       const { createScheduler } = await import('../src/services/outboundCampaignScheduler');
@@ -1573,6 +1601,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
   app.post('/api/campaigns/:id/stop-outbound-scheduler', isAuthenticated, requireRole('admin', 'manager'), async (req, res) => {
     try {
       const campaignId = req.params.id;
+      // The screen's Stop button. On a runtime campaign it pauses the voice
+      // runtime's dialler, and says what that does (v277).
+      const runtime = await runtimeControl('stop', campaignId);
+      if (runtime) return res.status(runtime.status).json(runtime.body);
       
       const { stopScheduler } = await import('../src/services/outboundCampaignScheduler');
       await stopScheduler(campaignId);

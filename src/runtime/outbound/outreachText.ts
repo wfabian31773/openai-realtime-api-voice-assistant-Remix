@@ -39,7 +39,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { askOfferCheck, type ContactSource, type OutboundLanePolicy } from "./campaign";
 import { mayDialNow, tomorrowAtOpening } from "./callingWindow";
-import { OUTREACH_TEXT_KEY, TEXTABLE_STATUSES, dncKey, type ContactRow, type OutboundStore } from "./store";
+import { OUTREACH_TEXT_KEY, TEXTABLE_STATUSES, campaignHoldReason, dncKey, type ContactRow, type OutboundStore } from "./store";
 import { failureFromUnknown } from "../../plugin/sendFailure";
 import type { SmsSender } from "../../plugin/sms";
 import type { BookingPageLane } from "./bookingPage";
@@ -191,6 +191,12 @@ export async function runTextTick(
     if (!sender) return { ...result, skipped: "no sms sender" };
     const campaignId = await deps.store.ensureCampaign(policy.campaignKey, slug);
     if (!campaignId) return { ...result, skipped: `no agents row for ${slug}` };
+    // An outreach text is new contact, like a call: a campaign paused,
+    // cancelled or deleted on the Campaigns screen sends none (v277). The
+    // booking confirmations owed to people who booked are a different tick
+    // (./bookingConfirmation.ts) and still go out.
+    const hold = campaignHoldReason(await deps.store.campaignRunState(campaignId));
+    if (hold) return { ...result, skipped: hold };
     let source: ContactSource | null = null;
     if (policy.source) {
       source = await policy.source().catch(() => null);

@@ -16,6 +16,7 @@ import {
   TEXTABLE_STATUSES,
   dncKey,
   type AttemptFinish,
+  type CampaignRunState,
   type ContactRow,
   type ContactStatus,
   type OutboundStore,
@@ -56,6 +57,9 @@ export class FakeOutboundStore implements OutboundStore {
    * when null (the dialer's tests never name one). */
   campaignKey: string | null = null;
   agentRowMissing = false;
+  /** The campaign row as the Campaigns screen last wrote it (v277). A test
+   * flips `status` to pause or resume the campaign; null is no row at all. */
+  campaignState: CampaignRunState | null = { status: "running", deleted: false };
   private seq = 0;
 
   constructor(private readonly clock: () => Date = () => new Date()) {}
@@ -78,6 +82,10 @@ export class FakeOutboundStore implements OutboundStore {
 
   async ensureCampaign(): Promise<string | null> {
     return this.agentRowMissing ? null : this.campaignId;
+  }
+
+  async campaignRunState(campaignId: string): Promise<CampaignRunState | null> {
+    return campaignId === this.campaignId && this.campaignState ? { ...this.campaignState } : null;
   }
 
   private due(c: ContactRow, now: Date): boolean {

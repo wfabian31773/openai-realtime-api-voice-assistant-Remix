@@ -64,7 +64,14 @@ import {
   resolvedMaxConsecutiveInfraRetries,
 } from "./campaign";
 import { mayDialNow, tomorrowAtOpening } from "./callingWindow";
-import { NOT_PLACED, OUTREACH_TEXT_KEY, dncKey, type ContactRow, type OutboundStore } from "./store";
+import {
+  NOT_PLACED,
+  OUTREACH_TEXT_KEY,
+  campaignHoldReason,
+  dncKey,
+  type ContactRow,
+  type OutboundStore,
+} from "./store";
 import { VOICE_PATH_PREFIX } from "../voiceWebhook";
 
 export const OUTBOUND_PATH_PREFIX = "/voice/outbound";
@@ -171,8 +178,27 @@ export interface DialerDeps {
   /** When each source-fed campaign last refreshed its queue (v107). Kept by
    * the scheduler; absent, the queue is refreshed on every tick. */
   sourceRefreshedAt?: Map<string, number>;
+  /** Per campaign, the last hold logged (v277), so a paused campaign is said
+   * once rather than every minute. Kept by the scheduler. */
+  holdNoted?: Map<string, string | null>;
   now?: () => Date;
   log?: (line: string) => void;
+}
+
+/**
+ * Say a campaign's hold once when it starts, and once when it ends. Absent a
+ * map (a test calling one tick), every held tick says it.
+ */
+export function noteHold(
+  key: string,
+  hold: string | null,
+  deps: Pick<DialerDeps, "holdNoted" | "log">,
+): void {
+  const log = deps.log ?? ((line: string) => console.log(line));
+  const before = deps.holdNoted?.get(key) ?? null;
+  if (hold !== null && hold !== before) log(`[outbound] ${key}: NOT dialling — ${hold}`);
+  if (hold === null && before !== null) log(`[outbound] ${key}: dialling again — the campaign is running`);
+  deps.holdNoted?.set(key, hold);
 }
 
 export interface TickResult {
@@ -288,6 +314,15 @@ export async function runCampaignTick(
   try {
     const campaignId = await deps.store.ensureCampaign(policy.campaignKey, slug);
     if (!campaignId) return { ...result, skipped: `no agents row for ${slug}` };
+
+    // THE CAMPAIGNS SCREEN (v277): Pause, Stop, Cancel and Delete there stop
+    // the dialler from this tick; Resume lets it dial again. Read before the
+    // source refresh and the reaper, so a held campaign claims nobody and
+    // writes nothing. A call already ringing finishes, and a person who rings
+    // the caller ID back is still answered (./callback.ts reads no hold).
+    const hold = campaignHoldReason(await deps.store.campaignRunState(campaignId));
+    noteHold(policy.campaignKey, hold, deps);
+    if (hold) return { ...result, skipped: hold };
 
     // A campaign fed live from a source refreshes its queue from it first,
     // and re-checks each person at the dial (dialOne). A source that is not
