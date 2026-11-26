@@ -384,7 +384,8 @@ export function TwilioPage() {
               </Select>
               <p className="mt-1 text-sm text-muted-foreground">
                 This does not change the number. It reads the number's current Voice URL from
-                Twilio and tells you what answers it. The URL this action used to write is served
+                Twilio and shows you what it is set to (a TwiML App on the number, if any, takes
+                precedence over it). The URL this action used to write is served
                 by neither voice pipeline, so it would have dropped every call. Repoint a number in
                 the Twilio console.
               </p>

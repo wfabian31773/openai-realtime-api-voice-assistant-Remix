@@ -267,6 +267,9 @@ describe('the routes and the page say what happens', () => {
     expect(page).not.toContain('This will update the Twilio webhook');
     expect(page).not.toContain('Configure & Update Twilio');
     expect(page).toContain('This does not change the number.');
+    // It reads the configured Voice URL only; it cannot say what answers calls.
+    expect(page).not.toContain('tells you what answers it');
+    expect(page).toContain('shows you what it is set to');
     expect(page).toContain("error?.response?.status === 409");
   });
 });
