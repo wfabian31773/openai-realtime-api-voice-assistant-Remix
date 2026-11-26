@@ -57,7 +57,7 @@ export function payloadRefusalSqlList(): string {
  * words ("Missing required information: surgeon" -> "surgeon"). The one copy
  * of the matcher: `durableTicketFiling.missingFieldFromError` narrows it to the
  * fields a tool can ask for, and the outbox reads it to decide whether a held
- * request's replay was refused for its routing field (v277).
+ * request's replay was refused for its routing field (v278).
  */
 export function refusedFieldNamed(error?: string): string | undefined {
   const m = /missing required information:\s*([a-z_]+)/i.exec(error ?? '');

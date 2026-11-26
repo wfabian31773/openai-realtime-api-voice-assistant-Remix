@@ -2252,7 +2252,17 @@ import { callEnvironment } from "./callRecord";
  * is not read and files to Medical Records as before.
  * Above v275 (#524). No migration.
  *
- * v277 — A HELD OPTICAL OR SURGERY REQUEST REFUSED ON ITS REPLAY FOR THE
+ * v277 — THE HEARD NAME IS HELD AND ONLY A NULL IS NO REQUEST (2026-11-26).
+ * #526 merged at `62b8d8d9` before its round-2 review fixes. The floor now
+ * reads the name heard on the recording before the request and holds it
+ * beside a certain identity's names, so a request that only names the
+ * patient is refused, and a second answer that says nothing was asked, is
+ * the placeholder or names no topic is no request. A blank first answer is
+ * the reader failing (unavailable); a retry that answers an explicit null is
+ * no request (AskAnswer keeps none apart from failed). Above main's v276
+ * (#526, `184fcecf`). No migration.
+ *
+ * v278 — A HELD OPTICAL OR SURGERY REQUEST REFUSED ON ITS REPLAY FOR THE
  * OFFICE OR THE SURGEON IS FILED UNASSIGNED (2026-11-26). A queue filing whose
  * create-ticket POST did not complete is held in the outbox and the caller is
  * told it is logged; the worker's replay was then refused "Missing required
@@ -2263,10 +2273,12 @@ import { callEnvironment } from "./callRecord";
  * worker's replay (never a send whose caller sees the answer) uses it, when
  * the refusal names that department's routing field: the same payload with
  * `routingAskExhausted: true` and a staff line, on the same key, once.
- * Above v276 (#526). No migration.
+ * Above main's v277 (#532, `5183de9`), which it contains along with v276
+ * (#526). (v277 while #533 was open; renumbered when #532 took v277.)
+ * No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v277-a-held-request-takes-the-routing-exit-20261126";
+  "voice-runtime-v278-a-held-request-takes-the-routing-exit-20261126";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

@@ -14,10 +14,14 @@ import {
 } from '@/components/ui/table'
 import { Phone, PhoneCall, Activity, Trash2 } from 'lucide-react'
 import type { CallLog } from '@/types'
+import { useAuth } from '@/hooks/useAuth'
+import { STALE_CALL_AFTER_MINUTES, CLEANUP_BUTTON_TITLE } from '@/lib/staleCallLine'
 
 export function LiveCallsPage() {
   const [currentTime, setCurrentTime] = useState(Date.now())
   const queryClient = useQueryClient()
+  const { user } = useAuth()
+  const isAdmin = user?.role === 'admin'
 
   useEffect(() => {
     const interval = setInterval(() => {
@@ -125,10 +129,11 @@ export function LiveCallsPage() {
             <p className="text-2xl font-bold text-blue-600">{activeCalls.length}</p>
             <p className="text-sm text-muted-foreground">Active Call{activeCalls.length !== 1 ? 's' : ''}</p>
           </div>
-          {activeCalls.length > 0 && (
+          {activeCalls.length > 0 && isAdmin && (
             <Button
               onClick={() => cleanupMutation.mutate()}
               disabled={cleanupMutation.isPending}
+              title={CLEANUP_BUTTON_TITLE}
               variant="outline"
               size="sm"
               className="text-orange-600 border-orange-600 hover:bg-orange-50"
@@ -174,7 +179,7 @@ export function LiveCallsPage() {
                     const ageMinutes = timeRef
                       ? Math.floor((currentTime - new Date(timeRef).getTime()) / 60000)
                       : 0;
-                    const isStale = ageMinutes > 5;
+                    const isStale = ageMinutes >= STALE_CALL_AFTER_MINUTES;
                     
                     return (
                       <TableRow 

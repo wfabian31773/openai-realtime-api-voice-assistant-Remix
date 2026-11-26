@@ -72,7 +72,7 @@ export const CREATE_TICKET_PAYLOAD_KIND = 'create_ticket_v1';
 export interface RefusalFallback {
   description?: string;
   /**
-   * v277: an Optical or Surgery request held here may take the app's
+   * v278: an Optical or Surgery request held here may take the app's
    * unassigned exit if its replay is refused for the office or the surgeon.
    * See `routingFieldRefused`.
    */
@@ -80,7 +80,7 @@ export interface RefusalFallback {
 }
 
 /**
- * v277: A HELD OPTICAL OR SURGERY REQUEST REFUSED ON ITS REPLAY FOR THE OFFICE
+ * v278: A HELD OPTICAL OR SURGERY REQUEST REFUSED ON ITS REPLAY FOR THE OFFICE
  * OR THE SURGEON IS FILED UNASSIGNED, NOT LOST.
  *
  * The four queue tools persist their payload here before they POST it. When
@@ -573,7 +573,7 @@ export class TicketOutboxService {
          * Not a retry of the same bytes: the payload's own filer named the
          * description to send after a refusal (`RefusalFallback`), or, on an
          * Optical or Surgery request refused on the worker's replay for its
-         * office or surgeon, the unassigned exit (v277). It replaces the stored
+         * office or surgeon, the unassigned exit (v278). It replaces the stored
          * payload, which drops the fallback, so a second refusal dead-letters
          * as before. Guarded on `sending`, the claim this send holds. Same
          * idempotency key: the refusal stored none on the far side.
@@ -588,7 +588,7 @@ export class TicketOutboxService {
           console.warn(
             exit
               ? `[TICKET OUTBOX] ↻ REFUSED (HTTP ${response.statusCode}) for the ${exit} on a held request — ` +
-                  `${outboxId} sending it once with the unassigned exit before dead-lettering (v277)`
+                  `${outboxId} sending it once with the unassigned exit before dead-lettering (v278)`
               : `[TICKET OUTBOX] ↻ REFUSED (HTTP ${response.statusCode}) — ${outboxId} carries a fallback ` +
                   'description; sending it once with that before dead-lettering',
           );

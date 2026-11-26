@@ -204,6 +204,16 @@ export async function sweepAfterHoursUnfiledCall(
 
     const records = afterHoursRecordsRequestFor(metadata.callSid);
     forgetAfterHoursRecordsRequest(metadata.callSid);
+    // v239: with no certain identity, the patient's name as the caller said
+    // it, before the stand-in. Read before the request (review of #526), so a
+    // name heard on the recording is a held name when the request is checked:
+    // "Wants to speak with <the patient>" is a person, not a request.
+    const found = identity
+      ? undefined
+      : await nameForTheFloor(transcript, ctx.askName ?? askModelForThePatientName);
+    if (found) {
+      console.info(`[AFTER-HOURS FLOOR] ${metadata.callSid}: named from the recording, unconfirmed`);
+    }
     // v276 (operator, 2026-11-26): "We shouldnt be filing tickets unless we
     // can identify the patient and there is a valid request." The floor asks
     // the v201 reader whether the caller asked for anything; no request files
@@ -216,7 +226,7 @@ export async function sweepAfterHoursUnfiledCall(
       : await readTheRequest(
           transcript,
           ctx.askRequest ?? askModelForTheRequest,
-          [identity?.firstName, identity?.lastName].filter(
+          [identity?.firstName, identity?.lastName, found?.firstName, found?.lastName].filter(
             (n): n is string => typeof n === 'string' && n.trim().length > 0,
           ),
           metadata.callSid,
@@ -232,14 +242,6 @@ export async function sweepAfterHoursUnfiledCall(
     // the confirmed store), and department 8's own request type — before this
     // the floor sent only a certain match's date, no office and no type.
     const spokenDob = identity?.dateOfBirth ? undefined : dobTheCallerGave(metadata.callSid, transcript);
-    // v239: with no certain identity, the patient's name as the caller said
-    // it, before the stand-in.
-    const found = identity
-      ? undefined
-      : await nameForTheFloor(transcript, ctx.askName ?? askModelForThePatientName);
-    if (found) {
-      console.info(`[AFTER-HOURS FLOOR] ${metadata.callSid}: named from the recording, unconfirmed`);
-    }
     const { fullName, standIn } = nameOrStandIn(
       identity?.firstName ?? found?.firstName,
       identity?.lastName ?? found?.lastName,

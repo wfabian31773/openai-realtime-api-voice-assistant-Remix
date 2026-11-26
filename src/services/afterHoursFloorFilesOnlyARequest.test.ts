@@ -256,7 +256,7 @@ describe('v276: no request read from the recording files nothing', () => {
   });
 
   it('an answer that says nothing, or names no topic, is no request', async () => {
-    for (const request of ['Unclear.', 'Wants to speak with a representative.', '   ']) {
+    for (const request of ['Unclear.', 'Wants to speak with a representative.']) {
       h.submitSimplifiedTicket.mockClear();
       const { payload } = await sweep(
         [GREETING, 'CALLER: My name is Owen Lark, I just want somebody to call me.', 'AGENT: I can take a message.'].join('\n'),
@@ -303,6 +303,43 @@ describe('v276: a request read from the recording files only under a name', () =
     expect(payload?.patientFullName).toBe('Mara Quill');
   });
 
+  it("the heard name is held when the request is read, and a retry that names no topic is no request (review of #526)", async () => {
+    const answers: RequestAnswer[] = [
+      { request: 'Wants to speak with Mara Quill.' },
+      { request: 'Wants to speak with someone.' },
+    ];
+    const { payload, askRequest } = await sweep(
+      [GREETING, 'CALLER: My name is Mara Quill, I just want to talk to someone.', 'AGENT: I can take a message.'].join('\n'),
+      { request: async () => answers.shift() ?? null, heard: { firstName: 'Mara', lastName: 'Quill' } },
+    );
+    expect(askRequest).toHaveBeenCalledTimes(2);
+    expect(payload).toBeUndefined();
+  });
+
+  it('the heard name is held, and a retry that states a request files under it (the control)', async () => {
+    const answers: RequestAnswer[] = [
+      { request: 'Mara Quill wants a refill of her eye drops.' },
+      { request: 'Wants a refill of eye drops.' },
+    ];
+    const { payload, askRequest } = await sweep(
+      [GREETING, 'CALLER: My name is Mara Quill, I need a refill of my eye drops.', 'AGENT: I will pass that on.'].join('\n'),
+      { request: async () => answers.shift() ?? null, heard: { firstName: 'Mara', lastName: 'Quill' } },
+    );
+    expect(askRequest).toHaveBeenCalledTimes(2);
+    expect(payload?.patientFullName).toBe('Mara Quill');
+    expect(payload.additionalDetails).not.toContain(floor.FLOOR_REQUEST_NOT_CONFIRMED_NOTE);
+  });
+
+  it('a retry the model answers with an explicit null is no request, which files nothing (review of #526)', async () => {
+    const answers: RequestAnswer[] = [{ request: 'Wants Mara Quill to call.' }, { request: null }];
+    const { payload, askRequest } = await sweep(
+      [GREETING, 'CALLER: My name is Mara Quill, never mind, I will call in the morning.', 'AGENT: All right.'].join('\n'),
+      { request: async () => answers.shift() ?? null, heard: { firstName: 'Mara', lastName: 'Quill' } },
+    );
+    expect(askRequest).toHaveBeenCalledTimes(2);
+    expect(payload).toBeUndefined();
+  });
+
   it('CAb3028d29030d258608d043c9838a2c29 (VA-90194): a stand-in asking for the on-call doctor is not filed', async () => {
     // "Wants to reach the on-call doctor." passes the reader's checks, so only
     // the identity rule stops it.
@@ -332,6 +369,35 @@ describe('v276: a request read from the recording files only under a name', () =
     );
     expect(askRequest).toHaveBeenCalledTimes(2);
     expect(payload?.patientFullName).toBe('Owen Lark');
+  });
+
+  it('a retry that throws files a named caller with the note, and no stand-in (review of #532)', async () => {
+    let calls = 0;
+    const throwsOnRetry = async () => {
+      calls += 1;
+      if (calls % 2 === 1) return { request: 'Wants to speak with Owen Lark.' };
+      throw new Error('synthetic outage');
+    };
+    const named = await sweep(
+      [GREETING, 'CALLER: My name is Owen Lark, I need to move my appointment.', 'AGENT: I will pass that on.'].join('\n'),
+      { request: throwsOnRetry, heard: { firstName: 'Owen', lastName: 'Lark' } },
+    );
+    expect(named.askRequest).toHaveBeenCalledTimes(2);
+    expect(named.payload?.patientFullName).toBe('Owen Lark');
+    expect(named.payload.additionalDetails).toContain(floor.FLOOR_REQUEST_NOT_CONFIRMED_NOTE);
+
+    h.submitSimplifiedTicket.mockClear();
+    const standIn = await sweep(
+      [GREETING, 'CALLER: I need to move my appointment.', 'AGENT: I will pass that on.'].join('\n'),
+      {
+        request: async () => {
+          calls += 1;
+          if (calls % 2 === 1) return { request: 'Wants to move an appointment on March 3.' };
+          throw new Error('synthetic outage');
+        },
+      },
+    );
+    expect(standIn.payload).toBeUndefined();
   });
 
   it('two answers that both fail a content check still read as a request (files under a name, not under a stand-in)', async () => {
@@ -423,6 +489,24 @@ describe('v276: a reader that could not run files a named caller with a note, an
       );
       expect(standIn.payload).toBeUndefined();
     }
+  });
+
+  it('a blank sentence is the reader failing, not "no request": a named caller files with the note, a stand-in nothing (review of #526)', async () => {
+    h.submitSimplifiedTicket.mockClear();
+    const named = await sweep(
+      [GREETING, 'CALLER: My name is Owen Lark, I need to move my appointment.', 'AGENT: I can take that.'].join('\n'),
+      { request: { request: '   ' }, heard: { firstName: 'Owen', lastName: 'Lark' } },
+    );
+    expect(named.askRequest).toHaveBeenCalledTimes(1);
+    expect(named.payload?.patientFullName).toBe('Owen Lark');
+    expect(named.payload.additionalDetails).toContain(floor.FLOOR_REQUEST_NOT_CONFIRMED_NOTE);
+
+    h.submitSimplifiedTicket.mockClear();
+    const standIn = await sweep(
+      [GREETING, 'CALLER: I need to move my appointment.', 'AGENT: I can take that.'].join('\n'),
+      { request: { request: '   ' } },
+    );
+    expect(standIn.payload).toBeUndefined();
   });
 
   it('an explicit null request field is the model reading no request, which files nothing named or not', async () => {

@@ -824,7 +824,7 @@ describe('v205: a refused replay sends its fallback once before dead-lettering',
 
 
 /**
- * v277: A HELD OPTICAL OR SURGERY REQUEST REFUSED ON ITS REPLAY FOR ITS ROUTING
+ * v278: A HELD OPTICAL OR SURGERY REQUEST REFUSED ON ITS REPLAY FOR ITS ROUTING
  * FIELD TAKES THE APP'S UNASSIGNED EXIT. The whole chain, through the real
  * surgery tool, is in aHeldRequestTakesTheRoutingExit.test.ts; these pin the
  * outbox's own rule.
@@ -843,7 +843,7 @@ const HELD_SURGERY = {
 };
 const SURGEON_400 = { success: false, statusCode: 400, error: 'Missing required information: surgeon. Surgery tickets are assigned by surgeon.' };
 
-describe('v277: a held request refused on its replay for its routing field', () => {
+describe('v278: a held request refused on its replay for its routing field', () => {
   beforeEach(() => {
     createTicket.mockReset();
     createTicket.mockResolvedValue({ success: true, ticketNumber: 'VA-52100', ticketId: 9001 });
