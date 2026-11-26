@@ -114,7 +114,7 @@ describe("the follow-up summary", () => {
       // v275: three counts, gained deliberately.
       skippedAfterGoodbye: 0,
       providerMarkupCuts: 0,
-      providerMarkupAfterAudio: 0,
+      providerMarkupHeard: 0,
       outcome: "dead_air",
     });
   });

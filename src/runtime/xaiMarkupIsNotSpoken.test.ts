@@ -27,7 +27,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { VoiceCallBridge, type BridgeSessionHandlers, type CallOutcome, type VoiceCallRecord } from "./mediaStreamBridge";
 import { answeredQuestionResult } from "../agents/afterHoursAnsweredQuestion";
 import { followUpEvent } from "./followUpTelemetry";
-import { providerMarkupIndex, withoutProviderMarkup } from "./providerMarkup";
+import { providerMarkupIndex, providerMarkupMayOpen, withoutProviderMarkup } from "./providerMarkup";
 
 const ANSWERED = "record_answered_question";
 /** What a lookup or a filing answers: something the caller IS waiting on. */
@@ -630,9 +630,9 @@ describe("FIX 2: provider markup is not played or recorded", () => {
     await h.end();
     expect(h.agentLines().slice(-1)[0]).toBe(`AGENT: ${GOODBYE}`);
     expect(h.records[0].providerMarkupCuts).toBe(1);
-    // Its audio had already been sent: counted as markup found after audio.
-    expect(h.records[0].providerMarkupAfterAudio).toBe(1);
-    expect(followUpEvent(h.records[0])?.data).toMatchObject({ providerMarkupCuts: 1, providerMarkupAfterAudio: 1 });
+    // Its audio had already been sent: the caller may have heard the markup.
+    expect(h.records[0].providerMarkupHeard).toBe(1);
+    expect(followUpEvent(h.records[0])?.data).toMatchObject({ providerMarkupCuts: 1, providerMarkupHeard: 1 });
   });
 
   it("REVIEW SHAPE: a markup-only completed line whose audio played leaves a count and a true log line", async () => {
@@ -648,7 +648,7 @@ describe("FIX 2: provider markup is not played or recorded", () => {
     await h.flush();
     expect(h.agentLines()).toEqual([]);
     expect(h.records[0].providerMarkupCuts).toBe(1);
-    expect(h.records[0].providerMarkupAfterAudio).toBe(1);
+    expect(h.records[0].providerMarkupHeard).toBe(1);
     const said = warn.mock.calls.map((c) => String(c[0])).filter((m) => m.includes("provider markup"));
     expect(said).toHaveLength(1);
     expect(said[0]).toContain("its audio was already sent");
@@ -656,24 +656,52 @@ describe("FIX 2: provider markup is not played or recorded", () => {
     warn.mockRestore();
   });
 
-  it("markup only in the completed transcript, with no audio sent, is not counted as found after audio", async () => {
+  it("markup only in the completed transcript, with no audio sent, is not counted as possibly heard", async () => {
     const h = harness();
     h.caller("Okay.");
     await h.respond({ deltas: ["Mm."], done: "<silence />", noAudio: true });
     h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" } as never);
     await h.flush();
     expect(h.records[0].providerMarkupCuts).toBe(1);
-    expect(h.records[0].providerMarkupAfterAudio).toBe(0);
+    expect(h.records[0].providerMarkupHeard).toBe(0);
   });
 
-  it("markup caught on the stream is never counted as found after audio", async () => {
+  it("REVIEW SHAPE: markup after the agent's words is counted as possibly heard, and the log says its audio plays", async () => {
+    // github-actions on 4457f662: the log said the rest of the utterance was
+    // not played, though a line whose words came first plays its audio whole.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
     const h = harness();
     await h.say("Is there anything else I can help you with?");
     h.caller("No, thank you.");
+    const mediaBefore = h.media.length;
     await h.respond({ deltas: [`${GOODBYE} `, "<turn_end>"], done: `${GOODBYE} <turn_end>` });
     await h.end();
+    // Both audio deltas went out: nothing of a words-first line is cut.
+    expect(h.media.length).toBe(mediaBefore + 2);
     expect(h.records[0].providerMarkupCuts).toBe(1);
-    expect(h.records[0].providerMarkupAfterAudio).toBe(0);
+    expect(h.records[0].providerMarkupHeard).toBe(1);
+    const said = warn.mock.calls.map((c) => String(c[0])).filter((m) => m.includes("provider markup"));
+    expect(said).toHaveLength(1);
+    expect(said[0]).toContain("its audio plays whole, so the caller may have heard it");
+    expect(said[0]).not.toContain("not played");
+    warn.mockRestore();
+  });
+
+  it("a line that opens with markup is not counted as heard, and the log says none of its audio is played", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const h = harness();
+    h.caller("Okay.");
+    const mediaBefore = h.media.length;
+    await h.respond({ deltas: ["<turn_end>"] });
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" } as never);
+    await h.flush();
+    expect(h.media.length).toBe(mediaBefore);
+    expect(h.records[0].providerMarkupCuts).toBe(1);
+    expect(h.records[0].providerMarkupHeard).toBe(0);
+    const said = warn.mock.calls.map((c) => String(c[0])).filter((m) => m.includes("provider markup"));
+    expect(said).toHaveLength(1);
+    expect(said[0]).toContain("none of its audio is played");
+    warn.mockRestore();
   });
 
   it("audio that arrives before the tag's transcript is sent; audio after it is not", async () => {
@@ -683,6 +711,98 @@ describe("FIX 2: provider markup is not played or recorded", () => {
     await h.respond({ deltas: ["<system_warning>", "do not repeat</system_warning>"], audioFirst: true });
     // The first audio delta reached Twilio before the tag was seen; the second did not.
     expect(h.media.length).toBe(mediaBefore + 1);
+  });
+
+  describe("CODEX SHAPE: a tag split after its \"<\" holds the line's audio until the text says which", () => {
+    // Codex P2 on 4457f662: a first delta of only "<" matched no tag, so the
+    // audio that came before the next delta reached Twilio, and a line that
+    // opens with markup could still be heard.
+    const chunk = (c: string) => Buffer.alloc(400, c.charCodeAt(0)).toString("base64");
+    const open = (h: ReturnType<typeof harness>) => {
+      h.caller("Okay.");
+      h.begin();
+      return h.handlers();
+    };
+
+    it("\"<\" then \"turn_end>\": none of the audio is sent and no line is recorded", async () => {
+      const h = harness();
+      const hs = open(h);
+      const mediaBefore = h.media.length;
+      hs.onAgentTranscriptDelta("<");
+      hs.onAudioDelta(chunk("a"));
+      hs.onAudioDelta(chunk("b"));
+      expect(h.media.length).toBe(mediaBefore);
+      hs.onAgentTranscriptDelta("turn_end>");
+      hs.onAudioDelta(chunk("c"));
+      hs.onAudioDone("<turn_end>");
+      await h.finish();
+      expect(h.media.length).toBe(mediaBefore);
+      h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" } as never);
+      await h.flush();
+      expect(h.agentLines()).toEqual([]);
+      expect(h.records[0].providerMarkupCuts).toBe(1);
+      expect(h.records[0].providerMarkupHeard).toBe(0);
+    });
+
+    it("\"</\" then \"silence>\" is held the same way", async () => {
+      const h = harness();
+      const hs = open(h);
+      const mediaBefore = h.media.length;
+      hs.onAgentTranscriptDelta(" </");
+      hs.onAudioDelta(chunk("a"));
+      hs.onAgentTranscriptDelta("silence>");
+      hs.onAudioDone("</silence>");
+      await h.finish();
+      expect(h.media.length).toBe(mediaBefore);
+    });
+
+    it("a \"<\" the next delta shows is not a tag sends the held audio first, in order", async () => {
+      const h = harness();
+      const hs = open(h);
+      const mediaBefore = h.media.length;
+      hs.onAgentTranscriptDelta("<");
+      hs.onAudioDelta(chunk("a"));
+      hs.onAgentTranscriptDelta("3 minutes away.");
+      expect(h.media.slice(mediaBefore)).toEqual([chunk("a")]);
+      hs.onAudioDelta(chunk("b"));
+      hs.onAudioDone("<3 minutes away.");
+      await h.finish();
+      expect(h.media.slice(mediaBefore)).toEqual([chunk("a"), chunk("b")]);
+    });
+
+    it("held audio is dropped when the completed transcript opens with markup", async () => {
+      const h = harness();
+      const hs = open(h);
+      const mediaBefore = h.media.length;
+      hs.onAgentTranscriptDelta("<");
+      hs.onAudioDelta(chunk("a"));
+      hs.onAudioDone("<end_of_call>");
+      await h.finish();
+      expect(h.media.length).toBe(mediaBefore);
+      h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" } as never);
+      await h.flush();
+      expect(h.agentLines()).toEqual([]);
+    });
+
+    it("held audio is sent when the completed transcript is not markup", async () => {
+      const h = harness();
+      const hs = open(h);
+      const mediaBefore = h.media.length;
+      hs.onAgentTranscriptDelta("<");
+      hs.onAudioDelta(chunk("a"));
+      hs.onAudioDone("<");
+      await h.finish();
+      expect(h.media.slice(mediaBefore)).toEqual([chunk("a")]);
+    });
+
+    it("a \"<\" after the agent's words holds nothing: such a line plays its audio whole", async () => {
+      const h = harness();
+      const hs = open(h);
+      const mediaBefore = h.media.length;
+      hs.onAgentTranscriptDelta("Okay. <");
+      hs.onAudioDelta(chunk("a"));
+      expect(h.media.slice(mediaBefore)).toEqual([chunk("a")]);
+    });
   });
 
   it("a tool call written out as text is cut where it starts", async () => {
@@ -728,6 +848,14 @@ describe("FIX 2: provider markup is not played or recorded", () => {
 });
 
 describe("providerMarkup", () => {
+  it.each(["<", " < ", "</", "< /", "\t</ "])("%j may open a tag", (text) => {
+    expect(providerMarkupMayOpen(text)).toBe(true);
+  });
+
+  it.each(["", "<t", "<turn_end>", "a <", "Okay. </", "<3", "< 3"])("%j is not waiting on a tag", (text) => {
+    expect(providerMarkupMayOpen(text)).toBe(false);
+  });
+
   it.each([
     ["<silence />", 0],
     ["Great, have a good day! <turn_end>", 24],

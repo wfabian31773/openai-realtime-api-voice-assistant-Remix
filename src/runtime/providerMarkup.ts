@@ -30,3 +30,15 @@ export function withoutProviderMarkup(text: string): string {
   const at = providerMarkupIndex(text);
   return at < 0 ? text : text.slice(0, at).trimEnd();
 }
+
+/**
+ * A line whose text so far is only `<` or `</` (spaces allowed): a tag may be
+ * starting, split across transcript deltas, and the next delta says whether it
+ * is one. A `<` after the agent's words is not asked about: such a line plays
+ * its audio whole either way.
+ */
+export const PROVIDER_MARKUP_MAY_OPEN = /^\s*<\s*\/?\s*$/;
+
+export function providerMarkupMayOpen(text: string): boolean {
+  return PROVIDER_MARKUP_MAY_OPEN.test(text);
+}

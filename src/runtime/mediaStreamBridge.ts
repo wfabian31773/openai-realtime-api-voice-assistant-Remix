@@ -115,7 +115,7 @@ import { noteCallerTranscript } from "../services/symptomCorroboration";
 import { noteCallLanguage } from "../services/callLanguage";
 import { ghostCallRefusal } from "../services/ghostCallProtection";
 import { callerConclusion, completesGoodbye, type CallerConclusion } from "./goodbye";
-import { providerMarkupIndex, withoutProviderMarkup } from "./providerMarkup";
+import { providerMarkupIndex, providerMarkupMayOpen, withoutProviderMarkup } from "./providerMarkup";
 import {
   CallUsage,
   providerUsageMarker,
@@ -745,12 +745,14 @@ export interface VoiceCallRecord {
    * said nothing for `FILED_SILENCE_MS` (outcome `filed_silence`). */
   filedSilenceHangup?: boolean;
   /** v275: agent utterances cut where provider markup began (`<…>` in the
-   * agent's transcript): the rest is not played and not recorded. */
+   * agent's transcript): the stored line stops before it. */
   providerMarkupCuts?: number;
-  /** v275: of those, the utterances whose markup showed up only in the wire's
-   * completed transcript, after their audio had already been sent: the
-   * caller may have heard what the stored line leaves out (review of #524). */
-  providerMarkupAfterAudio?: number;
+  /** v275: of those, the utterances whose markup the caller may have heard,
+   * because their audio was not cut: the markup followed the agent's words
+   * (such a line plays its audio whole), or only the wire's completed
+   * transcript carried it, after the audio had been sent (reviews of #524).
+   * The rest opened with the markup and sent none of their audio. */
+  providerMarkupHeard?: number;
   teardownReason?: "goodbye_grace" | "media_gap";
 }
 
@@ -1004,7 +1006,7 @@ export class VoiceCallBridge {
   /** The utterance currently being spoken, opened by its first audio or
    * transcript delta and closed by its completion. `epoch` is what makes a
    * cancelled utterance's late completion recognisable (module doc). */
-  private current: { seq: number; epoch: number; text: string; bytes: number; muted: boolean; audioOff?: boolean } | null = null;
+  private current: { seq: number; epoch: number; text: string; bytes: number; muted: boolean; audioOff?: boolean; heldAudio?: string[] } | null = null;
   /** The response epoch a barge-in cancelled. Everything that epoch emits
    * afterwards is stale: dropped, not forwarded, not recorded. */
   private cancelledEpoch: number | null = null;
@@ -1650,7 +1652,7 @@ export class VoiceCallBridge {
   /** Opens the current utterance on its first event, whichever arrives
    * first — audio delta or transcript delta. Returns null when the event
    * belongs to a cancelled epoch (stale). */
-  private openOrGetCurrent(): { seq: number; epoch: number; text: string; bytes: number; muted: boolean; audioOff?: boolean } | null {
+  private openOrGetCurrent(): { seq: number; epoch: number; text: string; bytes: number; muted: boolean; audioOff?: boolean; heldAudio?: string[] } | null {
     const epoch = this.session.getResponseEpoch();
     if (this.cancelledEpoch !== null && epoch === this.cancelledEpoch) return null;
     // Also supports sessions that report only audio/transcript events.
@@ -1733,11 +1735,35 @@ export class VoiceCallBridge {
       current.text = current.text.slice(0, at);
       // The words before the tag are still the agent's and are still checked.
       if (current.text.trim()) this.checkGuardrails(current);
-      if (!current.text.trim()) current.audioOff = true;
-      this.muteForMarkup(current);
+      if (!current.text.trim()) {
+        current.audioOff = true;
+        // Audio held while the opening was "<" (below) was the markup's.
+        current.heldAudio = undefined;
+      }
+      this.muteForMarkup(current, "stream");
+      // A line can only be held while it is nothing but the opening of a
+      // tag, so this never runs; it keeps the words' audio if it ever does.
+      this.releaseHeldAudio(current);
       return;
     }
+    // A line whose text so far is only "<" (or "</") may be the start of a tag
+    // split across deltas: its audio waits until the text says which, so a
+    // line that opens with markup sends none of it (Codex P2 on #524).
+    if (providerMarkupMayOpen(current.text)) {
+      current.heldAudio ??= [];
+      return;
+    }
+    this.releaseHeldAudio(current);
     this.checkGuardrails(current);
+  }
+
+  /** v275: send audio held while an utterance's text was only the opening of
+   * a possible tag, once the text shows it is not one. */
+  private releaseHeldAudio(utterance: { heldAudio?: string[] }): void {
+    const held = utterance.heldAudio;
+    if (!held) return;
+    utterance.heldAudio = undefined;
+    for (const chunk of held) this.handleAudioDelta(chunk);
   }
 
   /** Utterance sequences already checked-and-tripped, so one violation is
@@ -1860,6 +1886,13 @@ export class VoiceCallBridge {
     // not sent. The utterance is still owed its completion, so the stall clock
     // keeps running.
     if (current.audioOff) {
+      this.armDeadAir("utterance");
+      return;
+    }
+    // Held while the text is only the opening of a possible tag (see
+    // handleAgentTranscriptDelta); the next delta or the completion decides.
+    if (current.heldAudio) {
+      current.heldAudio.push(base64Audio);
       this.armDeadAir("utterance");
       return;
     }
@@ -2155,6 +2188,17 @@ export class VoiceCallBridge {
     // Every other way a pending greeting can go stale ends up on a later
     // response, which the epoch bind refuses on its own.
     this.greetingPending = null;
+    // v275: audio still held for a possible tag is settled by the completed
+    // transcript before the utterance closes: markup at its start, and the
+    // audio was the markup's; anything else, and it is sent now.
+    const settling = this.current;
+    if (settling?.heldAudio) {
+      if (withoutProviderMarkup(transcript ?? settling.text).trim() === "" &&
+          providerMarkupIndex(transcript ?? settling.text) >= 0) {
+        settling.heldAudio = undefined;
+        settling.audioOff = true;
+      } else this.releaseHeldAudio(settling);
+    }
     const done = this.current;
     this.current = null;
     if (!done) return;
@@ -2225,7 +2269,7 @@ export class VoiceCallBridge {
     // Markup that only the completed transcript carries came after this
     // utterance's audio was sent: nothing can be recalled, so the count and
     // the log say so instead of claiming it was not played.
-    if (providerMarkupIndex(wire) >= 0) this.muteForMarkup(done, done.bytes > 0);
+    if (providerMarkupIndex(wire) >= 0) this.muteForMarkup(done, "completed");
     const text = (mutedOnStream ? done.text : withoutProviderMarkup(wire)).trim();
     const markName = `utt-${done.seq}`;
     // v275: what this response said, for a goodbye a tool answer follows
@@ -2659,8 +2703,8 @@ export class VoiceCallBridge {
   private responseSpeech: { epoch: number; text: string; mark: string } | null = null;
   /** v275: see VoiceCallRecord.providerMarkupCuts. */
   private providerMarkupCuts = 0;
-  /** v275: see VoiceCallRecord.providerMarkupAfterAudio. */
-  private providerMarkupAfterAudio = 0;
+  /** v275: see VoiceCallRecord.providerMarkupHeard. */
+  private providerMarkupHeard = 0;
   /** v165 — logging only: what became of the latest follow-up request. */
   /** Follow-up requests not yet answered by a created response, FIFO (the
    * session queues them the same way), as request timestamps. */
@@ -2916,25 +2960,40 @@ export class VoiceCallBridge {
   }
 
   /** v275: stop an utterance at the provider's markup — see
-   * handleAgentTranscriptDelta. One count and one line per utterance.
-   * `afterAudio`: the markup was found only once the utterance's audio had
-   * already gone to Twilio (the wire's completed transcript), so it is kept
-   * out of the stored line but may have been heard. */
-  private muteForMarkup(utterance: { muted: boolean }, afterAudio = false): void {
+   * handleAgentTranscriptDelta. One count and one line per utterance, and the
+   * line says whether the caller may have heard the markup (github-actions on
+   * #524). `found`: on the streamed text, where only a line that opened with
+   * the markup has its audio cut; or only in the wire's completed transcript,
+   * after whatever audio the utterance had was sent. */
+  private muteForMarkup(
+    utterance: { muted: boolean; audioOff?: boolean; bytes: number },
+    found: "stream" | "completed",
+  ): void {
     if (utterance.muted) return;
     utterance.muted = true;
     this.providerMarkupCuts += 1;
-    if (afterAudio) {
-      this.providerMarkupAfterAudio += 1;
-      console.warn(
-        `[bridge] provider markup in the agent's completed line on ${this.deps.context.callSid} — ` +
-          `its audio was already sent; the line is recorded without it`,
-      );
+    const on = `[bridge] provider markup`;
+    const callSid = this.deps.context.callSid;
+    if (found === "completed") {
+      if (utterance.bytes > 0) {
+        this.providerMarkupHeard += 1;
+        console.warn(
+          `${on} in the agent's completed line on ${callSid} — its audio was already sent, ` +
+            `so the caller may have heard it; the line is recorded without it`,
+        );
+      } else {
+        console.warn(`${on} in the agent's completed line on ${callSid} — no audio was sent; the line is recorded without it`);
+      }
       return;
     }
+    if (utterance.audioOff) {
+      console.warn(`${on} opens the agent's line on ${callSid} — none of its audio is played and no line is recorded`);
+      return;
+    }
+    this.providerMarkupHeard += 1;
     console.warn(
-      `[bridge] provider markup in the agent's line on ${this.deps.context.callSid} — ` +
-        `the rest of the utterance is not played or recorded`,
+      `${on} after the agent's words on ${callSid} — the line is recorded without it, ` +
+        `but its audio plays whole, so the caller may have heard it`,
     );
   }
 
@@ -3702,7 +3761,7 @@ export class VoiceCallBridge {
         mediaGapHangup: this.mediaGapHangup,
         filedSilenceHangup: this.filedSilenceHangup,
         providerMarkupCuts: this.providerMarkupCuts,
-        providerMarkupAfterAudio: this.providerMarkupAfterAudio,
+        providerMarkupHeard: this.providerMarkupHeard,
         ...(reason ? { teardownReason: reason } : {}),
         followUps: {
           ...this.followUps,
