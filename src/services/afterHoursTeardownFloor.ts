@@ -7,6 +7,7 @@
 import { storage } from '../../server/storage';
 import { callerLines, HEARD_NAME_NOTE, saidMoreThanTheirOwnIdentity } from '../runtime/requestSweep';
 import { askModelForThePatientName, nameFromTheRecording, type NameAsker } from '../runtime/nameFromTheRecording';
+import { askModelForTheRequest, readTheRequest, type RequestAsker } from '../runtime/requestFromTheRecording';
 import { confirmedClinicFor, verifiedIdentityFor } from '../tools/verifiedIdentity';
 import { dobTheCallerGave, floorRequestType, officeTheCallerGave } from './afterHoursCallFacts';
 import { AFTER_HOURS_DEPARTMENT_ID } from '../tools/afterHoursTaxonomy';
@@ -43,6 +44,14 @@ export const FLOOR_RECORDS_NOTE =
   'MEDICAL RECORDS REQUEST — the caller asked for medical records and hung up before the agent filed it. Filed to Medical Records; records requests never ring the on-call (operator ruling 2026-11-09).';
 export const FLOOR_DIALED_LOCATION_NOTE =
   'LOCATION from the number dialled (an office line) — not confirmed by the caller.';
+/**
+ * v276: the request reader could not run at teardown (no model key, the
+ * reader switched off, the model failed, or it answered no usable field), so
+ * the floor files a named caller as it did before v276 rather than lose a
+ * request it cannot judge. A caller with no name is not filed either way.
+ */
+export const FLOOR_REQUEST_NOT_CONFIRMED_NOTE =
+  'REQUEST NOT CONFIRMED — the request reader could not run at teardown, so this was filed as before so nothing is lost. Please review the conversation.';
 
 const last10 = (v?: string) => (v ?? '').replace(/\D/g, '').slice(-10);
 
@@ -164,6 +173,8 @@ export async function sweepAfterHoursUnfiledCall(
     transcript?: string;
     /** v239 seam. Production asks the model; tests pass their own reader. */
     askName?: NameAsker;
+    /** v276 seam. Production asks the model; tests pass their own reader. */
+    askRequest?: RequestAsker;
   } = {},
 ): Promise<void> {
   const call = calls.get(callId);
@@ -191,6 +202,30 @@ export async function sweepAfterHoursUnfiledCall(
     const row = await storage.getCallLogBySid(metadata.callSid);
     if (row?.ticketNumber) return;
 
+    const records = afterHoursRecordsRequestFor(metadata.callSid);
+    forgetAfterHoursRecordsRequest(metadata.callSid);
+    // v276 (operator, 2026-11-26): "We shouldnt be filing tickets unless we
+    // can identify the patient and there is a valid request." The floor asks
+    // the v201 reader whether the caller asked for anything; no request files
+    // nothing, and a request with no patient identified (below) files nothing
+    // either. A records request is not read: v190 and the CAP SOP log every
+    // access request. A reader that could not run files a named caller as
+    // before, with a note; a caller with no name files nothing (below).
+    const reading = records
+      ? undefined
+      : await readTheRequest(
+          transcript,
+          ctx.askRequest ?? askModelForTheRequest,
+          [identity?.firstName, identity?.lastName].filter(
+            (n): n is string => typeof n === 'string' && n.trim().length > 0,
+          ),
+          metadata.callSid,
+        );
+    if (reading?.kind === 'none') {
+      console.info(`[AFTER-HOURS FLOOR] ${metadata.callSid}: not filed — no request read from the recording`);
+      return;
+    }
+
     const callerText = callerLines(transcript).join('\n');
     // v163: the date of birth the caller gave when asked (70150), the office
     // the caller confirmed or named when asked (no-IVR has no tool that fills
@@ -209,6 +244,13 @@ export async function sweepAfterHoursUnfiledCall(
       identity?.firstName ?? found?.firstName,
       identity?.lastName ?? found?.lastName,
     );
+    // v276 (review of #526): the identity rule holds whatever the reader
+    // answered, so a reader that could not run files only under a name. A
+    // records request still files under the stand-in (v190, the CAP SOP).
+    if (standIn && !records) {
+      console.info(`[AFTER-HOURS FLOOR] ${metadata.callSid}: not filed — the patient was not identified`);
+      return;
+    }
     const named = confirmedClinicFor(metadata.callSid) ?? await officeTheCallerGave(transcript);
     // v184: with no office named, try the one patient on the caller's number,
     // then the office line that was dialled. The ticket API accepts only
@@ -219,8 +261,6 @@ export async function sweepAfterHoursUnfiledCall(
     const clinic = named ?? fromHistory ?? fromDialed;
     const locationSource: TicketLocationSource | undefined = named ? 'caller' : clinic ? 'history' : undefined;
     const requestType = floorRequestType(callerText);
-    const records = afterHoursRecordsRequestFor(metadata.callSid);
-    forgetAfterHoursRecordsRequest(metadata.callSid);
     const recordsRequester = records ? recordsRequesterPayload(records.requester, records.requesterName) : undefined;
     const { SyncAgentService } = await import('./syncAgentService');
     const result = await SyncAgentService.submitSimplifiedTicket({
@@ -244,6 +284,7 @@ export async function sweepAfterHoursUnfiledCall(
       additionalDetails: [
         FLOOR_NEEDS_REVIEW_NOTE,
         records ? FLOOR_RECORDS_NOTE : undefined,
+        reading?.kind === 'unavailable' ? FLOOR_REQUEST_NOT_CONFIRMED_NOTE : undefined,
         'AFTER-HOURS TEARDOWN: the call ended with a stated request and no recorded ticket. Please review the conversation and complete the request.',
         clinic ? undefined : FLOOR_MISSING_LOCATION_NOTE,
         fromHistory ? FLOOR_HISTORY_LOCATION_NOTE : undefined,

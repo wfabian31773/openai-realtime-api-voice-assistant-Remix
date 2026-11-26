@@ -2238,9 +2238,22 @@ import { callEnvironment } from "./callRecord";
  * `redropped` (DEFAULT_QUICK_REDROP_MS, RUNTIME_RECONNECT_REDROP_MS, 0 off);
  * the first session's drop never counts. MAX=2 and REDROP_MS=0 put back
  * v263's rule. Above main's v273 (#522, `f89bc66d`). No migration.
+ *
+ * v276 — THE AFTER-HOURS FLOOR FILES ONLY A REQUEST FROM AN IDENTIFIED
+ * PATIENT (2026-11-26). Operator: "We shouldnt be filing tickets unless we
+ * can identify the patient and there is a valid request." No-ivr floor
+ * tickets 2026-11-12 15:24 to 2026-11-26 01:59 UTC: 123, 57 under the
+ * stand-in name; 46 of the 57 stand-ins and 16 of the 66 named carried no
+ * request. Before filing, the floor asks the request reader (readTheRequest,
+ * v201's reader with v241's second ask) what the caller asked: no request
+ * files nothing; a request under the stand-in name files nothing; a reader
+ * that could not run (a missing or mistyped request field included) files
+ * only under a name, with FLOOR_REQUEST_NOT_CONFIRMED_NOTE; a records request
+ * is not read and files to Medical Records as before.
+ * Above v275 (#524). No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v275-no-turn-after-a-goodbye-and-no-xai-markup-20261126";
+  "voice-runtime-v276-the-after-hours-floor-files-only-an-identified-request-20261126";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
