@@ -91,6 +91,17 @@ describe('configureForAgentRefusal: the action never changes a number', () => {
     expect(r.reason).toBe('runtime_line');
   });
 
+  it('the wording names the address it read and never claims this deployment answers it', () => {
+    const other = 'https://unrelated-host.example.com/voice/records';
+    for (const r of [
+      configureForAgentRefusal('+1', { ok: true, url: other }, OLD_CORE_WRITE),
+      webhookWriteRefusal('+1', { ok: true, url: other }, STUDIO)!,
+    ]) {
+      expect(r.message).toContain(`a voice runtime address (lane "records"): ${other}`);
+      expect(r.message).not.toContain('is answered by');
+    }
+  });
+
   it('a Studio phone-menu number is refused (it is a live line too)', () => {
     const r = configureForAgentRefusal('+16265550002', { ok: true, url: STUDIO }, OLD_CORE_WRITE);
     expect(r.reason).toBe('live_line');

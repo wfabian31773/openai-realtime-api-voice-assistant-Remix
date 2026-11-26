@@ -40,8 +40,10 @@
 
 /** What a Voice URL is answered by. */
 export type VoiceUrlKind =
-  /** The Grok voice runtime: exactly `/voice/<slug>`, or the operator
-   * line's inbound webhook. */
+  /** A voice runtime address: exactly `/voice/<slug>`, or the operator
+   * line's inbound webhook. Read from the path only, so the wording says
+   * "a voice runtime address" and shows the URL, and never claims the number
+   * reaches THIS deployment (Codex on #528, round 5). */
   | 'runtime'
   /** The retired SIP core, behind the `/api/voice` proxy. */
   | 'retired'
@@ -189,7 +191,7 @@ export function configureForAgentRefusal(
     case 'runtime':
       return new PhoneLineRefusal(
         'runtime_line',
-        `${phoneNumber} is answered by the voice runtime (lane "${now.lane}", ${current.url}). ` +
+        `${phoneNumber} points at a voice runtime address (lane "${now.lane}"): ${current.url}. ` +
           `Configure for agent would move it to the retired pipeline. ${DEAD_PATH} ${NOT_CHANGED} ${WHERE_TO_REPOINT}`,
         current.url,
         wouldWrite,
@@ -234,7 +236,7 @@ export function webhookWriteRefusal(
   if (now.kind === 'none') return null;
   const where =
     now.kind === 'runtime'
-      ? `${phoneNumber} is answered by the voice runtime (lane "${now.lane}", ${current.url}).`
+      ? `${phoneNumber} points at a voice runtime address (lane "${now.lane}"): ${current.url}.`
       : `${phoneNumber} already has a Voice URL (${current.url}).`;
   return new PhoneLineRefusal(
     now.kind === 'runtime' ? 'runtime_line' : 'live_line',
