@@ -8357,118 +8357,21 @@ export function setupVoiceAgentRoutes(app: Express): void {
     }
   });
 
-  // Call diagnostics API endpoint - provides real-time visibility into call health
-  // SD Pilot: live tool timeline for an in-progress azul-scheduling call.
-  // Accepts the OpenAI callId, the Twilio callSid, or the callLogId.
-  app.get("/api/voice/azul/tool-timeline/:idOrSid", async (req, res) => {
-    try {
-      const events = getAzulTimeline(String(req.params.idOrSid || ''));
-      if (!events) {
-        return res.status(404).json({ events: [], live: false });
-      }
-      res.json({ events, live: true });
-    } catch (error) {
-      console.error('[AZUL-TIMELINE] endpoint error:', error);
-      res.status(500).json({ error: 'Failed to get tool timeline' });
-    }
-  });
-
-  app.get("/api/voice/diagnostics", async (req, res) => {
-    try {
-      const stats = CallDiagnostics.getDailyStats();
-      const activeCount = CallDiagnostics.getActiveTraceCount();
-      const completedCount = CallDiagnostics.getCompletedTraceCount();
-      
-      // Use adjusted failure rate that includes orphaned traces
-      const adjustedRate = parseFloat(stats.adjustedFailureRate.replace('%', ''));
-      
-      const healthStatus = adjustedRate < 5 ? 'healthy' 
-        : adjustedRate < 15 ? 'degraded' 
-        : 'critical';
-      
-      res.json({
-        status: healthStatus,
-        timestamp: new Date().toISOString(),
-        last24Hours: {
-          totalCalls: stats.totalCalls,
-          successfulCalls: stats.successfulCalls,
-          acceptFailures: stats.acceptFailures,
-          dbErrors: stats.dbErrors,
-          timeouts: stats.timeouts,
-          unaccountedCalls: stats.unaccountedCalls,
-          adjustedFailureRate: stats.adjustedFailureRate,
-        },
-        latency: {
-          avgAcceptMs: stats.avgAcceptLatencyMs,
-          p95AcceptMs: stats.p95AcceptLatencyMs,
-        },
-        activeCalls: activeCount,
-        potentialOrphans: stats.potentialOrphanCount,
-        tracesInMemory: completedCount,
-      });
-    } catch (error) {
-      console.error('[DIAGNOSTICS] Error getting stats:', error);
-      res.status(500).json({ error: 'Failed to get diagnostics' });
-    }
-  });
-  
-  // Get active call traces - for debugging (redacted for PHI safety)
-  app.get("/api/voice/diagnostics/active", async (req, res) => {
-    try {
-      const disablePhiLogging = process.env.DISABLE_PHI_LOGGING === 'true';
-      
-      const traces = CallDiagnostics.getAllActiveTraces().map(trace => ({
-        traceId: trace.traceId,
-        twilioCallSid: disablePhiLogging ? '[REDACTED]' : (trace.twilioCallSid ? `...${trace.twilioCallSid.slice(-8)}` : null),
-        openaiCallId: disablePhiLogging ? '[REDACTED]' : (trace.openaiCallId ? `...${trace.openaiCallId.slice(-8)}` : null),
-        agentSlug: trace.agentSlug,
-        stageCount: trace.stages.length,
-        lastStage: trace.stages[trace.stages.length - 1]?.stage,
-        elapsedMs: Date.now() - trace.startTime,
-      }));
-      
-      res.json({
-        count: traces.length,
-        traces,
-      });
-    } catch (error) {
-      console.error('[DIAGNOSTICS] Error getting active traces:', error);
-      res.status(500).json({ error: 'Failed to get active traces' });
-    }
-  });
-
-  // Get recent failures from completed traces - for operations monitoring
-  app.get("/api/voice/diagnostics/recent-failures", async (req, res) => {
-    try {
-      const disablePhiLogging = process.env.DISABLE_PHI_LOGGING === 'true';
-      const limit = Math.min(parseInt(req.query.limit as string) || 20, 50);
-      
-      const stats = CallDiagnostics.getDailyStats();
-      const allTraces = CallDiagnostics.getCompletedTraces();
-      
-      const failures = allTraces
-        .filter((t: any) => t.outcome === 'accept_failed' || t.outcome === 'db_error' || t.outcome === 'timeout')
-        .sort((a: any, b: any) => (b.completedAt || b.startTime) - (a.completedAt || a.startTime))
-        .slice(0, limit)
-        .map((trace: any) => ({
-          traceId: trace.traceId,
-          twilioCallSid: disablePhiLogging ? '[REDACTED]' : (trace.twilioCallSid ? `...${trace.twilioCallSid.slice(-8)}` : null),
-          agentSlug: trace.agentSlug,
-          outcome: trace.outcome,
-          failureReason: trace.failureReason || 'Unknown',
-          completedAt: trace.completedAt || trace.startTime,
-          totalDurationMs: (trace.completedAt || Date.now()) - trace.startTime,
-        }));
-      
-      res.json({
-        failures,
-        totalFailures24h: stats.acceptFailures + stats.dbErrors + stats.timeouts,
-      });
-    } catch (error) {
-      console.error('[DIAGNOSTICS] Error getting recent failures:', error);
-      res.status(500).json({ error: 'Failed to get recent failures' });
-    }
-  });
+  // NO READ ROUTES HERE (2026-11-26). This block used to register four GETs
+  // with no authentication: /api/voice/diagnostics, /api/voice/diagnostics/active,
+  // /api/voice/diagnostics/recent-failures and /api/voice/azul/tool-timeline/:idOrSid.
+  // The public server proxies every /api/voice/* request to this process, and
+  // this process has no login session, so all four answered anyone on the
+  // published host (the three diagnostics routes answered 200 to a request with
+  // no session on 2026-11-26). They returned call counts, failure rates, full
+  // OpenAI call ids, raw failure text and a call's tool timeline.
+  //   - The diagnostics routes had no reader: the Operations Monitor was rebuilt
+  //     on call_logs (server/observatory/operations.ts) and reads them no more.
+  //   - The tool timeline's one reader, the SD Pilot page, now reads the copy on
+  //     the call row through /api/call-logs, which requires a login.
+  // Do not add a read route to this file: it cannot check who is asking. Put it
+  // in server/routes.ts behind isAuthenticated. See
+  // src/noUnauthenticatedVoiceReads.test.ts.
 
   // SIP call health monitor status endpoint (no auth required — read-only)
   app.get("/api/health/sip", (req, res) => {
