@@ -161,10 +161,13 @@ export function startOutboundScheduler(deps: SchedulerDeps, intervalMs = OUTBOUN
   const routeCache = deps.routeCache ?? new Map();
   // And when each live-fed campaign last refreshed its queue (v107).
   const sourceRefreshedAt = deps.sourceRefreshedAt ?? new Map<string, number>();
+  // And the last Campaigns-screen hold said for each (v277), so a paused
+  // campaign is logged once, not every minute.
+  const holdNoted = deps.holdNoted ?? new Map<string, string | null>();
   const timer = setInterval(() => {
     if (running) return; // a slow tick is never overlapped by the next
     running = true;
-    void runOutboundTick({ ...deps, routeCache, sourceRefreshedAt }).finally(() => {
+    void runOutboundTick({ ...deps, routeCache, sourceRefreshedAt, holdNoted }).finally(() => {
       running = false;
     });
   }, intervalMs);

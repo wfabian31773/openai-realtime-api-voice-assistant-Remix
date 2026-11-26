@@ -4,6 +4,7 @@ import apiClient from '@/lib/apiClient'
 import { describePipeline } from '@/lib/pipelineSplit'
 import { briefCorrectionNotice, briefNeighbours } from '@/lib/briefDayPicker'
 import { LIVE_WINDOW_MINUTES, liveCalls } from '@/lib/liveCalls'
+import { listenInUnavailableReason } from '@/lib/listenIn'
 import { AccuracyTab } from '@/components/observatory/AccuracyTab'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -83,13 +84,21 @@ interface FunnelWeek {
   entered: number
   materialized: number
   kept: number
+  /** Of kept, how many were settled from the NextGen schedule mirror or the partner fields, not by 5Star. */
+  keptFromSchedule?: number
   cancelled: number
   noShow: number
   pendingReview: number
+  /** Past bookings nobody can settle yet: unknown, not "not kept". */
+  unsettled?: number
+  /** Open bookings whose appointment is today or later. */
+  upcoming?: number
 }
 interface FunnelResponse {
   weeks: number
   sage: FunnelWeek[]
+  /** False when the schedule mirror was needed and could not be read. */
+  mirrorRead?: boolean
 }
 interface AgentOpenings {
   agentSlug: string
@@ -252,6 +261,8 @@ interface LiveOpsCall {
   createdAt: string
   agentUsed: string | null
   transcript: string | null
+  /** Set on a runtime call, which has no conference to listen in on. */
+  voiceProvider?: string | null
 }
 
 interface GraderCheckStat {
@@ -1277,8 +1288,17 @@ function FunnelTab() {
     <section>
       <p className="mb-3 text-sm text-muted-foreground">
         SAGE bookings by week: booked → entered in NextGen → materialized on the schedule → kept, with losses by
-        verdict. Restored July bookings count in their original booking week.
+        verdict. Restored July bookings count in their original booking week. 5Star stopped settling past bookings
+        around 2026-10-21, so a past booking it left open is settled here from the NextGen schedule mirror when it
+        carries its NextGen appointment id, and from the partner report when it was booked at a partner clinic.
+        Bookings neither can settle are counted as Unsettled; with those, or bookings not due yet, the kept rate is a
+        floor (≥).
       </p>
+      {funnel.data && funnel.data.mirrorRead === false && (
+        <p className="mb-3 text-sm text-amber-700">
+          The NextGen schedule mirror could not be read, so bookings 5Star left open are counted as Unsettled, not kept.
+        </p>
+      )}
       {funnel.isError && (
         <p className="text-sm text-red-600">
           Funnel failed: {(funnel.error as any)?.response?.data?.error ?? String(funnel.error)}
@@ -1300,13 +1320,32 @@ function FunnelTab() {
                 <th className="px-3 py-2 text-right">Cancelled</th>
                 <th className="px-3 py-2 text-right">No-show</th>
                 <th className="px-3 py-2 text-right">In review</th>
+                <th className="px-3 py-2 text-right" title="Past bookings neither 5Star nor the schedule mirror can settle">
+                  Unsettled
+                </th>
+                <th className="px-3 py-2 text-right" title="Open bookings whose appointment is today or later">
+                  Not due yet
+                </th>
               </tr>
             </thead>
             <tbody>
               {funnel.data.sage.map((w) => {
                 const keptRate = w.booked ? w.kept / w.booked : null
+                const unsettled = w.unsettled ?? 0
+                const upcoming = w.upcoming ?? 0
+                const open = unsettled + upcoming
+                // Unsettled and upcoming bookings may yet be kept, so the rate is a
+                // floor; tone it grey rather than red for a number that is not known.
                 const rateTone: Tone =
-                  keptRate === null ? 'grey' : keptRate >= 0.6 ? 'green' : keptRate >= 0.4 ? 'amber' : 'red'
+                  keptRate === null
+                    ? 'grey'
+                    : keptRate >= 0.6
+                      ? 'green'
+                      : open > 0
+                        ? 'grey'
+                        : keptRate >= 0.4
+                          ? 'amber'
+                          : 'red'
                 return (
                   <tr key={w.weekStart} className="border-b last:border-0 hover:bg-muted/30">
                     <td className="px-3 py-1.5 font-mono text-xs">{w.weekStart}</td>
@@ -1315,16 +1354,34 @@ function FunnelTab() {
                     <td className="px-3 py-1.5 text-right font-medium">{w.booked}</td>
                     <td className="px-3 py-1.5 text-right">{w.entered}</td>
                     <td className="px-3 py-1.5 text-right">{w.materialized}</td>
-                    <td className="px-3 py-1.5 text-right font-medium">{w.kept}</td>
+                    <td
+                      className="px-3 py-1.5 text-right font-medium"
+                      title={
+                        w.keptFromSchedule
+                          ? `${w.keptFromSchedule} settled from the NextGen schedule mirror or the partner report`
+                          : undefined
+                      }
+                    >
+                      {w.kept}
+                    </td>
                     <td className="px-3 py-1.5 text-right">
-                      <span className="inline-flex items-center gap-1.5">
+                      <span
+                        className="inline-flex items-center gap-1.5"
+                        title={
+                          open > 0
+                            ? `${unsettled} past booking(s) not settled and ${upcoming} not due yet; the rate is at least this`
+                            : undefined
+                        }
+                      >
                         <StatusDot tone={rateTone} />
-                        {keptRate === null ? '—' : pct(keptRate)}
+                        {keptRate === null ? '—' : `${open > 0 ? '≥ ' : ''}${pct(keptRate)}`}
                       </span>
                     </td>
                     <td className="px-3 py-1.5 text-right">{w.cancelled}</td>
                     <td className="px-3 py-1.5 text-right">{w.noShow}</td>
                     <td className="px-3 py-1.5 text-right">{w.pendingReview}</td>
+                    <td className="px-3 py-1.5 text-right">{unsettled}</td>
+                    <td className="px-3 py-1.5 text-right">{upcoming}</td>
                   </tr>
                 )
               })}
@@ -1581,10 +1638,32 @@ function elapsed(since: string | null): string {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
 }
 
-function ListenInButton({ callSid, fromNumber }: { callSid: string | null; fromNumber: string | null }) {
+function ListenInButton({
+  callSid,
+  fromNumber,
+  voiceProvider,
+}: {
+  callSid: string | null
+  fromNumber: string | null
+  voiceProvider?: string | null
+}) {
   const [state, setState] = useState<'idle' | 'dialing' | 'joined' | 'error'>('idle')
   const [err, setErr] = useState<string | null>(null)
   if (!callSid) return null
+  // A runtime call has no conference to join, so the button is shown disabled
+  // with the reason rather than dialling and failing (see listenIn.ts).
+  const unavailable = listenInUnavailableReason({ voiceProvider })
+  if (unavailable) {
+    return (
+      <button
+        disabled
+        className="cursor-not-allowed rounded-md border border-input px-2 py-0.5 text-xs font-medium text-muted-foreground opacity-60"
+        title={unavailable}
+      >
+        🎧 Listen in unavailable
+      </button>
+    )
+  }
   const join = async () => {
     const stored = localStorage.getItem('obs-supervisor-phone') ?? ''
     const phone = window.prompt('Dial your phone into this call, muted. Your number:', stored)
@@ -1631,7 +1710,7 @@ function LiveOpsCallCard({ call }: { call: LiveOpsCall }) {
         </span>
         <span className="flex items-center gap-3">
           <span className="font-mono">{elapsed(call.startTime ?? call.createdAt)}</span>
-          <ListenInButton callSid={call.callSid} fromNumber={call.to} />
+          <ListenInButton callSid={call.callSid} fromNumber={call.to} voiceProvider={call.voiceProvider} />
           <button className="text-xs text-primary hover:underline" onClick={() => setExpanded(!expanded)}>
             {expanded ? 'hide transcript ▴' : 'transcript ▾'}
           </button>

@@ -337,8 +337,8 @@ describe('a refusal from the far side is not retried', () => {
   });
 
   it('leaves the payload intact so it can be replayed by hand', async () => {
-    // Not the office: since v278 an Optical first filing refused for its office
-    // takes the unassigned exit instead of dead-lettering (the v278 describes
+    // Not the office: since v279 an Optical first filing refused for its office
+    // takes the unassigned exit instead of dead-lettering (the v279 describes
     // below). Any other field still dead-letters, which is what this pins.
     createTicket.mockResolvedValue({ success: false, statusCode: 400, error: 'Missing required information: patientFirstName' });
     updateResults.push(entry(wrapCreateTicketPayload(OPTICAL_OTHER), { retryCount: 0 }), undefined);
@@ -827,7 +827,7 @@ describe('v205: a refused replay sends its fallback once before dead-lettering',
 
 
 /**
- * v278: A HELD OPTICAL OR SURGERY REQUEST REFUSED ON ITS REPLAY FOR ITS ROUTING
+ * v279: A HELD OPTICAL OR SURGERY REQUEST REFUSED ON ITS REPLAY FOR ITS ROUTING
  * FIELD TAKES THE APP'S UNASSIGNED EXIT. The whole chain, through the real
  * surgery tool, is in aHeldRequestTakesTheRoutingExit.test.ts; these pin the
  * outbox's own rule.
@@ -846,7 +846,7 @@ const HELD_SURGERY = {
 };
 const SURGEON_400 = { success: false, statusCode: 400, error: 'Missing required information: surgeon. Surgery tickets are assigned by surgeon.' };
 
-describe('v278: a held request refused on its replay for its routing field', () => {
+describe('v279: a held request refused on its replay for its routing field', () => {
   beforeEach(() => {
     createTicket.mockReset();
     createTicket.mockResolvedValue({ success: true, ticketNumber: 'VA-52100', ticketId: 9001 });
@@ -939,14 +939,14 @@ describe('v278: a held request refused on its replay for its routing field', () 
 
 
 /**
- * v278: A FIRST FILING WRITTEN BEFORE THIS BUILD carries no routing exit
+ * v279: A FIRST FILING WRITTEN BEFORE THIS BUILD carries no routing exit
  * (github-actions review of #533, on `5019b48`, `1567c4a` and `4fe1944`). It
  * takes the exit as if it had stored it, whenever it was written; a later
  * addition, and everything the exit already refuses (a live caller, another
  * field, another department, a payload that has taken it), dead-letter as
  * before.
  */
-describe('v278: a first filing written before the exit existed', () => {
+describe('v279: a first filing written before the exit existed', () => {
   beforeEach(() => {
     createTicket.mockReset();
     createTicket.mockResolvedValue({ success: true, ticketNumber: 'VA-52100', ticketId: 9001 });

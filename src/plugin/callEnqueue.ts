@@ -11,7 +11,7 @@ import {
   type DialDecision,
 } from "../runtime/outbound/callingWindow";
 import { outboundDialingEnabled, PLACE_BY_KEY, type NotPlacedReason } from "../runtime/outbound/campaign";
-import { DIALABLE_STATUSES, dncKey, type OutboundStore } from "../runtime/outbound/store";
+import { DIALABLE_STATUSES, campaignHoldReason, dncKey, type OutboundStore } from "../runtime/outbound/store";
 import { readDobQuietly } from "../tools/dobParts";
 import { boundPluginStore } from "./bindings";
 import type { PluginStore } from "./store";
@@ -171,7 +171,9 @@ export type EnqueueCallResult =
         | "weekly_cap"
         | "total_cap"
         | "too_soon"
-        | "call_already_queued";
+        | "call_already_queued"
+        | "campaign_paused"
+        | "campaign_status_unreadable";
     };
 
 export async function evaluateAndEnqueueCall(
@@ -188,6 +190,21 @@ export async function evaluateAndEnqueueCall(
 
   const campaignId = await store.ensureCampaign(SI_ASSISTANT_CAMPAIGN_KEY, SI_ASSISTANT_SLUG);
   if (!campaignId) return { ok: false, reason: "no_campaign" };
+  // A queued call waits for the runtime dialler, which places nothing for a
+  // campaign paused, cancelled or deleted on the Campaigns screen (v277): the
+  // commit must not answer "queued" for a call that would wait there until
+  // its place-by deadline. A live call is placed now, not by the dialler.
+  // A status that cannot be read is a definite not-sent, never an unknown
+  // send (review of #531, round 3): nothing has been written or dialled yet.
+  if (!live) {
+    let state;
+    try {
+      state = await store.campaignRunState(campaignId);
+    } catch {
+      return { ok: false, reason: "campaign_status_unreadable" };
+    }
+    if (campaignHoldReason(state)) return { ok: false, reason: "campaign_paused" };
+  }
 
   const externalRef = `plugin:${input.approvalId}`;
   // The caps are per PHONE (priorAttempts reads every attempt in the campaign

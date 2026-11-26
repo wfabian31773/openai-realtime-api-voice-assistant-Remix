@@ -39,7 +39,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { askOfferCheck, type ContactSource, type OutboundLanePolicy } from "./campaign";
 import { mayDialNow, tomorrowAtOpening } from "./callingWindow";
-import { OUTREACH_TEXT_KEY, TEXTABLE_STATUSES, dncKey, type ContactRow, type OutboundStore } from "./store";
+import { OUTREACH_TEXT_KEY, TEXTABLE_STATUSES, campaignHoldReason, dncKey, type ContactRow, type OutboundStore } from "./store";
 import { failureFromUnknown } from "../../plugin/sendFailure";
 import type { SmsSender } from "../../plugin/sms";
 import type { BookingPageLane } from "./bookingPage";
@@ -62,6 +62,9 @@ export const MAX_SEND_TRIES = 3;
 
 /** How long a refused send, or a row the source could not answer for, waits. */
 export const TEXT_RETRY_MS = 60 * 60 * 1000;
+
+/** A text given back because the campaign was paused while the tick ran. */
+export const TEXT_CAMPAIGN_HELD = "campaign_held";
 
 
 /** What one row's text came to, and what its booking page has done since. */
@@ -191,6 +194,12 @@ export async function runTextTick(
     if (!sender) return { ...result, skipped: "no sms sender" };
     const campaignId = await deps.store.ensureCampaign(policy.campaignKey, slug);
     if (!campaignId) return { ...result, skipped: `no agents row for ${slug}` };
+    // An outreach text is new contact, like a call: a campaign paused,
+    // cancelled or deleted on the Campaigns screen sends none (v277). The
+    // booking confirmations owed to people who booked are a different tick
+    // (./bookingConfirmation.ts) and still go out.
+    const hold = campaignHoldReason(await deps.store.campaignRunState(campaignId));
+    if (hold) return { ...result, skipped: hold };
     let source: ContactSource | null = null;
     if (policy.source) {
       source = await policy.source().catch(() => null);
@@ -203,6 +212,8 @@ export async function runTextTick(
       const held = await textOne(slug, candidate, text, from, now, deps, source, policy);
       if (held) result.held[held] = (result.held[held] ?? 0) + 1;
       else result.sent += 1;
+      // Paused mid-tick: nobody else is texted this tick.
+      if (held === TEXT_CAMPAIGN_HELD) break;
     }
   } catch (error) {
     log(`[outbound] ${policy.campaignKey}: text tick failed — ${error instanceof Error ? error.message : String(error)}`);
@@ -300,19 +311,33 @@ async function textOne(
     });
     return stillOpen.reason;
   }
-  // The do-not-contact list again, last: an opt-out recorded while the offer
-  // check waited on NPX is honoured before the text goes (review of #519,
-  // round 3).
-  if (await deps.store.isDoNotContact(phone)) {
-    await deps.store.patchText(claimed.id, { state: "skipped", reason: "do_not_contact" });
-    return "do_not_contact";
-  }
-
   const sender = await deps.sms();
   if (!sender) {
     await deps.store.patchText(claimed.id, { state: "retry", retry_after: later, reason: "no_sms_sender" });
     return "no_sms_sender";
   }
+  // The Campaigns screen once more, just before the send (review of #531,
+  // two rounds): a Pause pressed while this tick waited on the re-check, the
+  // offer check or the sender sends nothing.
+  // The text waits, due at once, so Resume sends it on the next tick; no try
+  // is spent. A status that cannot be read sends nothing.
+  const lateHold = await deps.store
+    .campaignRunState(claimed.campaignId)
+    .then(campaignHoldReason, () => "the campaign's status could not be read");
+  if (lateHold) {
+    await deps.store.patchText(claimed.id, { state: "retry", retry_after: at.toISOString(), reason: TEXT_CAMPAIGN_HELD });
+    return TEXT_CAMPAIGN_HELD;
+  }
+
+  // The do-not-contact list again, last of all: an opt-out recorded while the
+  // offer check, the sender or the campaign status read waited is honoured
+  // before the text goes (review of #519, round 3; kept last over the status
+  // read, review of #531, round 4: an opt-out outranks a Pause).
+  if (await deps.store.isDoNotContact(phone)) {
+    await deps.store.patchText(claimed.id, { state: "skipped", reason: "do_not_contact" });
+    return "do_not_contact";
+  }
+
   try {
     const sent = await sender.send({ to: `+1${key}`, from, body: text.body(bookingLinkUrl(deps.host, token)) });
     await deps.store.patchText(claimed.id, { state: "sent", sent_at: now.toISOString(), message_sid: sent.sid });

@@ -2261,8 +2261,25 @@ import { callEnvironment } from "./callRecord";
  * the reader failing (unavailable); a retry that answers an explicit null is
  * no request (AskAnswer keeps none apart from failed). Above main's v276
  * (#526, `184fcecf`). No migration.
- *
- * v278 — A HELD OPTICAL OR SURGERY REQUEST REFUSED ON ITS REPLAY FOR THE
+ */
+/*
+ * v278 (2026-11-26): campaign controls stop a runtime campaign, and never
+ * destroy its record. The runtime dialler never read the campaigns row's
+ * status, so Pause, Stop and Cancel on the Campaigns screen left a runtime
+ * outbound campaign (NPX outreach) ringing; Resume and Start marked it
+ * cancelled through the old executor's refusal; and Delete would have made
+ * the runtime create a fresh campaign and queue everyone again. The dialler
+ * and the outreach-text tick now place new outreach only while the row reads
+ * running and is not deleted (campaignRunState, campaignHoldReason);
+ * confirmations, held cancels and returned calls still run. The routes answer
+ * a runtime campaign before the old code (server/runtimeCampaignControls.ts):
+ * Delete and Start refused, PATCH limited. ensureCampaign never creates a
+ * second row for a key. Measured on the Hub: four runtime campaigns, all
+ * running, none deleted. Written as v277; renumbered when #532 took v277 on
+ * main. Above v277 (#532, `5183de93`). No migration.
+ */
+/*
+ * v279 — A HELD OPTICAL OR SURGERY REQUEST REFUSED ON ITS REPLAY FOR THE
  * OFFICE OR THE SURGEON IS FILED UNASSIGNED (2026-11-26). A queue filing whose
  * create-ticket POST did not complete is held in the outbox and the caller is
  * told it is logged; the worker's replay was then refused "Missing required
@@ -2276,12 +2293,12 @@ import { callEnvironment } from "./callRecord";
  * filing held before this build stored no exit, and takes it whenever it was
  * written unless it is a later addition (firstFilingWithoutTheExit; review of
  * #533).
- * Above main's v277 (#532, `5183de9`), which it contains along with v276
- * (#526). (v277 while #533 was open; renumbered when #532 took v277.)
- * No migration.
+ * Above main's v278 (#531, `5e411d9`), which it contains along with v277
+ * (#532, `5183de9`). (v277, then v278, while #533 was open; renumbered when
+ * #532 took v277 and #531 took v278 on main.) No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v278-a-held-request-takes-the-routing-exit-20261126";
+  "voice-runtime-v279-a-held-request-takes-the-routing-exit-20261126";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

@@ -174,10 +174,52 @@ export interface SettleOptions {
  * is not one of the person's attempts and no cap counts it. */
 export const CALLBACK_ATTEMPT_NUMBER = 0;
 
+/**
+ * The campaign row's own state, as the Campaigns screen last wrote it (v277).
+ * The runtime places new outreach for a campaign only while it is `running`
+ * and not deleted: Pause, Cancel and Delete on that screen used to change the
+ * row and leave the dialler ringing.
+ */
+export interface CampaignRunState {
+  status: string | null;
+  deleted: boolean;
+}
+
+/** The one status a runtime campaign places new outreach in. */
+export const CAMPAIGN_DIALS_WHILE = "running";
+
+/**
+ * Why the runtime must place no NEW outreach (calls, outreach texts) for this
+ * campaign right now, or null when it may. Pure, so every answer is tested.
+ * An allowlist on purpose: a status nobody expected stops the dialler rather
+ * than ringing patients. What a held campaign still does is the caller's
+ * business: the booking confirmations and held Azul cancels owed to people
+ * who already booked still run, and a returned call is still answered.
+ */
+export function campaignHoldReason(state: CampaignRunState | null): string | null {
+  if (!state) return "the campaign row could not be found";
+  if (state.deleted) return "the campaign was deleted on the Campaigns screen";
+  if (state.status !== CAMPAIGN_DIALS_WHILE) {
+    return `the campaign is ${state.status ?? "without a status"} on the Campaigns screen`;
+  }
+  return null;
+}
+
 export interface OutboundStore {
-  /** The campaigns row for this key, created on first use. Null when the
-   * lane has no agents row to hang it on (the campaign cannot run). */
+  /**
+   * The campaigns row for this key, created on first use. Null when the
+   * lane has no agents row to hang it on (the campaign cannot run).
+   *
+   * ONE ROW PER KEY, FOREVER (v277). A row deleted on the Campaigns screen is
+   * still this key's row: a fresh one would start with no attempts, so the
+   * caps would count from zero and the source refresh would queue everybody
+   * on the list again, while the old row kept every outcome. The deleted row
+   * is answered instead, and campaignHoldReason stops its dialling.
+   */
   ensureCampaign(campaignKey: string, agentSlug: string): Promise<string | null>;
+  /** The campaign row's status and whether it was deleted, read every tick
+   * (v277). Null when no row has this id. */
+  campaignRunState(campaignId: string): Promise<CampaignRunState | null>;
   /** Contacts that could be dialled now, oldest-due first. A read only —
    * nothing is claimed until claimContact. */
   dialableContacts(campaignId: string, now: Date, limit: number): Promise<ContactRow[]>;
@@ -497,14 +539,15 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
        ORDER BY a.attempted_at DESC, a.id DESC
        LIMIT 1) la ON true`;
 
+  // A live row first; a deleted one when that is all the key has, so a
+  // deleted campaign is never replaced by a fresh one (v277; ensureCampaign).
   const campaignIdFor = async (campaignKey: string): Promise<string | null> => {
     const found = rows(
       await db.execute(sql`
         SELECT id FROM campaigns
          WHERE name = ${campaignKey}::varchar
            AND campaign_type = ${RUNTIME_OUTBOUND_CAMPAIGN_TYPE}::varchar
-           AND deleted_at IS NULL
-         ORDER BY created_at LIMIT 1`),
+         ORDER BY (deleted_at IS NULL) DESC, created_at LIMIT 1`),
     );
     return found[0] ? String(found[0].id) : null;
   };
@@ -512,15 +555,8 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
   return {
     async ensureCampaign(campaignKey, agentSlug) {
       await ensureSchema();
-      const found = rows(
-        await db.execute(sql`
-          SELECT id FROM campaigns
-           WHERE name = ${campaignKey}::varchar
-             AND campaign_type = ${RUNTIME_OUTBOUND_CAMPAIGN_TYPE}::varchar
-             AND deleted_at IS NULL
-           ORDER BY created_at LIMIT 1`),
-      );
-      if (found[0]) return String(found[0].id);
+      const found = await campaignIdFor(campaignKey);
+      if (found) return found;
       // The campaign hangs on the lane's `agents` row (campaigns.agent_id is
       // NOT NULL). Seeding agents rows is otherwise a manual step
       // (server/seedAgents.ts); an outbound lane gets its row here instead, so
@@ -542,6 +578,20 @@ export async function createDbOutboundStore(): Promise<OutboundStore> {
           RETURNING id`),
       );
       return created[0] ? String(created[0].id) : null;
+    },
+
+    async campaignRunState(campaignId) {
+      const found = rows(
+        await db.execute(sql`
+          SELECT status::text AS status, (deleted_at IS NOT NULL) AS deleted
+            FROM campaigns
+           WHERE id = ${campaignId}::varchar`),
+      );
+      if (!found[0]) return null;
+      return {
+        status: found[0].status == null ? null : String(found[0].status),
+        deleted: found[0].deleted === true,
+      };
     },
 
     async dialableContacts(campaignId, now, limit) {

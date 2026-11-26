@@ -4,6 +4,7 @@
 import { withRetry } from './services/dbResilience';
 import { buildPreservedCostSet } from './preservedCostSet';
 import { timelineHoldsTicket } from './callTicketSearch';
+import { callLogOrder, callQualityCondition, transferredCondition } from './callLogListing';
 import {
   users,
   agents,
@@ -614,11 +615,10 @@ export class DatabaseStorage implements IStorage {
       conditions.push(isNull(callLogs.ticketNumber));
     }
     
-    if (options?.transferred === true) {
-      conditions.push(eq(callLogs.transferredToHuman, true));
-    } else if (options?.transferred === false) {
-      conditions.push(or(eq(callLogs.transferredToHuman, false), isNull(callLogs.transferredToHuman)));
-    }
+    // A transfer of either kind: a queue transfer never sets
+    // transferred_to_human (callLogListing.ts).
+    const transferredClause = transferredCondition(options?.transferred);
+    if (transferredClause) conditions.push(transferredClause);
     
     if (options?.agentId) {
       conditions.push(eq(callLogs.agentId, options.agentId));
@@ -649,21 +649,9 @@ export class DatabaseStorage implements IStorage {
       );
     }
     
-    if (options?.callQuality === 'ghost') {
-      conditions.push(
-        or(
-          and(isNull(callLogs.recordingUrl), isNull(callLogs.transcript)),
-          lt(callLogs.duration, 60)
-        )
-      );
-    } else if (options?.callQuality === 'real') {
-      conditions.push(
-        and(
-          or(isNotNull(callLogs.recordingUrl), isNotNull(callLogs.transcript)),
-          gte(callLogs.duration, 60)
-        )
-      );
-    }
+    // A ghost is a call on which the caller was never heard (callLogListing.ts).
+    const qualityClause = callQualityCondition(options?.callQuality);
+    if (qualityClause) conditions.push(qualityClause);
 
     if (options?.minCost != null) {
       conditions.push(gte(callLogs.totalCostCents, options.minCost));
@@ -679,25 +667,11 @@ export class DatabaseStorage implements IStorage {
       .from(callLogs)
       .where(whereClause);
 
-    // Determine sort order
-    let orderByClause;
-    const sortDirection = options?.sortOrder === 'asc' ? asc : desc;
-    switch (options?.sortBy) {
-      case 'cost':
-        orderByClause = sortDirection(callLogs.totalCostCents);
-        break;
-      case 'duration':
-        orderByClause = sortDirection(callLogs.duration);
-        break;
-      default:
-        orderByClause = desc(callLogs.createdAt);
-    }
-
     const data = await db
       .select()
       .from(callLogs)
       .where(whereClause)
-      .orderBy(orderByClause)
+      .orderBy(...callLogOrder(options?.sortBy, options?.sortOrder))
       .limit(limit)
       .offset(offset);
 

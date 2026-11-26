@@ -352,7 +352,7 @@ export async function createTicketDurable(
   options: DurableFilingOptions = {},
 ): Promise<DurableCreateResult> {
   /**
-   * v278: every first filing carries the routing exit. `wrapCreateTicketPayload`
+   * v279: every first filing carries the routing exit. `wrapCreateTicketPayload`
    * keeps it only on an Optical or Surgery payload that has not taken the exit
    * already, and the outbox uses it only when the worker's replay is refused
    * for that department's office or surgeon. A later filing on the call

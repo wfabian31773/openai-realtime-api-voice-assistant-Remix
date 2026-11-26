@@ -1,6 +1,14 @@
 import { storage } from '../storage';
 import { getTwilioClient, getTwilioFromPhoneNumber } from '../../src/lib/twilioClient';
 
+/**
+ * The executor's refusal of a runtime outbound campaign. It changes nothing:
+ * before v277 this was a plain Error, and the catch below marked the campaign
+ * 'cancelled' — so Resume or Start on NPX outreach cancelled it, which since
+ * v277 stops the runtime dialler (the runtime reads the row's status).
+ */
+export class RuntimeCampaignRefusedError extends Error {}
+
 interface CampaignExecutionOptions {
   maxConcurrentCalls?: number;
   retryAttempts?: number;
@@ -45,7 +53,7 @@ export class CampaignExecutor {
       // it never starts one — a press of "start" in the old admin screen
       // must not ring a runtime campaign's contacts.
       if (campaign.campaignType === 'runtime_outbound') {
-        throw new Error(
+        throw new RuntimeCampaignRefusedError(
           `Campaign ${campaignId} is a runtime outbound campaign; the voice runtime dials it, not this executor`,
         );
       }
@@ -133,11 +141,14 @@ export class CampaignExecutor {
     } catch (error) {
       console.error(`[CAMPAIGN EXECUTOR] ✗ Campaign execution failed:`, error);
       
-      // Mark campaign as failed
-      await storage.updateCampaign(campaignId, {
-        status: 'cancelled',
-        actualEndTime: new Date(),
-      });
+      // Mark campaign as failed — but never a runtime campaign it refused to
+      // run: that refusal changed nothing, and the status is the runtime's.
+      if (!(error instanceof RuntimeCampaignRefusedError)) {
+        await storage.updateCampaign(campaignId, {
+          status: 'cancelled',
+          actualEndTime: new Date(),
+        });
+      }
       
       throw error;
     }

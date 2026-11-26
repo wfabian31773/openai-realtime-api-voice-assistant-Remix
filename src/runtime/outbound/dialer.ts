@@ -64,7 +64,14 @@ import {
   resolvedMaxConsecutiveInfraRetries,
 } from "./campaign";
 import { mayDialNow, tomorrowAtOpening } from "./callingWindow";
-import { NOT_PLACED, OUTREACH_TEXT_KEY, dncKey, type ContactRow, type OutboundStore } from "./store";
+import {
+  NOT_PLACED,
+  OUTREACH_TEXT_KEY,
+  campaignHoldReason,
+  dncKey,
+  type ContactRow,
+  type OutboundStore,
+} from "./store";
 import { VOICE_PATH_PREFIX } from "../voiceWebhook";
 
 export const OUTBOUND_PATH_PREFIX = "/voice/outbound";
@@ -171,8 +178,30 @@ export interface DialerDeps {
   /** When each source-fed campaign last refreshed its queue (v107). Kept by
    * the scheduler; absent, the queue is refreshed on every tick. */
   sourceRefreshedAt?: Map<string, number>;
+  /** Per campaign, the last hold logged (v277), so a paused campaign is said
+   * once rather than every minute. Kept by the scheduler. */
+  holdNoted?: Map<string, string | null>;
   now?: () => Date;
   log?: (line: string) => void;
+}
+
+/** A row given back because the campaign was paused while the tick ran. */
+export const CAMPAIGN_HELD = "campaign_held";
+
+/**
+ * Say a campaign's hold once when it starts, and once when it ends. Absent a
+ * map (a test calling one tick), every held tick says it.
+ */
+export function noteHold(
+  key: string,
+  hold: string | null,
+  deps: Pick<DialerDeps, "holdNoted" | "log">,
+): void {
+  const log = deps.log ?? ((line: string) => console.log(line));
+  const before = deps.holdNoted?.get(key) ?? null;
+  if (hold !== null && hold !== before) log(`[outbound] ${key}: NOT dialling — ${hold}`);
+  if (hold === null && before !== null) log(`[outbound] ${key}: dialling again — the campaign is running`);
+  deps.holdNoted?.set(key, hold);
 }
 
 export interface TickResult {
@@ -289,6 +318,15 @@ export async function runCampaignTick(
     const campaignId = await deps.store.ensureCampaign(policy.campaignKey, slug);
     if (!campaignId) return { ...result, skipped: `no agents row for ${slug}` };
 
+    // THE CAMPAIGNS SCREEN (v277): Pause, Stop, Cancel and Delete there stop
+    // the dialler from this tick; Resume lets it dial again. Read before the
+    // source refresh and the reaper, so a held campaign claims nobody and
+    // writes nothing. A call already ringing finishes, and a person who rings
+    // the caller ID back is still answered (./callback.ts reads no hold).
+    const hold = campaignHoldReason(await deps.store.campaignRunState(campaignId));
+    noteHold(policy.campaignKey, hold, deps);
+    if (hold) return { ...result, skipped: hold };
+
     // A campaign fed live from a source refreshes its queue from it first,
     // and re-checks each person at the dial (dialOne). A source that is not
     // configured in this process means the campaign does not dial: a list
@@ -320,6 +358,8 @@ export async function runCampaignTick(
       const held = await dialOne(slug, policy, candidate, campaignId, from, now, deps, source);
       if (held) result.held[held] = (result.held[held] ?? 0) + 1;
       else result.dialled += 1;
+      // Paused mid-tick: nobody else is claimed this tick.
+      if (held === CAMPAIGN_HELD) break;
     }
   } catch (error) {
     log(
@@ -556,15 +596,34 @@ async function dialOne(
     await deps.store.releaseContact(contact.id, candidate.status, nextLookAt(at, stillOpen.reason, policy));
     return stillOpen.reason;
   }
-  // The do-not-contact list again, last: an opt-out recorded while the offer
-  // check waited on NPX is honoured before anybody is rung (review of #519,
-  // round 3).
+  // THE CAMPAIGNS SCREEN once more (review of #531): a tick reads
+  // `running` at its start and can then spend seconds on the source refresh,
+  // the re-check and the offer check, so a Pause pressed meanwhile is read
+  // again here, before anybody is rung. The row goes back exactly as it was,
+  // so Resume dials it on the next tick; a status that cannot be read rings
+  // nobody. Between this read and Twilio taking the call sit one attempt
+  // insert (a single row) and the createCall request itself, which no read
+  // can close; the Pause route promises only "from its next minute's tick"
+  // (review of #531, rounds 2 to 4, declined with that reasoning; closing it
+  // fully needs a lock the Pause route and the dialler share, the operator's).
+  const lateHold = await deps.store
+    .campaignRunState(campaignId)
+    .then(campaignHoldReason, () => "the campaign's status could not be read");
+  if (lateHold) {
+    noteHold(policy.campaignKey, lateHold, deps);
+    await deps.store.releaseContact(contact.id, candidate.status, candidate.nextAttemptAt);
+    return CAMPAIGN_HELD;
+  }
+
+  // The do-not-contact list again, last of all: an opt-out recorded while the
+  // offer check or the campaign status read waited is honoured before anybody
+  // is rung (review of #519, round 3; kept last over the status read, review
+  // of #531, round 4: an opt-out outranks a Pause).
   if (await deps.store.isDoNotContact(contact.phone)) {
     await deps.store.settleContact(contact.id, "do_not_call");
     await notPlaced("do_not_contact");
     return "do_not_contact";
   }
-
   const attemptId = await deps.store.startAttempt(contact.id, campaignId, prior.length + 1);
   let call: { sid: string };
   try {

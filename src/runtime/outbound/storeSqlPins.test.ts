@@ -526,3 +526,24 @@ describe("the held Azul cancel (v226)", () => {
     expect(m).toContain("RETURNING id");
   });
 });
+
+describe("one campaign row per key, and its status read every tick (v277)", () => {
+  const lookup = SRC.slice(SRC.indexOf("const campaignIdFor"), SRC.indexOf("\n  return {", SRC.indexOf("const campaignIdFor")));
+
+  it("finds a deleted row when that is all the key has, never creating a second", () => {
+    expect(lookup).toContain("ORDER BY (deleted_at IS NULL) DESC, created_at LIMIT 1");
+    // A deleted row is still this key's row: no filter on deleted_at.
+    expect(lookup).not.toContain("deleted_at IS NULL\n");
+    const ensure = method("ensureCampaign");
+    const found = ensure.indexOf("await campaignIdFor(campaignKey)");
+    expect(found).toBeGreaterThan(0);
+    expect(found).toBeLessThan(ensure.indexOf("INSERT INTO campaigns"));
+    expect(ensure.indexOf("if (found) return found;")).toBeLessThan(ensure.indexOf("INSERT INTO campaigns"));
+  });
+
+  it("reads the row's status and deleted mark by id", () => {
+    const state = method("campaignRunState");
+    expect(state).toContain("SELECT status::text AS status, (deleted_at IS NOT NULL) AS deleted");
+    expect(state).toContain("WHERE id = ${campaignId}::varchar");
+  });
+});
