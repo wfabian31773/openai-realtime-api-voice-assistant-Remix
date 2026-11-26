@@ -4,6 +4,7 @@ import apiClient from '@/lib/apiClient'
 import {
   failingSinceText,
   headline,
+  refreshFailureText,
   orderResults,
   STATUS_CLASS,
   STATUS_TEXT,
@@ -25,17 +26,23 @@ const TONE_CLASS = {
 export function AccuracyTab() {
   const queryClient = useQueryClient()
   const [refreshing, setRefreshing] = useState(false)
+  const [refreshError, setRefreshError] = useState<string | null>(null)
   const q = useQuery<AccuracyResponse>({
     queryKey: ['obs-accuracy'],
     queryFn: async () => (await apiClient.get('/observatory/accuracy')).data,
     refetchInterval: 5 * 60_000,
   })
 
+  // "Check now" runs outside React Query, so its failure is shown here; the
+  // last report stays on screen, marked as not refreshed (Codex review of #525).
   async function runNow() {
     setRefreshing(true)
+    setRefreshError(null)
     try {
       const fresh = (await apiClient.get('/observatory/accuracy', { params: { refresh: 1 } })).data
       queryClient.setQueryData(['obs-accuracy'], fresh)
+    } catch (err) {
+      setRefreshError(refreshFailureText(err))
     } finally {
       setRefreshing(false)
     }
@@ -61,6 +68,7 @@ export function AccuracyTab() {
         </button>
       </div>
 
+      {refreshError && <p className="text-sm text-red-600">{refreshError}</p>}
       {q.isLoading && <p className="text-sm text-muted-foreground">Running the checks…</p>}
       {q.isError && (
         <p className="text-sm text-red-600">

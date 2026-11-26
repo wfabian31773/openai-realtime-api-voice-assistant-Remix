@@ -1,5 +1,7 @@
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
-import { failingSinceText, headline, orderResults, valueText, type AccuracyResult } from './accuracyView'
+import { failingSinceText, headline, orderResults, refreshFailureText, valueText, type AccuracyResult } from './accuracyView'
 
 const r = (id: string, status: AccuracyResult['status'], screen = 'Observatory'): AccuracyResult => ({
   id,
@@ -42,5 +44,22 @@ describe('the Accuracy tab', () => {
   it('says since when a check has been failing, in Pacific time', () => {
     expect(failingSinceText('2026-11-26T03:00:00Z')).toBe('since Nov 25, 7:00 PM PT')
     expect(failingSinceText(null)).toBeNull()
+  })
+})
+
+describe('"Check now" failing', () => {
+  it('says so, gives the server\'s reason, and says the results shown are older', () => {
+    expect(refreshFailureText({ response: { data: { error: 'The accuracy checks could not be run.' } } })).toBe(
+      'Check now did not finish (The accuracy checks could not be run.). The results below are from the last run.',
+    )
+    expect(refreshFailureText(new Error('Network Error'))).toBe(
+      'Check now did not finish (the request failed). The results below are from the last run.',
+    )
+  })
+
+  it('the tab shows that message instead of swallowing the failure', () => {
+    const src = readFileSync(join(__dirname, '../components/observatory/AccuracyTab.tsx'), 'utf8')
+    expect(src).toMatch(/catch \(err\) \{\s*setRefreshError\(refreshFailureText\(err\)\)/)
+    expect(src).toContain('{refreshError && <p className="text-sm text-red-600">{refreshError}</p>}')
   })
 })

@@ -102,3 +102,10 @@ export function failingSinceText(iso: string | null): string | null {
     minute: '2-digit',
   })} PT`
 }
+
+/** What "Check now" says when the fresh run fails; the last report stays on screen. */
+export function refreshFailureText(err: unknown): string {
+  const e = err as { response?: { data?: { error?: unknown } }; message?: unknown } | null
+  const why = typeof e?.response?.data?.error === 'string' ? e.response.data.error : 'the request failed'
+  return `Check now did not finish (${why}). The results below are from the last run.`
+}
