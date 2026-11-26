@@ -1006,7 +1006,7 @@ export class VoiceCallBridge {
   /** The utterance currently being spoken, opened by its first audio or
    * transcript delta and closed by its completion. `epoch` is what makes a
    * cancelled utterance's late completion recognisable (module doc). */
-  private current: { seq: number; epoch: number; text: string; bytes: number; muted: boolean; audioOff?: boolean; heldAudio?: string[] } | null = null;
+  private current: { seq: number; epoch: number; text: string; bytes: number; muted: boolean; audioOff?: boolean; heldAudio?: string[]; heardText?: string } | null = null;
   /** The response epoch a barge-in cancelled. Everything that epoch emits
    * afterwards is stale: dropped, not forwarded, not recorded. */
   private cancelledEpoch: number | null = null;
@@ -1652,7 +1652,7 @@ export class VoiceCallBridge {
   /** Opens the current utterance on its first event, whichever arrives
    * first — audio delta or transcript delta. Returns null when the event
    * belongs to a cancelled epoch (stale). */
-  private openOrGetCurrent(): { seq: number; epoch: number; text: string; bytes: number; muted: boolean; audioOff?: boolean; heldAudio?: string[] } | null {
+  private openOrGetCurrent(): { seq: number; epoch: number; text: string; bytes: number; muted: boolean; audioOff?: boolean; heldAudio?: string[]; heardText?: string } | null {
     const epoch = this.session.getResponseEpoch();
     if (this.cancelledEpoch !== null && epoch === this.cancelledEpoch) return null;
     // Also supports sessions that report only audio/transcript events.
@@ -1710,7 +1710,19 @@ export class VoiceCallBridge {
     // render time, when the renderer handed it the line; here the wire is
     // the first sign a response exists at all.
     this.armDeadAir("utterance");
-    if (current.muted) return;
+    if (current.muted) {
+      // v275 (#524 review, round 7): a line whose words came first plays its
+      // audio whole, so what the caller hears is the WHOLE streamed text, tag
+      // and all, not the words before the tag that the record keeps. The
+      // output guardrails keep reading that whole text until the line ends.
+      // A line that opened with the tag sends no audio, so nothing after the
+      // tag can reach the caller and nothing is checked.
+      if (!current.audioOff && current.heardText !== undefined) {
+        current.heardText += delta;
+        this.checkGuardrails({ seq: current.seq, epoch: current.epoch, text: current.heardText });
+      }
+      return;
+    }
     current.text += delta;
     /**
      * v275: PROVIDER MARKUP IS NEVER THE AGENT'S WORDS (providerMarkup.ts).
@@ -1732,9 +1744,15 @@ export class VoiceCallBridge {
      */
     const at = providerMarkupIndex(current.text);
     if (at >= 0) {
+      const heard = current.text;
       current.text = current.text.slice(0, at);
-      // The words before the tag are still the agent's and are still checked.
-      if (current.text.trim()) this.checkGuardrails(current);
+      // Words first: the audio plays whole, so the guardrails read everything
+      // the caller hears, the text after the tag included (#524 review,
+      // round 7), and keep reading it on the deltas that follow (above).
+      if (current.text.trim()) {
+        current.heardText = heard;
+        this.checkGuardrails({ seq: current.seq, epoch: current.epoch, text: heard });
+      }
       // Audio held while the line was only "<" (below) stays unsent: a held
       // line has no words before its tag, so it is cut here, and audioOff
       // drops whatever was held (handleAudioDelta reads it first).

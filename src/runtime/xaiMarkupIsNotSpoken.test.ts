@@ -34,7 +34,7 @@ const ANSWERED = "record_answered_question";
 const AN_ANSWER = '{"success":true,"ticket_number":"VA-90275"}';
 const AUDIO = Buffer.alloc(800, 0x7f).toString("base64");
 
-function harness() {
+function harness(opts?: { guardrails?: unknown[]; guardrailMode?: "enforce" | "log" }) {
   let handlers!: BridgeSessionHandlers;
   let epoch = 0;
   let active = false;
@@ -56,7 +56,8 @@ function harness() {
       callSid: "CA00000000000000000000000000000275", streamSid: "MZ-test",
       slug: "no-ivr", callerPhone: "+15555550111", dialedNumber: "+15559876543",
     },
-    agent: { instructions: "", tools: [], guardrails: [], toolNames: [], skipped: [], dispatch } as never,
+    agent: { instructions: "", tools: [], guardrails: opts?.guardrails ?? [], toolNames: [], skipped: [], dispatch } as never,
+    guardrailMode: opts?.guardrailMode,
     createSession: (h: BridgeSessionHandlers) => { handlers = h; return session as never; },
     twilio: {
       sendFrame: (f: { event: string; mark?: { name: string }; media?: { payload: string } }) => {
@@ -868,6 +869,95 @@ describe("FIX 2: provider markup is not played or recorded", () => {
     await h.flush();
     expect(h.agentLines().slice(-1)[0]).toBe("AGENT: We open at 8 AM, and 2 < 3 is still true.");
     expect(h.records[0].providerMarkupCuts).toBe(0);
+  });
+});
+
+describe("v275 round 7: the guardrails read what the caller hears", () => {
+  /**
+   * #524 review, round 7 (github-actions P1): a line whose words came first
+   * plays its audio whole, so the caller hears what follows the tag too. The
+   * output guardrails must keep reading the whole streamed text of that line,
+   * not only the words before the tag the record keeps.
+   */
+  function diagnosisGuardrail() {
+    return {
+      name: "No diagnosis",
+      policyHint: "Do not diagnose or clinically interpret symptoms.",
+      execute: async ({ agentOutput }: { agentOutput: string }) => ({
+        tripwireTriggered: /you have glaucoma/i.test(agentOutput),
+        outputInfo: {},
+      }),
+    };
+  }
+  const line = async (h: ReturnType<typeof harness>, deltas: string[], done: string) => {
+    h.begin();
+    const hs = h.handlers();
+    for (const d of deltas) {
+      hs.onAgentTranscriptDelta(d);
+      hs.onAudioDelta(AUDIO);
+      await h.flush();
+    }
+    hs.onAudioDone(done);
+    await h.finish();
+  };
+  const stop = async (h: ReturnType<typeof harness>) => {
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" } as never);
+    await h.flush();
+  };
+
+  it("words after a tag in the same delta trip the guardrail and cut the line", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const h = harness({ guardrails: [diagnosisGuardrail()] });
+    h.caller("What does my pressure mean?");
+    await line(h, [`${GOODBYE} <turn_end> you have glaucoma`], `${GOODBYE} <turn_end> you have glaucoma`);
+    expect(h.session.cancelResponse).toHaveBeenCalled();
+    expect(h.session.speakNatural).toHaveBeenCalled();
+    await stop(h);
+    const last = h.agentLines().slice(-1)[0];
+    expect(last).toBe(`AGENT: ${GOODBYE} [cut by guardrail: No diagnosis]`);
+    expect(last).not.toMatch(/glaucoma|turn_end/);
+  });
+
+  it("words after a tag in a later delta trip the guardrail too", async () => {
+    vi.spyOn(console, "error").mockImplementation(() => {});
+    const h = harness({ guardrails: [diagnosisGuardrail()] });
+    h.caller("What does my pressure mean?");
+    await line(h, [`${GOODBYE} `, "<turn_end>", " you have", " glaucoma"], `${GOODBYE} <turn_end> you have glaucoma`);
+    expect(h.session.cancelResponse).toHaveBeenCalled();
+    expect(h.session.speakNatural).toHaveBeenCalled();
+    await stop(h);
+    expect(h.agentLines().slice(-1)[0]).toBe(`AGENT: ${GOODBYE} [cut by guardrail: No diagnosis]`);
+  });
+
+  it("clean words after a tag do not trip, and the stored line stays cut at the tag", async () => {
+    const h = harness({ guardrails: [diagnosisGuardrail()] });
+    h.caller("Thanks, bye.");
+    await line(h, [`${GOODBYE} `, "<turn_end>", " Take care."], `${GOODBYE} <turn_end> Take care.`);
+    expect(h.session.cancelResponse).not.toHaveBeenCalled();
+    expect(h.session.speakNatural).not.toHaveBeenCalled();
+    h.echo();
+    await stop(h);
+    expect(h.agentLines().slice(-1)[0]).toBe(`AGENT: ${GOODBYE}`);
+  });
+
+  it("a line that opens with the tag plays nothing, so nothing after it is checked", async () => {
+    const h = harness({ guardrails: [diagnosisGuardrail()] });
+    h.caller("What does my pressure mean?");
+    const mediaBefore = h.media.length;
+    await line(h, ["<turn_end> you have glaucoma"], "<turn_end> you have glaucoma");
+    expect(h.media.length).toBe(mediaBefore);
+    expect(h.session.cancelResponse).not.toHaveBeenCalled();
+    expect(h.session.speakNatural).not.toHaveBeenCalled();
+  });
+
+  it("in log mode the trip is logged and the line is not cut", async () => {
+    const error = vi.spyOn(console, "error").mockImplementation(() => {});
+    const h = harness({ guardrails: [diagnosisGuardrail()], guardrailMode: "log" });
+    h.caller("What does my pressure mean?");
+    await line(h, [`${GOODBYE} `, "<turn_end>", " you have glaucoma"], `${GOODBYE} <turn_end> you have glaucoma`);
+    expect(error.mock.calls.some((c) => String(c[0]).includes("GUARDRAIL TRIPPED (log mode"))).toBe(true);
+    expect(h.session.cancelResponse).not.toHaveBeenCalled();
+    expect(h.session.speakNatural).not.toHaveBeenCalled();
   });
 });
 
