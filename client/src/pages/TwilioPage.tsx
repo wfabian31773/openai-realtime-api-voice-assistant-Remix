@@ -27,9 +27,11 @@ import type { Agent } from '@/types'
 import { formatPhoneNumber } from '@/lib/phoneFormat'
 import {
   OPERATOR_INBOUND_URL,
+  OPERATOR_RUNTIME_PATHS,
   RUNTIME_URL_SHAPE,
   WHERE_TO_REPOINT,
-  runtimePathFor,
+  isWorkspaceHost,
+  notLiveReady,
   servableLanes,
   type VoiceHealthLanes,
 } from '@/lib/twilioEndpointReference'
@@ -88,6 +90,10 @@ export function TwilioPage() {
     retry: false,
   })
   const lanes = servableLanes(health.data)
+  const missingForCalls = notLiveReady(health.data)
+  // The list is this host's build, which on a workspace is not the published one.
+  const healthHost = typeof window === 'undefined' ? '' : window.location.host
+  const healthIsWorkspace = isWorkspaceHost(healthHost)
 
   const syncMutation = useMutation({
     mutationFn: async () => {
@@ -316,19 +322,41 @@ export function TwilioPage() {
                 <code className="text-xs break-all">{OPERATOR_INBOUND_URL}</code>
               </div>
               <p className="text-xs text-muted-foreground mt-2">
-                Exactly this path, no trailing slash. It is the only /api/voice path the voice
-                runtime answers; any other /api/voice/... URL reaches the retired pipeline.
+                The operator line's inbound Voice URL is exactly this path, with no trailing slash.
+                These are the only /api/voice paths the voice runtime answers; any other
+                /api/voice/... URL reaches the retired pipeline:
               </p>
+              <ul className="text-xs text-muted-foreground mt-1 space-y-0.5">
+                {OPERATOR_RUNTIME_PATHS.map(({ path, role }) => (
+                  <li key={path}>
+                    <code className="break-all">{path}</code>: {role}
+                  </li>
+                ))}
+              </ul>
             </div>
           </div>
 
           <div className="p-4 border rounded-lg">
             <h4 className="font-semibold mb-1">Lanes this deployment can answer</h4>
             <p className="text-xs text-muted-foreground mb-3">
-              From this build's /voice/health. It does not say which number points where: that is
-              the number's Voice URL in Twilio (Sync from Twilio refreshes the table above).
+              From /voice/health on {healthHost || 'this host'}
+              {health.data?.marker ? ` (${health.data.marker})` : ''}. It does not say which number
+              points where: that is the number's Voice URL in Twilio (Sync from Twilio refreshes the
+              table above).
             </p>
-            {lanes === null ? (
+            {healthIsWorkspace && (
+              <p className="text-xs text-amber-600 mb-3">
+                You are on a workspace, so this list is the workspace's build. Before you point a live
+                number at a lane, open /voice/health on the published host and check the lane there.
+              </p>
+            )}
+            {missingForCalls !== null ? (
+              <p className="text-sm text-amber-600">
+                This build reports it is not ready to answer calls
+                {missingForCalls.length > 0 ? ` (missing: ${missingForCalls.join(', ')})` : ''}, so
+                every lane would answer with the unavailable message.
+              </p>
+            ) : lanes === null ? (
               <p className="text-sm text-muted-foreground">
                 {health.isLoading ? 'Reading /voice/health…' : 'Could not read the lane list from /voice/health.'}
               </p>
@@ -343,12 +371,18 @@ export function TwilioPage() {
                   </TableRow>
                 </TableHeader>
                 <TableBody>
-                  {lanes.map((slug) => (
-                    <TableRow key={slug}>
+                  {lanes.map((lane) => (
+                    <TableRow key={lane.slug}>
                       <TableCell>
-                        <Badge variant="outline">{slug}</Badge>
+                        <Badge variant="outline">{lane.slug}</Badge>
+                        {lane.outbound && (
+                          <div className="text-xs text-muted-foreground mt-1">
+                            Outbound campaign: point only its caller-ID number here. That number
+                            takes calls back from the people the campaign rang.
+                          </div>
+                        )}
                       </TableCell>
-                      <TableCell className="font-mono text-xs">{runtimePathFor(slug)}</TableCell>
+                      <TableCell className="font-mono text-xs">{lane.path}</TableCell>
                     </TableRow>
                   ))}
                 </TableBody>

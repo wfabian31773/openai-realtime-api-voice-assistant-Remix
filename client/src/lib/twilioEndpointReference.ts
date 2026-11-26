@@ -8,18 +8,21 @@
  * when it carries the records lane on the runtime. Someone following it in
  * the Twilio console could move a live line onto the retired pipeline by hand.
  *
- * It now says only three things, each true of the running code:
+ * It now says only things that are true of the running code:
  * - a runtime lane is `https://<published host>/voice/<lane>` (server
  *   `POST /voice/:slug`, src/runtime/voiceRuntime.ts);
- * - the operator line is `https://<published host>/api/voice/operator-line/inbound`,
- *   the one `/api/voice` path the runtime answers (server/index.ts lets that
- *   exact path past the proxy, no trailing slash);
+ * - the operator line's inbound Voice URL is
+ *   `https://<published host>/api/voice/operator-line/inbound`, exactly
+ *   (server/index.ts lets that path, and a few of the operator line's own
+ *   callback paths, past the proxy; no trailing slash);
  * - a number is repointed in the Twilio console, and moving a live line is
  *   Wayne's decision (standing instruction 11).
  *
  * No phone number is written here. Which number points at which lane is a
  * fact about Twilio, read live from Twilio; this page only lists the lanes the
- * running build says it can answer (`GET /voice/health`).
+ * running build says it can answer (`GET /voice/health`), and says which host
+ * that list came from, because a workspace (`*.replit.dev`) answers the same
+ * request with its own build's lanes.
  */
 
 /** The placeholder for the host. Never computed from the page's own URL:
@@ -33,6 +36,21 @@ export const OPERATOR_INBOUND_PATH = '/api/voice/operator-line/inbound'
 
 export const OPERATOR_INBOUND_URL = `https://${PUBLISHED_HOST}${OPERATOR_INBOUND_PATH}`
 
+/**
+ * Every /api/voice path the voice runtime answers, each with where it is set.
+ * This is server/index.ts's passthrough list, entry for entry (a test checks
+ * the two match), so the card cannot leave one out. Any other /api/voice/...
+ * URL reaches the retired pipeline behind the proxy.
+ */
+export const OPERATOR_RUNTIME_PATHS: ReadonlyArray<{ path: string; role: string }> = [
+  { path: OPERATOR_INBOUND_PATH, role: "the operator number's Voice URL" },
+  { path: '/api/voice/operator-line/fallback', role: "the operator number's Voice fallback URL, if set" },
+  { path: '/api/voice/operator-line/sms', role: "the operator number's messaging URL" },
+  { path: `${OPERATOR_INBOUND_PATH}/status`, role: 'set by the runtime on each call; never set on a number' },
+  { path: `${OPERATOR_INBOUND_PATH}/after`, role: 'set by the runtime on each call; never set on a number' },
+  { path: '/api/voice/operator-line/voicemail', role: "set by the runtime on the operator line's voicemail; never set on a number" },
+]
+
 export const WHERE_TO_REPOINT =
   "This page does not change a number. Repoint a number in the Twilio console; moving a live line is Wayne's decision."
 
@@ -40,10 +58,28 @@ export const WHERE_TO_REPOINT =
 export interface HealthLane {
   slug: string
   servable: boolean
+  /** Set only on an outbound campaign with a demo and a live mode (NPX). */
+  outboundMode?: 'demo' | 'live' | null
 }
 
 export interface VoiceHealthLanes {
+  /** False when this process cannot run a call at all: every lane then
+   * answers with the unavailable line (voiceWebhook.ts). */
+  liveReady?: boolean
+  /** Env var NAMES the runtime is missing, never values. */
+  missing?: string[] | null
+  marker?: string | null
   lanes?: HealthLane[] | null
+}
+
+export interface ListedLane {
+  slug: string
+  /** The Voice URL path for this lane. */
+  path: string
+  /** An outbound campaign: point only its caller-ID number here, which takes
+   * calls back from the people the campaign rang. Its dialled calls carry
+   * their own answer URL and need no number. */
+  outbound: boolean
 }
 
 /** The runtime path for a lane. */
@@ -54,20 +90,43 @@ export function runtimePathFor(slug: string): string {
 /**
  * The lanes the running build says it can answer right now, in the order
  * `/voice/health` lists them. A lane it reports as not servable is left out,
- * because pointing a number at it would not be answered. Null when the health
- * report has no lane list (an older build, or the roster failed).
+ * because pointing a number at it would not be answered, and so is every lane
+ * when the build says it is not live-ready. Null when the health report has no
+ * lane list (an older build, or the roster failed).
  */
-export function servableLanes(health: VoiceHealthLanes | null | undefined): string[] | null {
+export function servableLanes(health: VoiceHealthLanes | null | undefined): ListedLane[] | null {
   const lanes = health?.lanes
   if (!Array.isArray(lanes)) return null
+  if (health?.liveReady === false) return []
   const seen = new Set<string>()
-  const out: string[] = []
+  const out: ListedLane[] = []
   for (const lane of lanes) {
     if (!lane || lane.servable !== true || typeof lane.slug !== 'string') continue
     const slug = lane.slug.trim()
     if (!/^[a-z0-9][a-z0-9-]*$/.test(slug) || seen.has(slug)) continue
     seen.add(slug)
-    out.push(slug)
+    out.push({
+      slug,
+      path: runtimePathFor(slug),
+      outbound: lane.outboundMode === 'demo' || lane.outboundMode === 'live',
+    })
   }
   return out
+}
+
+/**
+ * Why this build cannot answer any call, when it says so: the env var names
+ * `/voice/health` reports missing (names only). Null when it is live-ready or
+ * does not say.
+ */
+export function notLiveReady(health: VoiceHealthLanes | null | undefined): string[] | null {
+  if (health?.liveReady !== false) return null
+  const missing = Array.isArray(health.missing) ? health.missing : []
+  return missing.filter((name): name is string => typeof name === 'string' && /^[A-Za-z0-9_ ()]+$/.test(name))
+}
+
+/** A Replit workspace host: it answers `/voice/health` with its own build. */
+export function isWorkspaceHost(host: string): boolean {
+  const name = host.toLowerCase().split(':')[0]
+  return name.endsWith('.replit.dev') || name.endsWith('.repl.co')
 }

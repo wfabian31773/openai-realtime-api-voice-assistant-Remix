@@ -3,12 +3,17 @@ import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
   OPERATOR_INBOUND_PATH,
+  OPERATOR_RUNTIME_PATHS,
   OPERATOR_INBOUND_URL,
   RUNTIME_URL_SHAPE,
   WHERE_TO_REPOINT,
+  isWorkspaceHost,
+  notLiveReady,
   runtimePathFor,
   servableLanes,
 } from './twilioEndpointReference'
+
+const slugs = (h: Parameters<typeof servableLanes>[0]) => servableLanes(h)?.map((l) => l.slug) ?? null
 
 describe('the endpoint reference says only what the running code serves', () => {
   it('names the runtime URL shape with a placeholder host', () => {
@@ -19,6 +24,24 @@ describe('the endpoint reference says only what the running code serves', () => 
   it('names the operator line exactly as server/index.ts lets it past the proxy', () => {
     const index = readFileSync(join(__dirname, '../../../server/index.ts'), 'utf8')
     expect(index).toContain(`'${OPERATOR_INBOUND_PATH}'`)
+    // It is not the only /api/voice path the runtime answers (Codex on #535):
+    // the operator line's own callback paths pass too.
+    expect(index).toContain(`'${OPERATOR_INBOUND_PATH}/status'`)
+    // The card lists every /api/voice path the runtime answers, so its list
+    // must be server/index.ts's passthrough list exactly (Codex on #537, twice).
+    const list = index.slice(index.indexOf("app.use('/api/voice'"), index.indexOf('].includes(req.originalUrl'))
+    const listed = [...list.matchAll(/'(\/api\/voice\/[^']*)'/g)].map((m) => m[1])
+    expect(listed.length).toBeGreaterThanOrEqual(6)
+    expect([...OPERATOR_RUNTIME_PATHS.map((p) => p.path)].sort()).toEqual([...listed].sort())
+    expect(new Set(OPERATOR_RUNTIME_PATHS.map((p) => p.path)).size).toBe(OPERATOR_RUNTIME_PATHS.length)
+    // The three the runtime sets itself are the ones its own webhook writes into TwiML.
+    const hook = readFileSync(join(__dirname, '../../../src/runtime/operatorInboundWebhook.ts'), 'utf8')
+    expect(hook).toContain('`${OPERATOR_INBOUND_PATH}/after`, `${OPERATOR_INBOUND_PATH}/status`')
+    expect(hook).toContain('<Record action="${OPERATOR_VOICEMAIL_PATH}"')
+    for (const { path, role } of OPERATOR_RUNTIME_PATHS) {
+      const setOnTheNumber = !/never set on a number/.test(role)
+      expect(setOnTheNumber).toBe(!/\/(status|after|voicemail)$/.test(path))
+    }
     expect(OPERATOR_INBOUND_URL).toBe('https://<published host>/api/voice/operator-line/inbound')
     expect(OPERATOR_INBOUND_URL.endsWith('/')).toBe(false)
   })
@@ -47,7 +70,57 @@ describe('servableLanes reads /voice/health', () => {
           { slug: 'pcp', servable: true },
         ],
       }),
-    ).toEqual(['optical', 'records', 'pcp'])
+    ).toEqual([
+      { slug: 'optical', path: '/voice/optical', outbound: false },
+      { slug: 'records', path: '/voice/records', outbound: false },
+      { slug: 'pcp', path: '/voice/pcp', outbound: false },
+    ])
+  })
+
+  it('marks an outbound campaign, whose caller-ID number is pointed at /voice/<lane>', () => {
+    // The dialler rings nobody unless the caller ID's Voice URL is exactly
+    // https://<host>/voice/<lane> (src/runtime/outbound/dialer.ts), so the
+    // path is right for NPX; the note says which number.
+    const dialer = readFileSync(join(__dirname, '../../../src/runtime/outbound/dialer.ts'), 'utf8')
+    expect(dialer).toContain('const want = `${VOICE_PATH_PREFIX}/${slug}`')
+    expect(
+      servableLanes({
+        lanes: [
+          { slug: 'npx-outreach', servable: true, outboundMode: 'demo' },
+          { slug: 'tech', servable: true, outboundMode: null },
+        ],
+      }),
+    ).toEqual([
+      { slug: 'npx-outreach', path: '/voice/npx-outreach', outbound: true },
+      { slug: 'tech', path: '/voice/tech', outbound: false },
+    ])
+    expect(servableLanes({ lanes: [{ slug: 'npx-outreach', servable: true, outboundMode: 'live' }] })?.[0].outbound).toBe(true)
+  })
+
+  it('lists no lane when the build says it is not live-ready', () => {
+    const health = {
+      liveReady: false,
+      missing: ['XAI_API_KEY', 'PRODUCTION_DATABASE_URL (or DATABASE_URL)'],
+      lanes: [{ slug: 'optical', servable: true }],
+    }
+    expect(servableLanes(health)).toEqual([])
+    expect(notLiveReady(health)).toEqual(['XAI_API_KEY', 'PRODUCTION_DATABASE_URL (or DATABASE_URL)'])
+    expect(notLiveReady({ liveReady: true, lanes: [] })).toBeNull()
+    expect(notLiveReady({ lanes: [] })).toBeNull()
+    expect(notLiveReady(undefined)).toBeNull()
+    expect(notLiveReady({ liveReady: false })).toEqual([])
+    // Names only: anything that is not an env-var name is dropped.
+    expect(notLiveReady({ liveReady: false, missing: ['OK_NAME', '<script>', 7 as unknown as string] })).toEqual(['OK_NAME'])
+    expect(slugs({ liveReady: true, lanes: [{ slug: 'optical', servable: true }] })).toEqual(['optical'])
+  })
+
+  it('knows a workspace host from a published one', () => {
+    expect(isWorkspaceHost('dcf9f10f-abc-3uh0nmdcvfbs6.spock.replit.dev')).toBe(true)
+    expect(isWorkspaceHost('example.REPLIT.DEV:443')).toBe(true)
+    expect(isWorkspaceHost('old.repl.co')).toBe(true)
+    expect(isWorkspaceHost('openai-realtime-api-voice-assistant-remix--fabianwayne1.replit.app')).toBe(false)
+    expect(isWorkspaceHost('replit.dev.example.com')).toBe(false)
+    expect(isWorkspaceHost('')).toBe(false)
   })
 
   it('answers null when there is no lane list, and [] when none is servable', () => {
@@ -60,7 +133,7 @@ describe('servableLanes reads /voice/health', () => {
 
   it('drops a slug that is not a lane name, and a duplicate', () => {
     expect(
-      servableLanes({
+      slugs({
         lanes: [
           { slug: 'tech', servable: true },
           { slug: 'tech', servable: true },
@@ -113,8 +186,40 @@ describe('the Twilio page card (source pin)', () => {
   it('lists lanes from /voice/health, never from the agents table', () => {
     expect(page).toContain("fetch('/voice/health'")
     expect(page).toContain('servableLanes(health.data)')
-    expect(card).toContain('runtimePathFor(slug)')
-    expect(card).toContain('lanes.map((slug)')
+    expect(card).toContain('lanes.map((lane)')
+    expect(card).toContain('{lane.path}')
     expect(card).not.toMatch(/\bagents?\b/)
+  })
+
+  it('does not call the operator inbound path the only /api/voice path the runtime answers', () => {
+    // The singular claim; the card now lists all of them, plural.
+    expect(card).not.toMatch(/only \/api\/voice path(?!s)/)
+    expect(card).toContain("operator line's inbound Voice URL is exactly this path")
+    // Its fallback and callbacks reach the runtime too (Codex on #537), so the
+    // card lists every one rather than saying the rest reach the old pipeline.
+    expect(card).not.toContain('Any other inbound /api/voice')
+    expect(card).toContain('OPERATOR_RUNTIME_PATHS.map(({ path, role })')
+    expect(card).toContain('These are the only /api/voice paths the voice runtime answers')
+  })
+
+  it('says when the build cannot answer calls, before listing any lane', () => {
+    expect(page).toContain('notLiveReady(health.data)')
+    const notReady = card.indexOf('missingForCalls !== null ?')
+    const list = card.indexOf('lanes.map((lane)')
+    expect(notReady).toBeGreaterThan(-1)
+    expect(notReady).toBeLessThan(list)
+    expect(card).toContain('not ready to answer calls')
+  })
+
+  it('names the host the list came from and warns on a workspace', () => {
+    expect(page).toContain('isWorkspaceHost(healthHost)')
+    expect(card).toContain('{healthHost')
+    expect(card).toContain('{healthIsWorkspace && (')
+    expect(card).toContain("this list is the workspace's build")
+  })
+
+  it('tells an outbound campaign to point only its caller-ID number at the lane', () => {
+    expect(card).toContain('{lane.outbound && (')
+    expect(card).toContain('point only its caller-ID number here')
   })
 })
