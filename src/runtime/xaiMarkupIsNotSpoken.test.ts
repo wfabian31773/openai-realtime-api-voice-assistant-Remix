@@ -950,6 +950,16 @@ describe("v275 round 7: the guardrails read what the caller hears", () => {
     expect(h.session.speakNatural).not.toHaveBeenCalled();
   });
 
+  it("nor on the deltas after the tag, which play nothing either", async () => {
+    const h = harness({ guardrails: [diagnosisGuardrail()] });
+    h.caller("What does my pressure mean?");
+    const mediaBefore = h.media.length;
+    await line(h, ["<turn_end>", " you have", " glaucoma"], "<turn_end> you have glaucoma");
+    expect(h.media.length).toBe(mediaBefore);
+    expect(h.session.cancelResponse).not.toHaveBeenCalled();
+    expect(h.session.speakNatural).not.toHaveBeenCalled();
+  });
+
   it("in log mode the trip is logged and the line is not cut", async () => {
     const error = vi.spyOn(console, "error").mockImplementation(() => {});
     const h = harness({ guardrails: [diagnosisGuardrail()], guardrailMode: "log" });
