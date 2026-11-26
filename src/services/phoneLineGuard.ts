@@ -47,7 +47,9 @@ export type VoiceUrlKind =
   | 'runtime'
   /** The retired SIP core, behind the `/api/voice` proxy. */
   | 'retired'
-  /** Anything else that answers calls: a Twilio Studio flow, another app. */
+  /** Any other Voice URL: a Twilio Studio flow, another app, a broken URL.
+   * A Voice URL being set does not prove it answers calls (a TwiML App on
+   * the number takes precedence), so the wording only reports it. */
   | 'other'
   /** No Voice URL set. */
   | 'none';
@@ -206,7 +208,7 @@ export function configureForAgentRefusal(
     default:
       return new PhoneLineRefusal(
         'live_line',
-        `${phoneNumber} answers calls at ${current.url}. ${DEAD_PATH} ${NOT_CHANGED} ${WHERE_TO_REPOINT}`,
+        `${phoneNumber} has a Voice URL set: ${current.url}. ${DEAD_PATH} ${NOT_CHANGED} ${WHERE_TO_REPOINT}`,
         current.url,
         wouldWrite,
       );

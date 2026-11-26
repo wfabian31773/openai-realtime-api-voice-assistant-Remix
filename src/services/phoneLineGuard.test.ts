@@ -105,8 +105,14 @@ describe('configureForAgentRefusal: the action never changes a number', () => {
   it('a Studio phone-menu number is refused (it is a live line too)', () => {
     const r = configureForAgentRefusal('+16265550002', { ok: true, url: STUDIO }, OLD_CORE_WRITE);
     expect(r.reason).toBe('live_line');
-    expect(r.message).toContain(STUDIO);
+    expect(r.message).toContain(`has a Voice URL set: ${STUDIO}`);
     expect(r.body().changed).toBe(false);
+  });
+
+  it('never claims a URL it does not recognise answers calls (Codex on #528, round 6)', () => {
+    for (const url of [STUDIO, `${PUBLISHED}/voice/records/typo`, 'not a url']) {
+      expect(configureForAgentRefusal('+1', { ok: true, url }, OLD_CORE_WRITE).message).not.toContain('answers calls');
+    }
   });
 
   it('an old-core number is refused', () => {
