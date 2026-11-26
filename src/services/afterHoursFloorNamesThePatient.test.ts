@@ -57,8 +57,20 @@ const GREETING =
 
 type Answer = { firstName?: string | null; lastName?: string | null } | null;
 
+/**
+ * v276: the floor reads whether a request was made before it files. Every
+ * corpus call made one, so by default the request reader answers with one;
+ * `reader: 'unavailable'` is the reader that could not run (no key, switched
+ * off, a model failure), where the floor files as before so nothing is lost.
+ */
+type Reader = 'request' | 'unavailable';
+
 let serial = 0;
-async function sweep(transcript: string, answer: Answer, opts: { throws?: boolean } = {}) {
+async function sweep(
+  transcript: string,
+  answer: Answer,
+  opts: { throws?: boolean; reader?: Reader } = {},
+) {
   const n = ++serial;
   const callSid = `CA${String(n).padStart(32, '0')}`;
   const callId = `synthetic-floor-name-${n}`;
@@ -67,9 +79,12 @@ async function sweep(transcript: string, answer: Answer, opts: { throws?: boolea
     if (opts.throws) throw new Error('synthetic outage');
     return answer;
   });
-  await floor.sweepAfterHoursUnfiledCall(callId, { transcript, askName });
-  expect(h.submitSimplifiedTicket).toHaveBeenCalledTimes(1);
-  return { payload: h.submitSimplifiedTicket.mock.calls[0][0], askName };
+  const askRequest = vi.fn(async () =>
+    (opts.reader ?? 'request') === 'unavailable' ? null : { request: 'Wants to move an eye appointment.' },
+  );
+  await floor.sweepAfterHoursUnfiledCall(callId, { transcript, askName, askRequest });
+  expect(h.submitSimplifiedTicket.mock.calls.length).toBeLessThanOrEqual(1);
+  return { payload: h.submitSimplifiedTicket.mock.calls[0]?.[0], askName, askRequest };
 }
 
 beforeEach(() => {
@@ -189,6 +204,8 @@ describe('v239: the corpus — the floor files under the patient name the caller
       expect(payload.additionalDetails).not.toContain(STAND_IN_NAME_NOTE);
       // Still a floor ticket, still for review.
       expect(payload.additionalDetails).toContain(floor.FLOOR_NEEDS_REVIEW_NOTE);
+      // v276: the reader confirmed a request, so the ticket says nothing about it.
+      expect(payload.additionalDetails).not.toContain(floor.FLOOR_REQUEST_NOT_CONFIRMED_NOTE);
     });
   }
 
@@ -200,53 +217,74 @@ describe('v239: the corpus — the floor files under the patient name the caller
 });
 
 describe('v239: still fails, and correctly refused', () => {
-  it('VA-85388 (CA63ca740bacad79db17e99a2b38c7eb83): a filler between the halves — still the stand-in', async () => {
-    const transcript = [
-      GREETING,
-      'CALLER: Español.',
-      'AGENT: ¿En qué puedo ayudarle?',
-      'CALLER: Sí, eh, te habla señora Rosa Ortiz. Quiero hacer una cita para el señor Pablo, eh, Ortiz. Gracias.',
-    ].join('\n');
-    const { payload } = await sweep(transcript, { firstName: 'Pablo', lastName: 'Ortiz' });
+  // v276: a request whose patient the floor cannot name is not filed at all
+  // (operator, 2026-11-26: "We shouldnt be filing tickets unless we can identify
+  // the patient and there is a valid request"). v239's refusal still decides
+  // which name a ticket may carry, and it is pinned on the arm that still files:
+  // a request reader that could not run, where the stand-in goes out as before.
+  const FILLER = [
+    GREETING,
+    'CALLER: Español.',
+    'AGENT: ¿En qué puedo ayudarle?',
+    'CALLER: Sí, eh, te habla señora Rosa Ortiz. Quiero hacer una cita para el señor Pablo, eh, Ortiz. Gracias.',
+  ].join('\n');
+  const DENIED = [
+    GREETING,
+    'CALLER: Cancel an appointment.',
+    'AGENT: I can help with that. I was able to pull up a record. Is this for Greta?',
+    'CALLER: No.',
+  ].join('\n');
+  const CROSSED = [
+    GREETING,
+    'CALLER: To cancel an appointment for my mother.',
+    "AGENT: What is the patient's name?",
+    'CALLER: Nora Vance.',
+    'AGENT: And your name?',
+    'CALLER: Ivy Lund.',
+  ].join('\n');
+
+  it('VA-85388 (CA63ca740bacad79db17e99a2b38c7eb83): a filler between the halves — not filed under a stand-in', async () => {
+    const { payload } = await sweep(FILLER, { firstName: 'Pablo', lastName: 'Ortiz' });
+    expect(payload).toBeUndefined();
+    expect(h.submitSimplifiedTicket).not.toHaveBeenCalled();
+  });
+
+  it('VA-85388: with the request reader down, still the stand-in, never the heard name', async () => {
+    const { payload } = await sweep(FILLER, { firstName: 'Pablo', lastName: 'Ortiz' }, { reader: 'unavailable' });
     expect(payload.patientFullName).toBe(STAND_IN_FULL_NAME);
     expect(payload.additionalDetails).toContain(STAND_IN_NAME_NOTE);
     expect(payload.additionalDetails).not.toContain(HEARD_NAME_NOTE);
+    expect(payload.additionalDetails).toContain(floor.FLOOR_REQUEST_NOT_CONFIRMED_NOTE);
   });
 
   it('VA-84172 (CA578334d5580401a6de5c3002f19c8b6a): the caller denied the only name the agent said — never filed under it', async () => {
-    const transcript = [
-      GREETING,
-      'CALLER: Cancel an appointment.',
-      'AGENT: I can help with that. I was able to pull up a record. Is this for Greta?',
-      'CALLER: No.',
-    ].join('\n');
     // A model that took the agent's own word for it is refused: the caller
-    // never said either half.
-    const { payload } = await sweep(transcript, { firstName: 'Greta', lastName: 'Holm' });
-    expect(payload.patientFullName).toBe(STAND_IN_FULL_NAME);
-    expect(payload.additionalDetails).toContain(floor.FLOOR_MISSING_IDENTITY_NOTE);
+    // never said either half. With nobody named, the request is not filed.
+    const { payload } = await sweep(DENIED, { firstName: 'Greta', lastName: 'Holm' });
+    expect(payload).toBeUndefined();
+    const down = await sweep(DENIED, { firstName: 'Greta', lastName: 'Holm' }, { reader: 'unavailable' });
+    expect(down.payload.patientFullName).toBe(STAND_IN_FULL_NAME);
+    expect(down.payload.additionalDetails).toContain(floor.FLOOR_MISSING_IDENTITY_NOTE);
   });
 
   it('a model that crosses the caller with the patient is refused (the halves were never said together)', async () => {
-    const transcript = [
-      GREETING,
-      'CALLER: To cancel an appointment for my mother.',
-      "AGENT: What is the patient's name?",
-      'CALLER: Nora Vance.',
-      'AGENT: And your name?',
-      'CALLER: Ivy Lund.',
-    ].join('\n');
-    const { payload } = await sweep(transcript, { firstName: 'Ivy', lastName: 'Vance' });
-    expect(payload.patientFullName).toBe(STAND_IN_FULL_NAME);
+    expect((await sweep(CROSSED, { firstName: 'Ivy', lastName: 'Vance' })).payload).toBeUndefined();
+    const down = await sweep(CROSSED, { firstName: 'Ivy', lastName: 'Vance' }, { reader: 'unavailable' });
+    expect(down.payload.patientFullName).toBe(STAND_IN_FULL_NAME);
   });
 
-  it('a model that answers nothing, or throws, files the stand-in as before', async () => {
+  it('a name model that answers nothing, a half, or throws: not filed when a request was read, the stand-in when the reader is down', async () => {
     const t = `${GREETING}\nCALLER: Please have someone call me back about my glasses order.`;
-    expect((await sweep(t, null)).payload.patientFullName).toBe(STAND_IN_FULL_NAME);
+    expect((await sweep(t, null)).payload).toBeUndefined();
+    expect((await sweep(t, { firstName: 'Nora', lastName: null })).payload).toBeUndefined();
+    expect((await sweep(t, { firstName: 'Nora', lastName: 'Vance' }, { throws: true })).payload).toBeUndefined();
+    expect(h.submitSimplifiedTicket).not.toHaveBeenCalled();
+
+    expect((await sweep(t, null, { reader: 'unavailable' })).payload.patientFullName).toBe(STAND_IN_FULL_NAME);
     h.submitSimplifiedTicket.mockClear();
-    expect((await sweep(t, { firstName: 'Nora', lastName: null })).payload.patientFullName).toBe(STAND_IN_FULL_NAME);
+    expect((await sweep(t, { firstName: 'Nora', lastName: null }, { reader: 'unavailable' })).payload.patientFullName).toBe(STAND_IN_FULL_NAME);
     h.submitSimplifiedTicket.mockClear();
-    const thrown = await sweep(t, { firstName: 'Nora', lastName: 'Vance' }, { throws: true });
+    const thrown = await sweep(t, { firstName: 'Nora', lastName: 'Vance' }, { throws: true, reader: 'unavailable' });
     expect(thrown.payload.patientFullName).toBe(STAND_IN_FULL_NAME);
     expect(thrown.payload.additionalDetails).toContain(STAND_IN_NAME_NOTE);
   });

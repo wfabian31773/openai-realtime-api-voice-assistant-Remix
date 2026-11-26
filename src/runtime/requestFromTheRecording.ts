@@ -480,3 +480,69 @@ export async function requestFromTheRecording(
   console.warn(`[REQUEST FROM RECORDING] the second answer failed a check too (${again.kind}) — not used${where}`);
   return null;
 }
+
+/**
+ * v276: whether the caller made a request, as three answers a teardown filer
+ * can act on. Unlike `requestFromTheRecording`, which folds every miss into
+ * null, this tells "the model read no request" (`none`) from "the reader
+ * could not run" (`unavailable`: no key, switched off, an empty transcript,
+ * or the model failing), because the after-hours floor files nothing on the
+ * first and must not lose a request on the second.
+ *
+ * `request` means the model read one. A sentence fit for a ticket comes with
+ * it when the first answer, or the one retry a content check earns (v241),
+ * passes every check; a request whose sentence carried a name, a number or an
+ * address is still a request, so it comes back with no sentence. A correct
+ * drop (the model says nothing was asked, the placeholder, no topic) is
+ * `none`. Never throws; the log lines name the call and the kind, never what
+ * the sentence said.
+ */
+export type RequestReading =
+  | { kind: "request"; sentence?: string }
+  | { kind: "none" }
+  | { kind: "unavailable" };
+
+export async function readTheRequest(
+  transcript: string,
+  ask: RequestAsker = askModelForTheRequest,
+  heldNames: readonly string[] = [],
+  callSid?: string,
+): Promise<RequestReading> {
+  const where = callSid ? ` (${callSid})` : "";
+  let answer: Awaited<ReturnType<RequestAsker>> = null;
+  try {
+    answer = await ask(transcript);
+  } catch (e) {
+    console.warn(
+      `[REQUEST FROM RECORDING] the model did not answer (${(e as Error)?.name ?? "error"}) — the request could not be read${where}`,
+    );
+    return { kind: "unavailable" };
+  }
+  if (!answer) {
+    console.info(`[REQUEST FROM RECORDING] the reader did not run — the request could not be read${where}`);
+    return { kind: "unavailable" };
+  }
+  if (typeof answer.request !== "string" || !answer.request.trim()) {
+    console.info(`[REQUEST FROM RECORDING] the model read no request${where}`);
+    return { kind: "none" };
+  }
+  const first = answer.request;
+  const checked = checkRequest(first, heldNames);
+  if ("sentence" in checked) return { kind: "request", sentence: checked.sentence };
+  if (!RETRYABLE_KINDS.has(checked.kind)) {
+    console.info(`[REQUEST FROM RECORDING] the model's sentence names no request (${checked.kind})${where}`);
+    return { kind: "none" };
+  }
+  console.warn(`[REQUEST FROM RECORDING] the model's sentence failed a check (${checked.kind}) — asking once more${where}`);
+  const second = await askOnce(ask, transcript, { previous: first, leaveOut: LEAVE_OUT[checked.kind] }, where);
+  if (second !== null) {
+    const again = checkRequest(second, heldNames);
+    if ("sentence" in again) {
+      console.info(`[REQUEST FROM RECORDING] the second answer was used${where}`);
+      return { kind: "request", sentence: again.sentence };
+    }
+    console.warn(`[REQUEST FROM RECORDING] the second answer failed a check too (${again.kind})${where}`);
+  }
+  // The first answer named a request; only its wording was unusable.
+  return { kind: "request" };
+}
