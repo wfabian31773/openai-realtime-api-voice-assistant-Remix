@@ -343,8 +343,15 @@ export async function agentOpenings(days = 7): Promise<AgentOpenings[]> {
       WHERE ct.role IN ('assistant','agent','ai')
         AND ct.created_at >= NOW() - make_interval(days => $1::int)
     )
-    SELECT agent_slug, opening, COUNT(*)::int AS n
-    FROM firsts WHERE rn = 1 AND opening IS NOT NULL AND LENGTH(opening) > 12
+    -- people: one key per person who heard it (an md5 of the far end's number,
+    -- never the number), so the panel can hold back any opening fewer than
+    -- three different people heard (openingMask.ts). A call with no number
+    -- gives NULL, which counts nobody.
+    SELECT f.agent_slug, f.opening, COUNT(*)::int AS n,
+           ARRAY_AGG(DISTINCT md5(CASE WHEN cl.direction = 'outbound' THEN cl."to" ELSE cl."from" END)) AS people
+    FROM firsts f
+    LEFT JOIN call_logs cl ON cl.id = f.call_log_id
+    WHERE f.rn = 1 AND f.opening IS NOT NULL AND LENGTH(f.opening) > 12
     GROUP BY 1, 2
     `,
     [days],

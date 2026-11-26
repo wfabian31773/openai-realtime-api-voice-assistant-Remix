@@ -141,6 +141,25 @@ SELECT DISTINCT ON (check_id) check_id, status
  WHERE check_id = ANY($1::text[]) AND ran_at < $2::timestamptz
  ORDER BY check_id, ran_at DESC`;
 
+/**
+ * Whether this clock hour (UTC) already has a stored run. Each server's hourly
+ * timer starts at its own boot, and the lease is released after each run, so
+ * two servers a few minutes apart would each write an hourly sample; the
+ * first to write takes the hour and the others skip it (Codex review of #525).
+ */
+export const HOUR_TAKEN_SQL = `
+SELECT EXISTS (
+  SELECT 1 FROM accuracy_check_results
+   WHERE ran_at >= date_trunc('hour', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'
+) AS taken`;
+
+/** True when another server already recorded a run in this clock hour. */
+export async function hourAlreadyRecorded(q: Queryable): Promise<boolean> {
+  await ensureTable(q);
+  const res = await q.query(HOUR_TAKEN_SQL);
+  return res.rows[0]?.taken === true;
+}
+
 export interface StoredResult extends CheckResult {
   /** When this check's current run of failures began; null unless failing. */
   failingSince: string | null;
@@ -271,7 +290,13 @@ export function mountAccuracyCheck(app: Express, deps: AccuracyMountDeps) {
       }
       const lock = deps.runLock ?? leaseRunLock();
       const tick = async () => {
-        await runUnderLock(lock, async () => persist(await runner.report(true)));
+        await runUnderLock(lock, async () => {
+          if (await hourAlreadyRecorded(deps.hub())) {
+            console.log('[ACCURACY] this hour already has a stored run (another server); skipped');
+            return;
+          }
+          await persist(await runner.report(true));
+        });
       };
       console.log('[ACCURACY] hourly run on: every screen number read twice, results in accuracy_check_results');
       const first = setTimeout(() => void tick(), 2 * 60_000);

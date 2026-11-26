@@ -30,7 +30,7 @@ export const NAME_PLACEHOLDER = '[name]';
 const TITLE = "(?:(?:(?:el|la)\\s+)?(?:mr|mrs|ms|miss|dr|sr|sra|srta|señor|señora|señorita)\\.?\\s+)?";
 
 const ASKS_FOR_A_PERSON = new RegExp(
-  "\\b(am i speaking with|am i talking (?:with|to)|may i (?:please )?speak (?:with|to)|can i (?:please )?speak (?:with|to)|is this|hablo con|estoy hablando con|puedo hablar con)\\s+(?!\\[name\\])" +
+  "\\b(am i speaking with|am i talking (?:with|to)|am i reaching|(?:may|can|could) i (?:please )?speak (?:with|to)|is this|i'?m (?:(?:looking|calling) for|trying to reach)|hablo con|estoy hablando con|puedo hablar con)\\s+(?!\\[name\\])" +
     TITLE +
     "[^?.!,;\\n]{1,60}",
   'giu',
@@ -60,10 +60,11 @@ const ADDRESSES_A_PERSON = new RegExp(
 
 /**
  * The structural guard: an opening is shown only when at least this many
- * calls share it after masking. A greeting is said to many callers; a line
- * that still carries a name the patterns above missed belongs to one caller,
- * so it is held back whatever its wording. The patterns decide how much of
- * the panel survives; this decides that no one caller's line is sent.
+ * DIFFERENT PEOPLE heard it (by the far end's number), after masking. A
+ * greeting is said to many callers; a line that still carries a name the
+ * patterns above missed belongs to one person, so it is held back whatever
+ * its wording. It counts people, not calls: NPX outreach can ring one patient
+ * three times with the same named greeting (Codex review of #525).
  */
 export const MIN_OPENING_REPEATS = 3;
 
@@ -78,12 +79,15 @@ export interface OpeningRow {
   agent_slug: string;
   opening: string;
   n: number;
+  /** One key per person who heard this opening (a hash of the far end's number). */
+  people?: string[] | null;
 }
 
 /**
  * Masks each opening, truncates it to `width` AFTER masking (so a name cut in
  * half by the truncation is still masked), re-counts identical masked
- * openings, and drops any that fewer than MIN_OPENING_REPEATS calls share.
+ * openings, and drops any that fewer than MIN_OPENING_REPEATS different
+ * people heard. A row with no people listed counts nobody, so it is dropped.
  * Returns at most `perAgent` openings per agent, most common first.
  */
 export function aggregateOpenings(
@@ -91,22 +95,25 @@ export function aggregateOpenings(
   width = 120,
   perAgent = 6,
 ): Map<string, Array<{ opening: string; n: number }>> {
-  const counts = new Map<string, Map<string, number>>();
+  const counts = new Map<string, Map<string, { n: number; people: Set<string> }>>();
   for (const r of rows) {
     if (!r.opening) continue;
     const masked = maskOpening(r.opening).slice(0, width);
     if (masked.length <= 12) continue;
-    const byText = counts.get(r.agent_slug) ?? new Map<string, number>();
-    byText.set(masked, (byText.get(masked) ?? 0) + Number(r.n));
+    const byText = counts.get(r.agent_slug) ?? new Map<string, { n: number; people: Set<string> }>();
+    const entry = byText.get(masked) ?? { n: 0, people: new Set<string>() };
+    entry.n += Number(r.n);
+    for (const p of r.people ?? []) if (p) entry.people.add(p);
+    byText.set(masked, entry);
     counts.set(r.agent_slug, byText);
   }
   const out = new Map<string, Array<{ opening: string; n: number }>>();
   for (const [slug, byText] of counts) {
     const sorted = [...byText.entries()]
-      .filter(([, n]) => n >= MIN_OPENING_REPEATS)
-      .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+      .filter(([, e]) => e.people.size >= MIN_OPENING_REPEATS)
+      .sort((a, b) => b[1].n - a[1].n || a[0].localeCompare(b[0]))
       .slice(0, perAgent)
-      .map(([opening, n]) => ({ opening, n }));
+      .map(([opening, e]) => ({ opening, n: e.n }));
     out.set(slug, sorted);
   }
   return out;

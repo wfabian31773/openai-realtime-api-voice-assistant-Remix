@@ -3,6 +3,8 @@
  * only; the shapes are the agents' real first lines (2026-11-26: 111 of 113
  * NPX outreach first lines in 7 days named a patient).
  */
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { MIN_OPENING_REPEATS, aggregateOpenings, maskOpening } from './openingMask';
 
@@ -16,6 +18,10 @@ describe('maskOpening', () => {
     );
     expect(maskOpening('May I please speak with Mary-Ann O’Lake? [interrupted]')).toBe('May I please speak with [name]? [interrupted]');
     expect(maskOpening('¿Hablo con Testa Lake?')).toBe('¿Hablo con [name]?');
+    expect(maskOpening('Hello. Am I reaching Testa Lake?')).toBe('Hello. Am I reaching [name]?');
+    expect(maskOpening('Could I speak with Testa?')).toBe('Could I speak with [name]?');
+    expect(maskOpening("Hi, I'm calling for Testa Lake.")).toBe("Hi, I'm calling for [name].");
+    expect(maskOpening("Hello, I'm trying to reach Testa.")).toBe("Hello, I'm trying to reach [name].");
   });
 
   it('masks a name the truncation would otherwise have cut in half', () => {
@@ -62,14 +68,17 @@ describe('maskOpening', () => {
   });
 });
 
+/** n distinct people, each heard it once. */
+const ppl = (tag: string, n: number) => Array.from({ length: n }, (_, i) => `${tag}${i}`);
+
 describe('aggregateOpenings', () => {
   it('counts many patients greeted by name as one greeting', () => {
     const lead = 'Hello, this is an automated assistant calling for Azul Vision. This call is recorded. May I speak with';
     const map = aggregateOpenings([
-      { agent_slug: 'npx-outreach', opening: `${lead} Testa?`, n: 3 },
-      { agent_slug: 'npx-outreach', opening: `${lead} Lakey?`, n: 2 },
-      { agent_slug: 'npx-outreach', opening: `${lead} Rivera Dos?`, n: 1 },
-      { agent_slug: 'pcp', opening: 'Thank you for calling Azul Vision PCP Support. How can I help you today?', n: 9 },
+      { agent_slug: 'npx-outreach', opening: `${lead} Testa?`, n: 3, people: ['a'] },
+      { agent_slug: 'npx-outreach', opening: `${lead} Lakey?`, n: 2, people: ['b'] },
+      { agent_slug: 'npx-outreach', opening: `${lead} Rivera Dos?`, n: 1, people: ['c'] },
+      { agent_slug: 'pcp', opening: 'Thank you for calling Azul Vision PCP Support. How can I help you today?', n: 9, people: ppl('p', 9) },
     ], 300);
     expect(map.get('npx-outreach')).toEqual([{ opening: `${lead} [name]?`, n: 6 }]);
     expect(map.get('pcp')?.[0].n).toBe(9);
@@ -77,31 +86,63 @@ describe('aggregateOpenings', () => {
   });
 
   it('truncates after masking, so no part of a name survives the cut', () => {
-    const map = aggregateOpenings([{ agent_slug: 'optical', opening: `${'x'.repeat(100)} Am I speaking with Testalake?`, n: 3 }], 125);
+    const map = aggregateOpenings([{ agent_slug: 'optical', opening: `${'x'.repeat(100)} Am I speaking with Testalake?`, n: 3, people: ppl('o', 3) }], 125);
     expect(map.get('optical')?.[0].opening).not.toMatch(/Testa/);
   });
 
-  it('never sends an opening only one or two calls share, whatever it says', () => {
-    // A line the patterns miss still belongs to one caller; the repeat floor holds it back.
+  it('never sends an opening fewer than three people heard, whatever it says', () => {
+    // A line the patterns miss still belongs to one caller; the floor holds it back.
     const map = aggregateOpenings([
-      { agent_slug: 'npx-outreach', opening: 'Thank you for calling, Testa, we have news about your visit.', n: 1 },
-      { agent_slug: 'npx-outreach', opening: 'Thank you for calling, Lakey, we have news about your visit.', n: 2 },
-      { agent_slug: 'npx-outreach', opening: 'Hello, this is an automated assistant calling for Azul Vision.', n: MIN_OPENING_REPEATS },
+      { agent_slug: 'npx-outreach', opening: 'Thank you for calling, Testa, we have news about your visit.', n: 1, people: ['a'] },
+      { agent_slug: 'npx-outreach', opening: 'Thank you for calling, Lakey, we have news about your visit.', n: 2, people: ['b', 'c'] },
+      { agent_slug: 'npx-outreach', opening: 'Hello, this is an automated assistant calling for Azul Vision.', n: MIN_OPENING_REPEATS, people: ppl('d', MIN_OPENING_REPEATS) },
     ]);
     expect(map.get('npx-outreach')).toEqual([{ opening: 'Hello, this is an automated assistant calling for Azul Vision.', n: MIN_OPENING_REPEATS }]);
     expect(JSON.stringify([...map.values()])).not.toMatch(/Testa|Lakey/);
   });
 
-  it('counts a greeting once it has been said to enough callers', () => {
-    const map = aggregateOpenings([{ agent_slug: 'tech', opening: 'Thank you for calling Azul Vision. How can I help you?', n: 2 },
-      { agent_slug: 'tech', opening: 'Thank you for calling Azul Vision. How can I help you?', n: 1 }]);
-    expect(map.get('tech')).toEqual([{ opening: 'Thank you for calling Azul Vision. How can I help you?', n: 3 }]);
+  it('counts people, not calls: one patient called three times is still one person (Codex review of #525)', () => {
+    // A wording no pattern catches, said to one patient on three outreach attempts.
+    const line = 'Good day. Testa Lake, this is Azul Vision about your visit.';
+    const map = aggregateOpenings([{ agent_slug: 'npx-outreach', opening: line, n: 3, people: ['one-patient'] }]);
+    expect(map.get('npx-outreach')).toEqual([]);
+    expect(JSON.stringify([...map.values()])).not.toMatch(/Testa|Lake/);
+  });
+
+  it('a row that lists nobody counts nobody, and a call with no number is nobody', () => {
+    const map = aggregateOpenings([{ agent_slug: 'tech', opening: 'Thank you for calling Azul Vision. How can I help you?', n: 50 }]);
+    expect(map.get('tech')).toEqual([]);
+    const noNumbers = aggregateOpenings([
+      { agent_slug: 'tech', opening: 'Thank you for calling Azul Vision. How can I help you?', n: 3, people: ['a', 'b', null] as unknown as string[] },
+    ]);
+    expect(noNumbers.get('tech')).toEqual([]);
+  });
+
+  it('counts a greeting once enough different people have heard it', () => {
+    const line = 'Thank you for calling Azul Vision. How can I help you?';
+    const map = aggregateOpenings([
+      { agent_slug: 'tech', opening: line, n: 2, people: ['a', 'b'] },
+      { agent_slug: 'tech', opening: line, n: 1, people: ['b'] },
+    ]);
+    // Two people only (b twice): held back.
+    expect(map.get('tech')).toEqual([]);
+    const map3 = aggregateOpenings([
+      { agent_slug: 'tech', opening: line, n: 2, people: ['a', 'b'] },
+      { agent_slug: 'tech', opening: line, n: 1, people: ['c'] },
+    ]);
+    expect(map3.get('tech')).toEqual([{ opening: line, n: 3 }]);
   });
 
   it('keeps at most six openings per agent, most common first', () => {
-    const rows = Array.from({ length: 8 }, (_, i) => ({ agent_slug: 'tech', opening: `Opening line number ${i} for the lane`, n: i + 1 }));
+    const rows = Array.from({ length: 8 }, (_, i) => ({ agent_slug: 'tech', opening: `Opening line number ${i} for the lane`, n: i + 3, people: ppl(`t${i}-`, i + 3) }));
     const out = aggregateOpenings(rows).get('tech')!;
     expect(out).toHaveLength(6);
-    expect(out[0].n).toBe(8);
+    expect(out[0].n).toBe(10);
+  });
+
+  it('the panel query lists who heard each opening by a hash of the far end, never the number', () => {
+    const src = readFileSync(join(__dirname, 'queries.ts'), 'utf8');
+    expect(src).toContain(`md5(CASE WHEN cl.direction = 'outbound' THEN cl."to" ELSE cl."from" END)`);
+    expect(src).toContain('AS people');
   });
 });

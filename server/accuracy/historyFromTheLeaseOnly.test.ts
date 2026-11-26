@@ -5,14 +5,15 @@
  * would otherwise both write the same run (Codex review of #525).
  */
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { mountAccuracyCheck, type RunLock } from './accuracy';
+import { HOUR_TAKEN_SQL, mountAccuracyCheck, type RunLock } from './accuracy';
 import type { AccuracyDeps, Queryable } from './checks';
 
-function fakeHub() {
+function fakeHub(hourTaken = false) {
   const sql: string[] = [];
   const hub: Queryable = {
     async query(text: string) {
       sql.push(text);
+      if (text === HOUR_TAKEN_SQL) return { rows: [{ taken: hourTaken }] };
       return { rows: [] };
     },
   };
@@ -33,10 +34,10 @@ function checkDeps(): AccuracyDeps {
   };
 }
 
-function mount(lock: RunLock) {
+function mount(lock: RunLock, hourTaken = false) {
   const routes: Record<string, (req: unknown, res: unknown) => Promise<void>> = {};
   const app = { get: (path: string, _auth: unknown, h: (req: unknown, res: unknown) => Promise<void>) => { routes[path] = h; } };
-  const { hub, inserts } = fakeHub();
+  const { hub, inserts } = fakeHub(hourTaken);
   const acc = mountAccuracyCheck(app as never, {
     authenticate: ((_req: unknown, _res: unknown, next: () => void) => next()) as never,
     hub: () => hub,
@@ -87,5 +88,21 @@ describe('accuracy history', () => {
     await vi.advanceTimersByTimeAsync(2 * 60_000 + 10);
     expect(inserts()).toBe(0);
     stop();
+  });
+
+  it('the hourly run skips an hour another server already recorded (Codex review of #525)', async () => {
+    vi.useFakeTimers();
+    const lock: RunLock = { acquire: vi.fn(async () => true), release: vi.fn(async () => {}) };
+    const { acc, inserts } = mount(lock, true);
+    const stop = acc.startSchedule();
+    await vi.advanceTimersByTimeAsync(2 * 60_000 + 10);
+    expect(lock.acquire).toHaveBeenCalledOnce();
+    expect(inserts()).toBe(0);
+    expect(lock.release).toHaveBeenCalledOnce();
+    stop();
+  });
+
+  it('the hour is read in UTC whatever the session time zone', () => {
+    expect(HOUR_TAKEN_SQL).toContain("date_trunc('hour', now() AT TIME ZONE 'UTC') AT TIME ZONE 'UTC'");
   });
 });
