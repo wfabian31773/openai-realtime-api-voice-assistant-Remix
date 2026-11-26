@@ -111,8 +111,18 @@ describe("the follow-up summary", () => {
       mediaGapHangup: false,
       // v183: a boolean, gained deliberately.
       filedSilenceHangup: false,
+      // v275: two counts, gained deliberately.
+      skippedAfterGoodbye: 0,
+      providerMarkupCuts: 0,
       outcome: "dead_air",
     });
+  });
+
+  it("v275: writes a row for a call whose only event is a provider-markup cut", () => {
+    const ev = followUpEvent({ outcome: "caller_hangup", providerMarkupCuts: 1 });
+    expect(ev).not.toBeNull();
+    expect(ev!.data).toMatchObject({ providerMarkupCuts: 1, owed: 0 });
+    expect(ev!.level).toBe("info");
   });
 
   it("emits one call_events row keyed on the call and flushes it, then releases the buffer", async () => {

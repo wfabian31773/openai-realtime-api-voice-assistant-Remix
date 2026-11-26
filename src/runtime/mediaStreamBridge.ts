@@ -115,6 +115,7 @@ import { noteCallerTranscript } from "../services/symptomCorroboration";
 import { noteCallLanguage } from "../services/callLanguage";
 import { ghostCallRefusal } from "../services/ghostCallProtection";
 import { callerConclusion, completesGoodbye, type CallerConclusion } from "./goodbye";
+import { providerMarkupIndex, withoutProviderMarkup } from "./providerMarkup";
 import {
   CallUsage,
   providerUsageMarker,
@@ -743,6 +744,9 @@ export interface VoiceCallRecord {
   /** v183: the call ended because a heard caller whose request was filed
    * said nothing for `FILED_SILENCE_MS` (outcome `filed_silence`). */
   filedSilenceHangup?: boolean;
+  /** v275: agent utterances cut where provider markup began (`<…>` in the
+   * agent's transcript): the rest is not played and not recorded. */
+  providerMarkupCuts?: number;
   teardownReason?: "goodbye_grace" | "media_gap";
 }
 
@@ -787,6 +791,10 @@ export interface FollowUpStats {
    * without audio: the SLOW reply, with how long it had been waiting. */
   endedAwaitingAudio?: boolean;
   awaitingAudioMsAtEnd?: number;
+  /** v275 — follow-ups NOT requested because the agent had just said a
+   * goodbye that completed the caller's closing, and every tool answer owed
+   * a turn declared it had nothing to say. The goodbye grace ends the call. */
+  skippedAfterGoodbye?: number;
 }
 
 export interface VoiceCallContext {
@@ -992,7 +1000,7 @@ export class VoiceCallBridge {
   /** The utterance currently being spoken, opened by its first audio or
    * transcript delta and closed by its completion. `epoch` is what makes a
    * cancelled utterance's late completion recognisable (module doc). */
-  private current: { seq: number; epoch: number; text: string; bytes: number } | null = null;
+  private current: { seq: number; epoch: number; text: string; bytes: number; muted: boolean } | null = null;
   /** The response epoch a barge-in cancelled. Everything that epoch emits
    * afterwards is stale: dropped, not forwarded, not recorded. */
   private cancelledEpoch: number | null = null;
@@ -1638,7 +1646,7 @@ export class VoiceCallBridge {
   /** Opens the current utterance on its first event, whichever arrives
    * first — audio delta or transcript delta. Returns null when the event
    * belongs to a cancelled epoch (stale). */
-  private openOrGetCurrent(): { seq: number; epoch: number; text: string; bytes: number } | null {
+  private openOrGetCurrent(): { seq: number; epoch: number; text: string; bytes: number; muted: boolean } | null {
     const epoch = this.session.getResponseEpoch();
     if (this.cancelledEpoch !== null && epoch === this.cancelledEpoch) return null;
     // Also supports sessions that report only audio/transcript events.
@@ -1682,7 +1690,7 @@ export class VoiceCallBridge {
     }
     if (!this.current) {
       this.utteranceSeq += 1;
-      this.current = { seq: this.utteranceSeq, epoch, text: "", bytes: 0 };
+      this.current = { seq: this.utteranceSeq, epoch, text: "", bytes: 0, muted: false };
     }
     return this.current;
   }
@@ -1691,12 +1699,29 @@ export class VoiceCallBridge {
     if (this.ended) return;
     const current = this.openOrGetCurrent();
     if (!current) return;
-    current.text += delta;
     // The agent has begun answering, so what is owed is now THIS
     // utterance's audio, not a response. The scheduling bridge set this at
     // render time, when the renderer handed it the line; here the wire is
     // the first sign a response exists at all.
     this.armDeadAir("utterance");
+    if (current.muted) return;
+    current.text += delta;
+    /**
+     * v275: PROVIDER MARKUP IS NEVER THE AGENT'S WORDS (providerMarkup.ts).
+     * From the first tag on, the utterance is muted: its text stops here, and
+     * its audio is no longer sent to Twilio (handleAudioDelta). What came
+     * before the tag is kept and plays as it was. Audio already sent cannot
+     * be recalled, and a Twilio `clear` would also drop the clean words
+     * before the tag (often the goodbye), so none is sent.
+     */
+    const at = providerMarkupIndex(current.text);
+    if (at >= 0) {
+      current.text = current.text.slice(0, at);
+      // The words before the tag are still the agent's and are still checked.
+      if (current.text.trim()) this.checkGuardrails(current);
+      this.muteForMarkup(current);
+      return;
+    }
     this.checkGuardrails(current);
   }
 
@@ -1815,6 +1840,13 @@ export class VoiceCallBridge {
     // cancelled line straight back is the one thing `clear` exists to
     // prevent.
     if (!current) return;
+    // v275: audio of an utterance muted at a provider tag is not the agent's
+    // words either; it is not sent. The utterance is still owed its
+    // completion, so the stall clock keeps running.
+    if (current.muted) {
+      this.armDeadAir("utterance");
+      return;
+    }
     const forwarded = Buffer.from(base64Audio, "base64").length;
     current.bytes += forwarded;
     // AND THE CALLER'S SILENCE BOUND COUNTS IT HERE, at the moment it is handed
@@ -2167,8 +2199,19 @@ export class VoiceCallBridge {
 
     // Prefer the wire's own completed transcript over the accumulated
     // deltas: it is the authoritative text and it arrives whole.
-    const text = (transcript ?? done.text).trim();
+    // v275: and never with provider markup in it — the text before the
+    // first tag is the line.
+    const wire = transcript ?? done.text;
+    if (providerMarkupIndex(wire) >= 0) this.muteForMarkup(done);
+    const text = withoutProviderMarkup(wire).trim();
     const markName = `utt-${done.seq}`;
+    // v275: what this response said, for a goodbye a tool answer follows
+    // (see `goodbyeThatEndsTheTurn`). Audio, not text, as ever.
+    if (done.bytes > 0 && text) {
+      if (this.responseSpeech?.epoch !== epoch) this.responseSpeech = { epoch, text: "", mark: markName };
+      this.responseSpeech.text += ` ${text}`;
+      this.responseSpeech.mark = markName;
+    }
     if (this.goodbyeResponse?.epoch === epoch) {
       if (done.bytes > 0 && text) {
         this.goodbyeResponse.text += ` ${text}`;
@@ -2584,7 +2627,15 @@ export class VoiceCallBridge {
   private followUpOwed = false;
   private awaitingToolResponseDone = false;
   /** v55 — see FollowUpStats. */
-  private readonly followUps = { owed: 0, requested: 0, toolCallsAfterDone: 0 };
+  private readonly followUps = { owed: 0, requested: 0, toolCallsAfterDone: 0, skippedAfterGoodbye: 0 };
+  /** v275: a tool answer owed a turn has something in it for the caller (see
+   * `toolCallSettled`). Cleared when the follow-up is decided. */
+  private owedAnswerHasWords = false;
+  /** v275: the words the current response spoke, and its latest mark. Kept
+   * apart from `goodbyeResponse`, which a tool call cancels. */
+  private responseSpeech: { epoch: number; text: string; mark: string } | null = null;
+  /** v275: see VoiceCallRecord.providerMarkupCuts. */
+  private providerMarkupCuts = 0;
   /** v165 — logging only: what became of the latest follow-up request. */
   /** Follow-up requests not yet answered by a created response, FIFO (the
    * session queues them the same way), as request timestamps. */
@@ -2645,6 +2696,9 @@ export class VoiceCallBridge {
     if (owesFollowUp) {
       this.followUpOwed = true;
       this.followUps.owed += 1;
+      // v275: an answer with something in it for the caller, or a caller
+      // still owed a reply, keeps the follow-up whatever was said before it.
+      if (leavesAnAnswer) this.owedAnswerHasWords = true;
     }
     // The model owes the caller words for this answer (v56) — unless the
     // tool said there is nothing in it to say (v217). An earlier sibling's
@@ -2787,6 +2841,63 @@ export class VoiceCallBridge {
     }, playbackMs + (this.deps.goodbyeGraceMs ?? GOODBYE_GRACE_MS));
   }
 
+  /**
+   * v275: the goodbye THIS response said, when it completes the caller's
+   * closing and nothing since asks for another turn: the caller has not spoken
+   * again or been left waiting, no transfer is running, and its audio was sent
+   * and marked. A tool in the response cancelled `goodbyeResponse`, so the
+   * response's own words are read from `responseSpeech`.
+   */
+  private goodbyeThatEndsTheTurn(): { epoch: number; conclusion: CallerConclusion; text: string; mark: string } | null {
+    const speech = this.responseSpeech;
+    if (!speech || speech.epoch !== this.session.getResponseEpoch()) return null;
+    if (this.transferInFlight || this.callerSpeaking || this.callerAwaitsAReply()) return null;
+    const conclusion = this.callerClosing;
+    if (!conclusion || !completesGoodbye(speech.text, conclusion)) return null;
+    return { epoch: speech.epoch, conclusion, text: speech.text, mark: speech.mark };
+  }
+
+  /** v275: end on the goodbye already said, through the same grace window
+   * as a goodbye with no tool after it. */
+  private skipFollowUpAfterGoodbye(goodbye: { epoch: number; conclusion: CallerConclusion; text: string; mark: string }): void {
+    this.followUps.skippedAfterGoodbye += 1;
+    this.goodbyeResponse = {
+      epoch: goodbye.epoch,
+      conclusion: goodbye.conclusion,
+      previousAgent: this.agentLineBeforeLastCaller(),
+      text: goodbye.text,
+      mark: goodbye.mark,
+      done: true,
+    };
+    this.armGoodbyeGrace();
+    console.info(
+      `[bridge] no follow-up after the goodbye on ${this.deps.context.callSid} — ` +
+        `the tool answer had nothing for the caller; ending on the goodbye grace`,
+    );
+  }
+
+  /** The agent line before the caller's last line, for a late caller
+   * transcript that fills `goodbyeResponse.conclusion`. */
+  private agentLineBeforeLastCaller(): string {
+    const lines = this.transcriptLog.lines;
+    for (let i = this.lastCallerLineIndex() - 1; i >= 0; i--) {
+      if (lines[i].startsWith("AGENT: ")) return lines[i].slice(7);
+    }
+    return "";
+  }
+
+  /** v275: stop an utterance at the provider's markup — see
+   * handleAgentTranscriptDelta. One count and one line per utterance. */
+  private muteForMarkup(utterance: { muted: boolean }): void {
+    if (utterance.muted) return;
+    utterance.muted = true;
+    this.providerMarkupCuts += 1;
+    console.warn(
+      `[bridge] provider markup in the agent's line on ${this.deps.context.callSid} — ` +
+        `the rest of the utterance is not played or recorded`,
+    );
+  }
+
   private maybeRequestFollowUp(): void {
     if (this.pendingToolCalls !== 0 || !this.followUpOwed) return;
     if (this.awaitingToolResponseDone) return;
@@ -2799,6 +2910,17 @@ export class VoiceCallBridge {
       return;
     }
     this.followUpOwed = false;
+    const owedAnswerHasWords = this.owedAnswerHasWords;
+    this.owedAnswerHasWords = false;
+    // v275: the agent has just said a goodbye that completes the caller's
+    // closing, and every answer owed a turn said it had nothing for the
+    // caller: there is no turn left to take. Asking for one is what made the
+    // model answer with markup ("<response_segment_0_already_spoken>…").
+    const goodbye = !this.endRequested && !owedAnswerHasWords ? this.goodbyeThatEndsTheTurn() : null;
+    if (goodbye) {
+      this.skipFollowUpAfterGoodbye(goodbye);
+      return;
+    }
     // A termination the guards allowed is already arming the hangup on
     // the goodbye's mark; a follow-up would speak over that gate.
     if (!this.endRequested) {
@@ -3538,6 +3660,7 @@ export class VoiceCallBridge {
         goodbyeGraceHangup: this.goodbyeGraceHangup,
         mediaGapHangup: this.mediaGapHangup,
         filedSilenceHangup: this.filedSilenceHangup,
+        providerMarkupCuts: this.providerMarkupCuts,
         ...(reason ? { teardownReason: reason } : {}),
         followUps: {
           ...this.followUps,
