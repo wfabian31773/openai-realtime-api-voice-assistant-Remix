@@ -26,7 +26,7 @@ const { askModelForTheRequest, readTheRequest } = await import('./requestFromThe
 
 const TRANSCRIPT = 'AGENT: How can I help?\nCALLER: Synthetic request words.';
 
-describe('v276: the production asker reads only an explicit null as no request', () => {
+describe('v277: the production asker reads only an explicit null as no request', () => {
   beforeEach(() => {
     replies.length = 0;
     delete process.env.REQUEST_FROM_RECORDING_DISABLED;
@@ -72,9 +72,18 @@ describe('v276: the production asker reads only an explicit null as no request',
     const reading = await readTheRequest(TRANSCRIPT, askModelForTheRequest, []);
     expect(reading.kind).toBe('unavailable');
   });
+
+  for (const text of ['...', '!?', '--', '…', '12345']) {
+    it(`a first answer of only "${text}" reaches the reader as unavailable, never as none (review of #532)`, async () => {
+      replies.push(JSON.stringify({ request: text }));
+      const reading = await readTheRequest(TRANSCRIPT, askModelForTheRequest, []);
+      expect(reading.kind).toBe('unavailable');
+    });
+  }
+
 });
 
-describe('v276: the second answer decides what the reader reads (review of #526)', () => {
+describe('v277: the second answer decides what the reader reads (review of #526)', () => {
   beforeEach(() => {
     replies.length = 0;
     delete process.env.REQUEST_FROM_RECORDING_DISABLED;
@@ -107,6 +116,15 @@ describe('v276: the second answer decides what the reader reads (review of #526)
     const reading = await readTheRequest(TRANSCRIPT, askModelForTheRequest, ['Mara', 'Quill']);
     expect(reading).toEqual({ kind: 'request', sentence: 'Wants a refill of eye drops.' });
   });
+
+  for (const text of ['...', '!?', '--', '12345']) {
+    it(`a second answer of only "${text}" is still a request, never a retraction (review of #532)`, async () => {
+      replies.push(JSON.stringify({ request: 'Mara Quill wants a refill.' }));
+      replies.push(JSON.stringify({ request: text }));
+      const reading = await readTheRequest(TRANSCRIPT, askModelForTheRequest, ['Mara', 'Quill']);
+      expect(reading).toEqual({ kind: 'request' });
+    });
+  }
 
   it('a second answer the model failed to give is still a request (the first had a topic)', async () => {
     replies.push(JSON.stringify({ request: 'Mara Quill wants a refill.' }));

@@ -347,6 +347,17 @@ function foldWords(s: string): string[] {
 }
 
 /**
+ * v277 (review of #532): an answer with no word `checkRequest` can read in it
+ * ("...", "--", digits alone, a script it folds to nothing) is not a sentence
+ * the model read. `checkRequest` would call it no_topic, because every word of
+ * an empty list carries no topic, and that would read as the model taking the
+ * request back. It is the reader failing.
+ */
+function carriesNoWords(s: string): boolean {
+  return foldWords(s).length === 0;
+}
+
+/**
  * A name broken into words the way the identity store folds a name
  * (`nameKey`: accents gone, an apostrophe, hyphen or full stop a space), then
  * anything else that is not a letter a space too. Both sides go through it, so
@@ -450,6 +461,10 @@ async function askOnce(
     );
     return { kind: "failed" };
   }
+  if (answer && typeof answer.request === "string" && answer.request.trim() && carriesNoWords(answer.request)) {
+    console.warn(`[REQUEST FROM RECORDING] the model answered${retry ? " the second ask" : ""} with no words${where}`);
+    return { kind: "failed" };
+  }
   if (!answer || typeof answer.request !== "string" || !answer.request.trim()) {
     // v241: counted, so the calls where the model read no request can be read
     // back by SID. Whether such a call should file at all is the operator's.
@@ -547,9 +562,10 @@ export async function readTheRequest(
     return { kind: "none" };
   }
   // v276 (review of #526): a blank sentence is not the explicit null that says
-  // nothing was asked, so it is the reader failing, not a reading.
-  if (!answer.request.trim()) {
-    console.warn(`[REQUEST FROM RECORDING] the reader answered a blank sentence — the request could not be read${where}`);
+  // nothing was asked, so it is the reader failing, not a reading. v277
+  // (review of #532): nor is a sentence with no words in it ("...").
+  if (carriesNoWords(answer.request)) {
+    console.warn(`[REQUEST FROM RECORDING] the reader answered a sentence with no words — the request could not be read${where}`);
     return { kind: "unavailable" };
   }
   const first = answer.request;
