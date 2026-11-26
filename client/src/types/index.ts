@@ -65,6 +65,8 @@ export interface CallLog {
   endTime?: string
   duration?: number
   transferredToHuman: boolean
+  /** How the runtime ended the call; 'transferred' covers a queue transfer, which never sets transferredToHuman. */
+  runtimeOutcome?: string | null
   humanAgentNumber?: string
   transcript?: string
   summary?: string
