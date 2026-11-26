@@ -1,5 +1,5 @@
 /**
- * v276, review of #526: the production asker parses the model's JSON. Only an
+ * v277 (review of #526, round 2): the production asker parses the model's JSON. Only an
  * explicit `"request": null` is the model saying the caller asked nothing; a
  * missing or mistyped field is an answer we cannot read, so the after-hours
  * floor must take it as the reader failing and never as "no request".
@@ -26,7 +26,7 @@ const { askModelForTheRequest, readTheRequest } = await import('./requestFromThe
 
 const TRANSCRIPT = 'AGENT: How can I help?\nCALLER: Synthetic request words.';
 
-describe('v276: the production asker reads only an explicit null as no request', () => {
+describe('v277: the production asker reads only an explicit null as no request', () => {
   beforeEach(() => {
     replies.length = 0;
     delete process.env.REQUEST_FROM_RECORDING_DISABLED;
@@ -65,5 +65,88 @@ describe('v276: the production asker reads only an explicit null as no request',
     replies.push(JSON.stringify({ request: null }));
     const reading = await readTheRequest(TRANSCRIPT, askModelForTheRequest, []);
     expect(reading.kind).toBe('none');
+  });
+
+  it('a blank sentence reaches the reader as unavailable, never as none (review of #526)', async () => {
+    replies.push(JSON.stringify({ request: '   ' }));
+    const reading = await readTheRequest(TRANSCRIPT, askModelForTheRequest, []);
+    expect(reading.kind).toBe('unavailable');
+  });
+
+  it('a sentence the model quoted is read without its quotes (review of #532)', async () => {
+    replies.push(JSON.stringify({ request: '"Wants a refill of eye drops."' }));
+    const reading = await readTheRequest(TRANSCRIPT, askModelForTheRequest, []);
+    expect(reading).toEqual({ kind: 'request', sentence: 'Wants a refill of eye drops.' });
+  });
+
+  for (const text of ['...', '!?', '--', '…', '12345', "'", "''", '"', "' '", "' ' '"]) {
+    it(`a first answer of only "${text}" reaches the reader as unavailable, never as none (review of #532)`, async () => {
+      replies.push(JSON.stringify({ request: text }));
+      const reading = await readTheRequest(TRANSCRIPT, askModelForTheRequest, []);
+      expect(reading.kind).toBe('unavailable');
+    });
+  }
+
+});
+
+describe('v277: the second answer decides what the reader reads (review of #526)', () => {
+  beforeEach(() => {
+    replies.length = 0;
+    delete process.env.REQUEST_FROM_RECORDING_DISABLED;
+  });
+
+  it('a second answer that names no topic is none', async () => {
+    replies.push(JSON.stringify({ request: 'Wants to speak with Mara Quill.' }));
+    replies.push(JSON.stringify({ request: 'Wants to speak with someone.' }));
+    const reading = await readTheRequest(TRANSCRIPT, askModelForTheRequest, ['Mara', 'Quill']);
+    expect(reading.kind).toBe('none');
+  });
+
+  it('a second answer with an explicit null is none', async () => {
+    replies.push(JSON.stringify({ request: 'Wants Mara Quill to call.' }));
+    replies.push(JSON.stringify({ request: null }));
+    const reading = await readTheRequest(TRANSCRIPT, askModelForTheRequest, ['Mara', 'Quill']);
+    expect(reading.kind).toBe('none');
+  });
+
+  it('a second answer that fails a content check too is still a request, with no sentence', async () => {
+    replies.push(JSON.stringify({ request: 'Mara Quill wants a refill.' }));
+    replies.push(JSON.stringify({ request: 'Mara wants a refill of drops.' }));
+    const reading = await readTheRequest(TRANSCRIPT, askModelForTheRequest, ['Mara', 'Quill']);
+    expect(reading).toEqual({ kind: 'request' });
+  });
+
+  it('a second answer that is clean is the request, with its sentence', async () => {
+    replies.push(JSON.stringify({ request: 'Mara Quill wants a refill of her drops.' }));
+    replies.push(JSON.stringify({ request: 'Wants a refill of eye drops.' }));
+    const reading = await readTheRequest(TRANSCRIPT, askModelForTheRequest, ['Mara', 'Quill']);
+    expect(reading).toEqual({ kind: 'request', sentence: 'Wants a refill of eye drops.' });
+  });
+
+  for (const text of ['...', '!?', '--', '12345', "'", "''", '"', "' '"]) {
+    it(`a second answer of only "${text}" is unavailable, never a retraction (review of #532)`, async () => {
+      replies.push(JSON.stringify({ request: 'Mara Quill wants a refill.' }));
+      replies.push(JSON.stringify({ request: text }));
+      const reading = await readTheRequest(TRANSCRIPT, askModelForTheRequest, ['Mara', 'Quill']);
+      expect(reading).toEqual({ kind: 'unavailable' });
+    });
+  }
+
+  it('a second answer the model failed to give is unavailable, never a request (review of #532)', async () => {
+    replies.push(JSON.stringify({ request: 'Mara Quill wants a refill.' }));
+    replies.push('{}');
+    const reading = await readTheRequest(TRANSCRIPT, askModelForTheRequest, ['Mara', 'Quill']);
+    expect(reading).toEqual({ kind: 'unavailable' });
+  });
+
+  it('a second ask that throws is unavailable (review of #532)', async () => {
+    let calls = 0;
+    const ask = async () => {
+      calls += 1;
+      if (calls === 1) return { request: 'Wants to speak with Mara Quill.' };
+      throw new Error('timeout');
+    };
+    const reading = await readTheRequest(TRANSCRIPT, ask, ['Mara', 'Quill']);
+    expect(reading).toEqual({ kind: 'unavailable' });
   });
 });

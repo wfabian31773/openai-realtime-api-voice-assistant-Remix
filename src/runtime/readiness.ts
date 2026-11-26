@@ -2251,9 +2251,19 @@ import { callEnvironment } from "./callRecord";
  * only under a name, with FLOOR_REQUEST_NOT_CONFIRMED_NOTE; a records request
  * is not read and files to Medical Records as before.
  * Above v275 (#524). No migration.
+ *
+ * v277 — THE HEARD NAME IS HELD AND ONLY A NULL IS NO REQUEST (2026-11-26).
+ * #526 merged at `62b8d8d9` before its round-2 review fixes. The floor now
+ * reads the name heard on the recording before the request and holds it
+ * beside a certain identity's names, so a request that only names the
+ * patient is refused, and a second answer that says nothing was asked, is
+ * the placeholder or names no topic is no request. A blank first answer is
+ * the reader failing (unavailable); a retry that answers an explicit null is
+ * no request (AskAnswer keeps none apart from failed). Above main's v276
+ * (#526, `184fcecf`). No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v276-the-after-hours-floor-files-only-an-identified-request-20261126";
+  "voice-runtime-v277-the-heard-name-is-held-and-only-a-null-is-no-request-20261126";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
