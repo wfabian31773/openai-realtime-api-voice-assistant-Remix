@@ -104,6 +104,27 @@ export const RUNTIME_DELETED_REFUSAL =
 /** The fields an edit may change on a runtime campaign. */
 const RUNTIME_EDITABLE_FIELDS = new Set(["description"]);
 
+export const RUNTIME_TYPE_RESERVED_REFUSAL =
+  "The runtime_outbound campaign type is reserved for the campaigns the voice runtime creates " +
+  "itself. A campaign cannot be created as one, or changed into one, here.";
+
+/**
+ * True when a create or an edit would make a campaign a runtime outbound one.
+ * The runtime finds its campaign by name and type, oldest live row first
+ * (src/runtime/outbound/store.ts campaignIdFor), so an older campaign changed
+ * into that type under a runtime campaign's name would become the one it
+ * dials from, with none of the real campaign's contacts or attempts, and the
+ * caps would count from zero (review of #531, round 3).
+ */
+export function reservesRuntimeType(body: unknown): boolean {
+  return (
+    !!body &&
+    typeof body === "object" &&
+    !Array.isArray(body) &&
+    (body as Record<string, unknown>).campaignType === RUNTIME_OUTBOUND_CAMPAIGN_TYPE
+  );
+}
+
 export const RUNTIME_STATUS_EDIT_REFUSAL =
   "A runtime outbound campaign's status is changed with Pause, Resume and Cancel, which need an " +
   "admin or a manager. The edit form changes only its description.";
@@ -162,7 +183,8 @@ export function runtimeCampaignEditRefusal(
   campaign: RuntimeCampaignRow | null | undefined,
   updates: unknown,
 ): string | null {
-  if (!campaign || !isRuntimeCampaign(campaign)) return null;
+  if (!campaign) return null;
+  if (!isRuntimeCampaign(campaign)) return reservesRuntimeType(updates) ? RUNTIME_TYPE_RESERVED_REFUSAL : null;
   if (!updates || typeof updates !== "object" || Array.isArray(updates)) {
     return "A runtime outbound campaign's edit form changes only its description.";
   }

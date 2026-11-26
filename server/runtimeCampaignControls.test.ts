@@ -14,6 +14,8 @@ import {
   runtimeCampaignControl,
   runtimeCampaignEditRefusal,
   RUNTIME_STATUS_EDIT_REFUSAL,
+  RUNTIME_TYPE_RESERVED_REFUSAL,
+  reservesRuntimeType,
   type RuntimeCampaignAction,
 } from "./runtimeCampaignControls";
 
@@ -125,6 +127,19 @@ describe("an edit (PATCH) of a runtime campaign", () => {
     expect(runtimeCampaignEditRefusal(OLD, { status: "paused" })).toBeNull();
     expect(runtimeCampaignEditRefusal(undefined, { name: "renamed" })).toBeNull();
   });
+
+  it("never changes another campaign into a runtime one, which could become the row the runtime dials from (review of #531, round 3)", () => {
+    expect(runtimeCampaignEditRefusal(OLD, { campaignType: "runtime_outbound" })).toBe(RUNTIME_TYPE_RESERVED_REFUSAL);
+    expect(runtimeCampaignEditRefusal(OLD, { campaignType: "runtime_outbound", name: "npx-outreach", status: "running" })).toBe(RUNTIME_TYPE_RESERVED_REFUSAL);
+    expect(runtimeCampaignEditRefusal(OLD, { campaignType: "call" })).toBeNull();
+  });
+
+  it("reservesRuntimeType reads only the runtime type, on an object body", () => {
+    expect(reservesRuntimeType({ campaignType: "runtime_outbound", name: "x" })).toBe(true);
+    for (const body of [{ campaignType: "call" }, { name: "npx-outreach" }, null, [], "runtime_outbound", { campaign_type: "runtime_outbound" }]) {
+      expect(reservesRuntimeType(body), JSON.stringify(body)).toBe(false);
+    }
+  });
 });
 
 describe("the routes ask before the old code acts", () => {
@@ -179,6 +194,14 @@ describe("the routes ask before the old code acts", () => {
     const asked = body.indexOf("await runtimeControlFor('start', campaign)");
     expect(asked).toBeGreaterThan(0);
     expect(asked).toBeLessThan(body.indexOf("createScheduler({"));
+  });
+
+  it("create: refuses the runtime type before a campaign is created", () => {
+    const body = routeBody("app.post('/api/campaigns', isAuthenticated");
+    const asked = body.indexOf("if (reservesRuntimeType(req.body))");
+    expect(asked).toBeGreaterThan(0);
+    expect(body.indexOf("RUNTIME_TYPE_RESERVED_REFUSAL", asked)).toBeGreaterThan(asked);
+    expect(asked).toBeLessThan(body.indexOf("storage.createCampaign(campaignData)"));
   });
 
   it("patch: refuses an edit before it is written", () => {

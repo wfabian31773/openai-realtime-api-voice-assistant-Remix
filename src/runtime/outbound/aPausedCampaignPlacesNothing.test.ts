@@ -304,6 +304,17 @@ describe("a staff-approved SI Assistant call on a paused campaign", () => {
     expect((await evaluateAndEnqueueCall(store, { ...input, approvalId: "a2" }, NOW, true)).ok).toBe(true);
   });
 
+  it("a status that cannot be read is a definite not-sent, and nothing is written (review of #531, round 3)", async () => {
+    const store = new FakeOutboundStore(() => NOW);
+    store.campaignRunState = async () => {
+      throw new Error("db down");
+    };
+    expect(await evaluateAndEnqueueCall(store, input, NOW)).toEqual({ ok: false, reason: "campaign_status_unreadable" });
+    expect(await store.sourceRows(store.campaignId)).toHaveLength(0);
+    // A live approval never reads it.
+    expect((await evaluateAndEnqueueCall(store, { ...input, approvalId: "a2" }, NOW, true)).ok).toBe(true);
+  });
+
   it("is queued on a running campaign (the control)", async () => {
     const store = new FakeOutboundStore(() => NOW);
     expect((await evaluateAndEnqueueCall(store, input, NOW)).ok).toBe(true);
@@ -311,7 +322,7 @@ describe("a staff-approved SI Assistant call on a paused campaign", () => {
 
   it("the commit answers 503, which the fleet reads as not sent", () => {
     const src = readFileSync("src/plugin/routes.ts", "utf8");
-    expect(src).toContain('if (reason === "no_campaign" || reason === "campaign_paused") return 503;');
+    expect(src).toContain('if (reason === "no_campaign" || reason === "campaign_paused" || reason === "campaign_status_unreadable") return 503;');
   });
 });
 

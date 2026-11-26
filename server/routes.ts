@@ -24,7 +24,7 @@ import { opsHubAgentScorecards, todayOverview } from './observatory/queries';
 import { mountOperationsMonitor, readOperations } from './observatory/operations';
 import { urgentCondition, urgentFields, urgentWindow } from './urgentCalls';
 import { withRuntimeCounts } from './campaignCounts';
-import { runtimeCampaignControl, runtimeCampaignEditRefusal, type RuntimeCampaignAction } from './runtimeCampaignControls';
+import { RUNTIME_TYPE_RESERVED_REFUSAL, reservesRuntimeType, runtimeCampaignControl, runtimeCampaignEditRefusal, type RuntimeCampaignAction } from './runtimeCampaignControls';
 
 // Hybrid authentication middleware - supports both Replit Auth and custom auth
 const isAuthenticated = (req: Request, res: Response, next: NextFunction) => {
@@ -850,6 +850,11 @@ export async function registerRoutes(app: Express): Promise<Server> {
         userId = req.user.claims.sub;
       }
       
+      // The runtime creates its own campaigns; one created as that type here
+      // could become the row it dials from (server/runtimeCampaignControls.ts).
+      if (reservesRuntimeType(req.body)) {
+        return res.status(409).json({ success: false, message: RUNTIME_TYPE_RESERVED_REFUSAL });
+      }
       const campaignData = {
         ...req.body,
         createdBy: userId,
