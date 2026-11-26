@@ -91,7 +91,7 @@ vi.mock('../../server/services/ticketingApiClient', () => ({
     r?.outcome === 'unavailable' || r?.success === false,
 }));
 
-const { TicketOutboxService, wrapCreateTicketPayload, afterRefusal, routingFieldRefused, heldRoutingExitNote, heldBeforeRoutingExit } =
+const { TicketOutboxService, wrapCreateTicketPayload, afterRefusal, routingFieldRefused, heldRoutingExitNote, firstFilingWithoutTheExit } =
   await import('./ticketOutboxService');
 
 describe('checking whether an outbox payload was refused', () => {
@@ -337,7 +337,10 @@ describe('a refusal from the far side is not retried', () => {
   });
 
   it('leaves the payload intact so it can be replayed by hand', async () => {
-    createTicket.mockResolvedValue({ success: false, statusCode: 400, error: 'Missing required information: office' });
+    // Not the office: since v278 an Optical first filing refused for its office
+    // takes the unassigned exit instead of dead-lettering (the v278 describes
+    // below). Any other field still dead-letters, which is what this pins.
+    createTicket.mockResolvedValue({ success: false, statusCode: 400, error: 'Missing required information: patientFirstName' });
     updateResults.push(entry(wrapCreateTicketPayload(OPTICAL_OTHER), { retryCount: 0 }), undefined);
 
     await TicketOutboxService.attemptSend('ob-1');
@@ -936,58 +939,46 @@ describe('v278: a held request refused on its replay for its routing field', () 
 
 
 /**
- * v278: A ROW HELD BEFORE THIS BUILD carries no routing exit (github-actions
- * review of #533, on `5019b48` and `1567c4a`). A first filing written before
- * this process started takes the exit as if it had stored it; a later
- * addition, a row this process wrote, and everything the exit already refuses
- * (a live caller, another field, another department) dead-letter as before.
+ * v278: A FIRST FILING WRITTEN BEFORE THIS BUILD carries no routing exit
+ * (github-actions review of #533, on `5019b48`, `1567c4a` and `4fe1944`). It
+ * takes the exit as if it had stored it, whenever it was written; a later
+ * addition, and everything the exit already refuses (a live caller, another
+ * field, another department, a payload that has taken it), dead-letter as
+ * before.
  */
-describe('v278: a row held before the exit existed', () => {
+describe('v278: a first filing written before the exit existed', () => {
   beforeEach(() => {
     createTicket.mockReset();
     createTicket.mockResolvedValue({ success: true, ticketNumber: 'VA-52100', ticketId: 9001 });
   });
   const legacy = (params: Record<string, unknown> = HELD_SURGERY) => wrapCreateTicketPayload(params as never);
-  const BEFORE = new Date(0);
+  const LATER = new Date(Date.now() + 60_000);
   const storedPayload = () => setPayloads.find((p) => p.status === 'pending' && 'payload' in p)?.payload;
 
   it.each([
-    ['a first filing written before this process', { idempotencyKey: 'call-CA0001', createdAt: BEFORE }, true],
-    ['a first filing with no key, written before', { idempotencyKey: null, createdAt: BEFORE }, true],
-    ['a later addition', { idempotencyKey: 'call-CA0001-add-abc123', createdAt: BEFORE }, false],
-    ['a row this process wrote', { idempotencyKey: 'call-CA0001', createdAt: new Date(Date.now() + 60_000) }, false],
-    ['a row with no created time', { idempotencyKey: 'call-CA0001' }, false],
-    ['a created time that is not a date', { idempotencyKey: 'call-CA0001', createdAt: '1970-01-01' }, false],
+    ['a first filing', { idempotencyKey: 'call-CA0001' }, true],
+    ['a first filing with no key', { idempotencyKey: null }, true],
+    ['a first filing an old instance wrote after this one started', { idempotencyKey: 'call-CA0001', createdAt: LATER }, true],
+    ['a later addition', { idempotencyKey: 'call-CA0001-add-abc123' }, false],
   ])('%s: %s', (_label, row, expected) => {
-    expect(heldBeforeRoutingExit({ payload: legacy(), ...row })).toBe(expected);
+    expect(firstFilingWithoutTheExit({ payload: legacy(), ...row })).toBe(expected);
   });
 
   it('is never a row that stored its own exit, or a queue payload', () => {
-    expect(heldBeforeRoutingExit({
+    expect(firstFilingWithoutTheExit({
       payload: wrapCreateTicketPayload(HELD_SURGERY as never, { routingExit: true }),
       idempotencyKey: 'call-CA0001',
-      createdAt: BEFORE,
     })).toBe(false);
-    expect(heldBeforeRoutingExit({ payload: { ...HELD_SURGERY }, idempotencyKey: 'call-CA0001', createdAt: BEFORE }))
-      .toBe(false);
+    expect(firstFilingWithoutTheExit({ payload: { ...HELD_SURGERY }, idempotencyKey: 'call-CA0001' })).toBe(false);
   });
 
-  it('reads the process start it is given, not the wall clock', () => {
-    const at = new Date('2026-11-26T15:00:00Z');
-    expect(heldBeforeRoutingExit({ payload: legacy(), idempotencyKey: 'call-CA0001', createdAt: at }, at.getTime() + 1))
-      .toBe(true);
-    expect(heldBeforeRoutingExit({ payload: legacy(), idempotencyKey: 'call-CA0001', createdAt: at }, at.getTime()))
-      .toBe(false);
-  });
-
-  it('the old row replays once with the exit and the staff note', async () => {
+  it.each([
+    ['written before this process started', new Date(0)],
+    ['written by an old instance after this one started', LATER],
+  ])('the old row %s replays once with the exit and the staff note', async (_label, createdAt) => {
     createTicket.mockResolvedValueOnce(SURGEON_400).mockResolvedValueOnce({ success: true, ticketNumber: 'VA-90004' });
-    updateResults.push(
-      entry(legacy(), { idempotencyKey: 'call-CA0001', createdAt: BEFORE }),
-      [{ id: 'ob-1' }],
-      () => entry(storedPayload(), { idempotencyKey: 'call-CA0001', createdAt: BEFORE }),
-      undefined,
-    );
+    const row = { idempotencyKey: 'call-CA0001', createdAt };
+    updateResults.push(entry(legacy(), row), [{ id: 'ob-1' }], () => entry(storedPayload(), row), undefined);
 
     const res = await TicketOutboxService.attemptSend('ob-1');
 
@@ -1002,12 +993,8 @@ describe('v278: a row held before the exit existed', () => {
 
   it('the old row refused again is a dead letter after two POSTs', async () => {
     createTicket.mockResolvedValue(SURGEON_400);
-    updateResults.push(
-      entry(legacy(), { idempotencyKey: 'call-CA0001', createdAt: BEFORE }),
-      [{ id: 'ob-1' }],
-      () => entry(storedPayload(), { idempotencyKey: 'call-CA0001', createdAt: BEFORE }),
-      undefined,
-    );
+    const row = { idempotencyKey: 'call-CA0001' };
+    updateResults.push(entry(legacy(), row), [{ id: 'ob-1' }], () => entry(storedPayload(), row), undefined);
 
     const res = await TicketOutboxService.attemptSend('ob-1');
 
@@ -1016,9 +1003,8 @@ describe('v278: a row held before the exit existed', () => {
   });
 
   it.each([
-    ['a later addition', { idempotencyKey: 'call-CA0001-add-abc123', createdAt: BEFORE }, {}],
-    ['a row this process wrote', { idempotencyKey: 'call-CA0001', createdAt: new Date(Date.now() + 60_000) }, {}],
-    ['a send the caller sees', { idempotencyKey: 'call-CA0001', createdAt: BEFORE }, { liveCaller: true }],
+    ['a later addition', { idempotencyKey: 'call-CA0001-add-abc123' }, {}],
+    ['a send the caller sees', { idempotencyKey: 'call-CA0001' }, { liveCaller: true }],
   ])('%s dead-letters after one POST, as on main', async (_label, row, options) => {
     createTicket.mockResolvedValueOnce(SURGEON_400);
     updateResults.push(entry(legacy(), row), undefined);
@@ -1031,7 +1017,7 @@ describe('v278: a row held before the exit existed', () => {
   });
 
   it('the old row still needs the exit\'s own conditions', () => {
-    const asIf = { heldBeforeTheExit: true };
+    const asIf = { firstFilingWithoutTheExit: true };
     expect(afterRefusal(legacy(), { ...asIf, error: 'Missing required information: patientFirstName' })).toBeUndefined();
     expect(afterRefusal(legacy({ ...HELD_SURGERY, departmentId: 3 }), { ...asIf, error: SURGEON_400.error })).toBeUndefined();
     expect(afterRefusal(legacy({ ...HELD_SURGERY, routingAskExhausted: true }), { ...asIf, error: SURGEON_400.error }))
@@ -1039,5 +1025,16 @@ describe('v278: a row held before the exit existed', () => {
     expect(afterRefusal(legacy({ ...HELD_SURGERY, departmentId: 1 }), { ...asIf, error: 'Missing required information: office' })
       ?.params.routingAskExhausted).toBe(true);
     expect(afterRefusal(legacy(), { error: SURGEON_400.error })).toBeUndefined();
+  });
+
+  it('only three writers put a create_ticket_v1 row in the outbox, and only additions skip the exit', () => {
+    const src = readFileSync(new URL('./durableTicketFiling.ts', import.meta.url), 'utf8');
+    const writes = src.match(/writeToOutbox\(\s*wrapCreateTicketPayload\([^)]*\)/g) ?? [];
+    expect(writes).toEqual([
+      expect.stringMatching(/wrapCreateTicketPayload\(params\)$/),
+      'writeToOutbox(wrapCreateTicketPayload(params, fallback)',
+      'writeToOutbox(wrapCreateTicketPayload(params, fallback)',
+    ]);
+    expect(src).toMatch(/wrapCreateTicketPayload\(params\),\s*`\$\{outboxKey\}-add-\$\{fingerprint\}`/);
   });
 });

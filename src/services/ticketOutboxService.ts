@@ -132,40 +132,26 @@ export function heldRoutingExitNote(field: 'office' | 'surgeon'): string {
 }
 
 /**
- * When this process started. A row written before it was written by the build
- * the deploy replaced, which is the only writer that never stored the routing
- * exit (`heldBeforeRoutingExit`).
- */
-const PROCESS_STARTED_AT_MS = Date.now();
-
-/**
- * A row held before v278 carries no `refusalFallback.routingExit`, because the
- * build that wrote it never stored one (the github-actions review of #533, on
- * `5019b48` and again on `1567c4a`). Such a row is read as a first filing that
- * would have stored it when all of these hold:
- *
- * - it was written before this process started, so the rule reaches only the
- *   queue the deploy found; a held row settles within about 3.5 hours of
- *   retries, and after that nothing can match;
- * - its key is not a later addition's (`<key>-add-<fingerprint>`, from
- *   `forwardRepeatFiling`), which never takes the exit;
- * - it carries no routing exit of its own.
- *
- * `afterRefusal` still needs everything else it needs for the exit: a
- * department that routes by a field, a payload that has not taken it, a send
- * nobody is on the line for, and a refusal naming that field. Measured on the
- * Hub before this was added: 0 rows pending, failed or sending at 13:48 and at
+ * A first filing written by a build before v278 carries no
+ * `refusalFallback.routingExit` (github-actions review of #533, on `5019b48`
+ * and `1567c4a`). Only three writers put a `create_ticket_v1` row in the
+ * outbox: `createTicketDurable`'s two first-filing paths, which since v278
+ * always store the exit for a department that routes by a field, and
+ * `forwardRepeatFiling`'s later additions (`<key>-add-<fingerprint>`), which
+ * never take it. So a row whose key is not an addition's and which stored no
+ * exit is a first filing from the build the deploy replaced, whenever it was
+ * written: an old instance still running beside the new one during a deploy
+ * included (github-actions review of #533, on `4fe1944`, which is why no
+ * process-start cutoff is read). `afterRefusal` still needs everything else it
+ * needs for the exit: a department that routes by a field, a payload that has
+ * not taken it, a send nobody is on the line for, and a refusal naming that
+ * field. Measured on the Hub: 0 rows pending, failed or sending at 13:48 and
  * 15:00 UTC on 2026-11-26.
  */
-export function heldBeforeRoutingExit(
-  row: { payload?: unknown; idempotencyKey?: string | null; createdAt?: unknown },
-  processStartedAtMs: number = PROCESS_STARTED_AT_MS,
-): boolean {
+export function firstFilingWithoutTheExit(row: { payload?: unknown; idempotencyKey?: string | null }): boolean {
   if (!isCreateTicketPayload(row.payload)) return false;
   if (row.payload.refusalFallback?.routingExit === true) return false;
-  if (typeof row.idempotencyKey === 'string' && row.idempotencyKey.includes('-add-')) return false;
-  const created = row.createdAt instanceof Date ? row.createdAt.getTime() : Number.NaN;
-  return Number.isFinite(created) && created < processStartedAtMs;
+  return !(typeof row.idempotencyKey === 'string' && row.idempotencyKey.includes('-add-'));
 }
 
 /** A payload the routing exit can still help: its department routes by a field, and it has not taken the exit. */
@@ -221,11 +207,11 @@ export function wrapCreateTicketPayload(
  */
 export function afterRefusal(
   payload: unknown,
-  refusal: { error?: string; liveCaller?: boolean; heldBeforeTheExit?: boolean } = {},
+  refusal: { error?: string; liveCaller?: boolean; firstFilingWithoutTheExit?: boolean } = {},
 ): CreateTicketOutboxPayload | undefined {
   if (!isCreateTicketPayload(payload)) return undefined;
   const { params, refusalFallback } = payload;
-  const routingExit = refusalFallback?.routingExit === true || refusal.heldBeforeTheExit === true;
+  const routingExit = refusalFallback?.routingExit === true || refusal.firstFilingWithoutTheExit === true;
   if (routingExit && !refusal.liveCaller && routingExitCanApply(params)) {
     const field = routingFieldRefused(params.departmentId, refusal.error);
     if (field) return { kind: CREATE_TICKET_PAYLOAD_KIND, params: withRoutingExit(params, field) };
@@ -619,7 +605,7 @@ export class TicketOutboxService {
         const next = afterRefusal(stored, {
           error,
           liveCaller: options.liveCaller,
-          heldBeforeTheExit: heldBeforeRoutingExit(entry),
+          firstFilingWithoutTheExit: firstFilingWithoutTheExit(entry),
         });
         if (next) {
           // Field names only: the app's own text can name the patient's office (v116).
