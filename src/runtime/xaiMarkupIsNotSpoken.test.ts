@@ -27,7 +27,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { VoiceCallBridge, type BridgeSessionHandlers, type CallOutcome, type VoiceCallRecord } from "./mediaStreamBridge";
 import { answeredQuestionResult } from "../agents/afterHoursAnsweredQuestion";
 import { followUpEvent } from "./followUpTelemetry";
-import { providerMarkupIndex, providerMarkupMayOpen, withoutAnyProviderMarkup, withoutProviderMarkup } from "./providerMarkup";
+import { bothReadings, providerMarkupIndex, providerMarkupMayOpen, withoutAnyProviderMarkup, withoutProviderMarkup } from "./providerMarkup";
 
 const ANSWERED = "record_answered_question";
 /** What a lookup or a filing answers: something the caller IS waiting on. */
@@ -1107,6 +1107,97 @@ describe("v275 round 8: what the caller heard decides the goodbye, and a lone \"
     expect(h.session.requestResponse.mock.calls.length).toBe(before + 1);
     await stop(h);
     expect(h.records[0].goodbyeGraceHangup).not.toBe(true);
+  });
+});
+
+describe("v275 round 9: a words-first line's goodbye is read from both of its transcripts", () => {
+  const stop = async (h: ReturnType<typeof harness>) => {
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" } as never);
+    await h.flush();
+  };
+
+  it("a question only the completed transcript carries is not a goodbye: the turn is asked for", async () => {
+    // github-actions P2 on a8e9e1e9: a words-first line's goodbye was read
+    // from the streamed text alone, so words the completed transcript added
+    // after the tag never reached the check.
+    const [, q, closing] = LEAD[0];
+    const h = harness();
+    await answeredThenClosing(h, q, closing);
+    const before = h.session.requestResponse.mock.calls.length;
+    await h.respond({
+      deltas: [`${GOODBYE} `, "<turn_end>"],
+      done: `${GOODBYE} <turn_end> Is there anything else?`,
+      tools: [[ANSWERED, { follow_up_owed: false }]],
+    });
+    expect(h.session.requestResponse.mock.calls.length).toBe(before + 1);
+    await stop(h);
+    expect(h.records[0].goodbyeGraceHangup).not.toBe(true);
+    // The stored line keeps the streamed cut.
+    expect(h.agentLines().slice(-1)[0]).toBe(`AGENT: ${GOODBYE}`);
+    expect(followUpEvent(h.records[0])?.data).toMatchObject({ skippedAfterGoodbye: 0 });
+  });
+
+  it("a completed transcript that disagrees with the deltas keeps the call open too", async () => {
+    const [, q, closing] = LEAD[0];
+    const h = harness();
+    await answeredThenClosing(h, q, closing);
+    const before = h.session.requestResponse.mock.calls.length;
+    await h.respond({
+      deltas: [`${GOODBYE} `, "<turn_end>"],
+      done: "Is there anything else I can help with? <turn_end>",
+      tools: [[ANSWERED, { follow_up_owed: false }]],
+    });
+    expect(h.session.requestResponse.mock.calls.length).toBe(before + 1);
+    await stop(h);
+    expect(h.records[0].goodbyeGraceHangup).not.toBe(true);
+  });
+
+  it("control: a completed transcript that matches the deltas still ends the call on the grace", async () => {
+    const [, q, closing] = LEAD[0];
+    const h = harness();
+    await answeredThenClosing(h, q, closing);
+    const before = h.session.requestResponse.mock.calls.length;
+    await h.respond({
+      deltas: [`${GOODBYE} `, "<turn_end>"],
+      done: `${GOODBYE} <turn_end>`,
+      tools: [[ANSWERED, { follow_up_owed: false }]],
+    });
+    expect(h.session.requestResponse.mock.calls.length).toBe(before);
+    await h.end();
+    expect(h.outcomes).toEqual(["agent_ended"]);
+    expect(h.records[0].goodbyeGraceHangup).toBe(true);
+  });
+
+  it("control: a completed transcript that drops the words after the tag still ends the call on the grace", async () => {
+    const [, q, closing] = LEAD[0];
+    const h = harness();
+    await answeredThenClosing(h, q, closing);
+    const before = h.session.requestResponse.mock.calls.length;
+    await h.respond({
+      deltas: [`${GOODBYE} `, "<turn_end>", " Take care."],
+      done: `${GOODBYE} <turn_end>`,
+      tools: [[ANSWERED, { follow_up_owed: false }]],
+    });
+    expect(h.session.requestResponse.mock.calls.length).toBe(before);
+    await h.end();
+    expect(h.records[0].goodbyeGraceHangup).toBe(true);
+  });
+});
+
+describe("bothReadings", () => {
+  it("one reading inside the other is the longer", () => {
+    expect(bothReadings("Have a good day!", "Have a good day! Is there anything else?")).toBe("Have a good day! Is there anything else?");
+    expect(bothReadings("Have a good day! Take care.", "Have a good day!")).toBe("Have a good day! Take care.");
+  });
+  it("readings that differ only in case and punctuation are one", () => {
+    expect(bothReadings("Great, have a good day!", "great have a good day")).toBe("Great, have a good day!");
+  });
+  it("readings that disagree are both kept", () => {
+    expect(bothReadings("Have a good day!", "Is there anything else?")).toBe("Have a good day! Is there anything else?");
+  });
+  it("an empty reading gives the other", () => {
+    expect(bothReadings("", "Bye.")).toBe("Bye.");
+    expect(bothReadings("Bye.", "  ")).toBe("Bye.");
   });
 });
 

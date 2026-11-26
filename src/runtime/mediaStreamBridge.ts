@@ -115,7 +115,7 @@ import { noteCallerTranscript } from "../services/symptomCorroboration";
 import { noteCallLanguage } from "../services/callLanguage";
 import { ghostCallRefusal } from "../services/ghostCallProtection";
 import { callerConclusion, completesGoodbye, type CallerConclusion } from "./goodbye";
-import { providerMarkupIndex, providerMarkupMayOpen, withoutAnyProviderMarkup, withoutProviderMarkup } from "./providerMarkup";
+import { bothReadings, providerMarkupIndex, providerMarkupMayOpen, withoutAnyProviderMarkup, withoutProviderMarkup } from "./providerMarkup";
 import {
   CallUsage,
   providerUsageMarker,
@@ -2307,14 +2307,18 @@ export class VoiceCallBridge {
     // question or a tool written out after the goodbye means it was not one
     // (#524 review, round 8). The stored line keeps the cut (`text`).
     // A line that opens with markup sent none of its audio, so nothing was
-    // heard; a lone "<" that never resolved set `audioOff` above.
-    const heardSource = done.heardText ?? wire;
+    // heard; a lone "<" that never resolved set `audioOff` above. A
+    // words-first line is read from its streamed text AND the completed
+    // transcript, which can carry words the deltas never did (#524 review,
+    // round 9); either reading's question keeps the call open.
     const heard =
       done.audioOff
         ? ""
-        : providerMarkupIndex(heardSource) >= 0
-          ? withoutAnyProviderMarkup(heardSource)
-          : text;
+        : done.heardText !== undefined
+          ? bothReadings(withoutAnyProviderMarkup(done.heardText), withoutAnyProviderMarkup(wire))
+          : providerMarkupIndex(wire) >= 0
+            ? withoutAnyProviderMarkup(wire)
+            : text;
     const markName = `utt-${done.seq}`;
     // v275: what this response said, for a goodbye a tool answer follows
     // (see `goodbyeThatEndsTheTurn`). Audio, not text, as ever.

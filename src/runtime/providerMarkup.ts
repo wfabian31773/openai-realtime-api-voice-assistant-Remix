@@ -52,3 +52,24 @@ export function providerMarkupMayOpen(text: string): boolean {
 export function withoutAnyProviderMarkup(text: string): string {
   return text.replace(/<\s*\/?\s*[A-Za-z_][^>]*>?/g, " ").replace(/\s+/g, " ").trim();
 }
+
+/**
+ * What a words-first line said, read from both of its transcripts: the
+ * streamed deltas and the provider's completed transcript. The audio plays
+ * whole, and the two can disagree, the completed one adding words the deltas
+ * never carried (#524 review, round 9: "Have a good day! <turn_end>" streamed,
+ * "Have a good day! Is there anything else?" completed). When one reading
+ * holds the other, the longer is what was said; when neither does, both are
+ * kept. A goodbye check reads this, so a question in either reading means it
+ * was not a goodbye: the check errs toward keeping the call open.
+ */
+export function bothReadings(streamed: string, completed: string): string {
+  const a = streamed.trim();
+  const b = completed.trim();
+  const key = (text: string) => text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+  const ka = key(a);
+  const kb = key(b);
+  if (!kb || ka.includes(kb)) return a;
+  if (!ka || kb.includes(ka)) return b;
+  return `${a} ${b}`;
+}
