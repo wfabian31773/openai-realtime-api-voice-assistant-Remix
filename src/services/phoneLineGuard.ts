@@ -7,8 +7,9 @@
  * - The action wrote `https://<DOMAIN>/api/voice/<slug>/incoming`. No route
  *   on either pipeline serves that path. The old core serves
  *   `/api/voice/<slug>` (no `/incoming`); the runtime serves `/voice/<slug>`.
- *   So the write could only ever point a number at a 404, and every caller
- *   on that number would hear Twilio's application error.
+ *   So the write could only ever point a number at a 404, and every call to
+ *   that number would fail (unless the number has a fallback URL set in
+ *   Twilio, which was not checked).
  * - Ten numbers carried runtime calls in the 14 days to 2026-11-26 (the
  *   number's last four digits): 0771 pcp, 1218 and 8277 surgery, 1543 and
  *   2449 no-ivr, 3027 npx-outreach, 3213 si-assistant, 3692 optical, 5645
