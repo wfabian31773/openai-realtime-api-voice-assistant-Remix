@@ -55,8 +55,9 @@ describe('every call-log route answers through it', () => {
 
   it('the list, the urgent list, the voicemail list, one call and the call page', () => {
     expect(routes).toContain('data: result.data.map(normalizeCallLog)');
-    expect(routes).toContain('data: urgentCalls.map(normalizeCallLog)');
-    expect(routes).toContain('const normalized = urgentCalls.map(normalizeCallLog)');
+    // The urgent list and its CSV add two fields beside the shape (urgentCalls.ts).
+    expect(routes).toContain('data: urgentCalls.map((c) => ({ ...normalizeCallLog(c), ...urgentFields(c) }))');
+    expect(routes).toContain('const normalized = urgentCalls.map((c) => ({ ...normalizeCallLog(c), ...urgentFields(c) }))');
     expect(routes).toContain('data: voicemails.map(normalizeCallLog)');
     expect(routes).toContain('res.json(normalizeCallLog(callLog))');
     expect(routes).toContain('callLog: normalizeCallLog(callLog)');
