@@ -373,6 +373,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (!callSid || !phone) {
         return res.status(400).json({ message: 'callSid and phone are required' });
       }
+      // A runtime call has no conference to join (listenIn.ts): say so, rather
+      // than searching and answering that the call "may have just ended".
+      const { listenInRefusal } = await import('./observatory/listenIn');
+      const refusal = listenInRefusal(await storage.getCallLogByCallSid(String(callSid)));
+      if (refusal) {
+        return res.status(409).json({ message: refusal });
+      }
       const client = await getTwilioClient();
       // Conferences are named conf_<CallSid> (with optional prefixes).
       const candidates = [`conf_${callSid}`, `outbound_conf_${callSid}`, `test_conf_${callSid}`];

@@ -4,6 +4,7 @@ import apiClient from '@/lib/apiClient'
 import { describePipeline } from '@/lib/pipelineSplit'
 import { briefCorrectionNotice, briefNeighbours } from '@/lib/briefDayPicker'
 import { LIVE_WINDOW_MINUTES, liveCalls } from '@/lib/liveCalls'
+import { listenInUnavailableReason } from '@/lib/listenIn'
 import { AccuracyTab } from '@/components/observatory/AccuracyTab'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
@@ -260,6 +261,8 @@ interface LiveOpsCall {
   createdAt: string
   agentUsed: string | null
   transcript: string | null
+  /** Set on a runtime call, which has no conference to listen in on. */
+  voiceProvider?: string | null
 }
 
 interface GraderCheckStat {
@@ -1635,10 +1638,32 @@ function elapsed(since: string | null): string {
   return `${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`
 }
 
-function ListenInButton({ callSid, fromNumber }: { callSid: string | null; fromNumber: string | null }) {
+function ListenInButton({
+  callSid,
+  fromNumber,
+  voiceProvider,
+}: {
+  callSid: string | null
+  fromNumber: string | null
+  voiceProvider?: string | null
+}) {
   const [state, setState] = useState<'idle' | 'dialing' | 'joined' | 'error'>('idle')
   const [err, setErr] = useState<string | null>(null)
   if (!callSid) return null
+  // A runtime call has no conference to join, so the button is shown disabled
+  // with the reason rather than dialling and failing (see listenIn.ts).
+  const unavailable = listenInUnavailableReason({ voiceProvider })
+  if (unavailable) {
+    return (
+      <button
+        disabled
+        className="cursor-not-allowed rounded-md border border-input px-2 py-0.5 text-xs font-medium text-muted-foreground opacity-60"
+        title={unavailable}
+      >
+        🎧 Listen in unavailable
+      </button>
+    )
+  }
   const join = async () => {
     const stored = localStorage.getItem('obs-supervisor-phone') ?? ''
     const phone = window.prompt('Dial your phone into this call, muted. Your number:', stored)
@@ -1685,7 +1710,7 @@ function LiveOpsCallCard({ call }: { call: LiveOpsCall }) {
         </span>
         <span className="flex items-center gap-3">
           <span className="font-mono">{elapsed(call.startTime ?? call.createdAt)}</span>
-          <ListenInButton callSid={call.callSid} fromNumber={call.to} />
+          <ListenInButton callSid={call.callSid} fromNumber={call.to} voiceProvider={call.voiceProvider} />
           <button className="text-xs text-primary hover:underline" onClick={() => setExpanded(!expanded)}>
             {expanded ? 'hide transcript ▴' : 'transcript ▾'}
           </button>
