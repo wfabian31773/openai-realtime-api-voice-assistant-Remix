@@ -37,6 +37,13 @@ vi.mock('../../server/db', () => ({
   },
 }));
 
+// The real getEnvironmentConfig validates DATABASE_URL and friends; the
+// write path only asks it whether this is production.
+vi.mock('../config/environment', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../config/environment')>()),
+  getEnvironmentConfig: () => ({ isProduction: false }),
+}));
+
 vi.mock('../lib/twilioClient', () => ({
   getTwilioAccountSid: () => 'ACtest',
   getTwilioClient: async () => ({
