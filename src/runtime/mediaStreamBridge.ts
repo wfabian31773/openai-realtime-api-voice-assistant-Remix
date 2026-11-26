@@ -1726,7 +1726,7 @@ export class VoiceCallBridge {
       current.text = current.text.slice(0, at);
       // The words before the tag are still the agent's and are still checked.
       if (current.text.trim()) this.checkGuardrails(current);
-      current.audioBudget = Math.max(current.bytes, audioForWordsBeforeMarkup(current.text));
+      current.audioBudget = audioForWordsBeforeMarkup(current.text);
       this.muteForMarkup(current);
       return;
     }
