@@ -7,6 +7,7 @@ import { storage } from "./storage";
 import { setupAuth, isAuthenticated as isReplitAuthenticated } from "./replitAuth";
 import { authRouter, requireRole, requireManager } from "./auth";
 import { toolPayloadsForCall } from "./toolPayloadsRead";
+import { mountCampaignContactReads, campaignErrorForLog } from "./campaignContactsView";
 import { agentPromptWriteRefusal, AGENT_PROMPT_WRITE_STATUS } from "./agentPromptSurface";
 import multer from "multer";
 import { parse } from "csv-parse/sync";
@@ -967,21 +968,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
         appointmentsWithDates: createdContacts.filter(c => c.appointmentDate).length,
       });
     } catch (error) {
-      console.error("Error uploading contacts:", error);
+      // Never the error itself: a failed insert's message carries every row.
+      console.error("Error uploading contacts:", campaignErrorForLog(error));
       res.status(500).json({ message: "Failed to upload contacts" });
     }
   });
 
-  // Get campaign contacts
-  app.get('/api/campaigns/:id/contacts', isAuthenticated, async (req, res) => {
-    try {
-      const contacts = await storage.getCampaignContacts(req.params.id);
-      res.json(contacts);
-    } catch (error) {
-      console.error("Error fetching campaign contacts:", error);
-      res.status(500).json({ message: "Failed to fetch campaign contacts" });
-    }
-  });
+  // A campaign's contacts and one contact's attempts, as the Campaigns screen
+  // shows them: name, phone last 4 and status, never a date of birth or the
+  // row's custom_data (server/campaignContactsView.ts).
+  mountCampaignContactReads(app, { authenticate: isAuthenticated, storage });
 
   // ==================== Schedule Query for Campaign Building ====================
   
@@ -1354,7 +1350,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
           message: "Schedule data is not available in development. Use CSV upload instead, or test in production." 
         });
       }
-      console.error("Error populating contacts from schedule:", error);
+      // Never the error itself: a failed insert's message carries every row.
+      console.error("Error populating contacts from schedule:", campaignErrorForLog(error));
       res.status(500).json({ message: "Failed to populate contacts from schedule" });
     }
   });
@@ -1635,18 +1632,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
         success: false,
         message: "Failed to fetch campaign progress",
       });
-    }
-  });
-
-  // Get attempt history for a specific contact
-  app.get('/api/campaigns/:campaignId/contacts/:contactId/attempts', isAuthenticated, async (req, res) => {
-    try {
-      const { contactId } = req.params;
-      const attempts = await storage.getContactAttempts(contactId);
-      res.json(attempts);
-    } catch (error) {
-      console.error("[API] Error fetching contact attempts:", error);
-      res.status(500).json({ message: "Failed to fetch contact attempts" });
     }
   });
 
