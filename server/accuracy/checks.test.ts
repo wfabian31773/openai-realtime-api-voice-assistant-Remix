@@ -42,7 +42,7 @@ function deps(screens: Partial<ScreenReaders>, truth = TRUTH): AccuracyDeps & { 
       todayOverview: async () => ({ opsHub: [{ callsToday: 400 }, { callsToday: 238 }] }),
       scorecards: async () => [{ calls: 4009, droppedCalls: 539 }],
       budgetStatus: async () => ({ todaySpendCents: 22330 }),
-      operationsMonitor: async () => ({ last24Hours: { totalCalls: 662 } }),
+      operationsMonitor: async () => ({ calls: { total: 662 } }),
       ...screens,
     },
   };
@@ -64,7 +64,7 @@ describe('the checks pass when every screen agrees with the truth', () => {
 
 describe('each check catches the defect it was written for', () => {
   it('Operations Monitor: 0 calls in 24 hours against 662', async () => {
-    const r = await result('operations-monitor.calls-24h', deps({ operationsMonitor: async () => ({ last24Hours: { totalCalls: 0 } }) }));
+    const r = await result('operations-monitor.calls-24h', deps({ operationsMonitor: async () => ({ calls: { total: 0 } }) }));
     expect(r).toMatchObject({ status: 'fail', screenValue: 0, truthValue: 662 });
   });
 

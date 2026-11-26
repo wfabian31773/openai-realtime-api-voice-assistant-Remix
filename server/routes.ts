@@ -21,6 +21,7 @@ import { createPgOnCallAdminStore, type OnCallAdminStore } from './onCallAdmin/s
 import { pool } from './db';
 import { mountAccuracyCheck } from './accuracy/accuracy';
 import { opsHubAgentScorecards, todayOverview } from './observatory/queries';
+import { mountOperationsMonitor, readOperations } from './observatory/operations';
 
 // Hybrid authentication middleware - supports both Replit Auth and custom auth
 const isAuthenticated = (req: Request, res: Response, next: NextFunction) => {
@@ -97,16 +98,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
           const { budgetGuardService } = await import('../src/services/budgetGuardService');
           return budgetGuardService.getStatus();
         },
-        // Served by the voice process; the API proxies /api/voice there.
-        operationsMonitor: async () => {
-          const res = await fetch('http://localhost:8000/api/voice/diagnostics', { signal: AbortSignal.timeout(5_000) });
-          if (!res.ok) throw new Error(`the voice process answered HTTP ${res.status}`);
-          return (await res.json()) as { last24Hours?: { totalCalls?: number | null } };
-        },
+        // The rebuilt Operations Monitor's own reader (server/observatory/operations.ts).
+        operationsMonitor: () => readOperations(pool, 24),
       },
     }),
   });
   accuracy.startSchedule();
+
+  // The Operations Monitor, read from call_logs (it read the retired old
+  // core's in-memory traces and showed 0 calls). server/observatory/operations.ts.
+  mountOperationsMonitor(app, { authenticate: isAuthenticated, hub: () => pool });
 
   // ==================== Observatory (docs/observatory/) ====================
   // OBS-0 health: proves both data planes before any widget ships — this

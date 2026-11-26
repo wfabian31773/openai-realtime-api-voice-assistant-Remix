@@ -34,8 +34,8 @@ export interface ScreenReaders {
   scorecards(days: number): Promise<Array<{ calls: number; telephonyErrors?: number; droppedCalls?: number }>>;
   /** Cost Dashboard › Daily Budget: GET /api/budget/status → budgetGuardService.getStatus(). */
   budgetStatus(): Promise<{ todaySpendCents: number }>;
-  /** Operations Monitor: GET /api/voice/diagnostics (served by the voice process). */
-  operationsMonitor(): Promise<{ last24Hours?: { totalCalls?: number | null } } | null>;
+  /** Operations Monitor: GET /api/observatory/operations → readOperations(hub, 24). */
+  operationsMonitor(): Promise<{ calls?: { total?: number | null } } | null>;
 }
 
 export interface AccuracyDeps {
@@ -143,7 +143,7 @@ export function buildChecks(): AccuracyCheck<AccuracyDeps>[] {
       tolerance: { abs: 3 },
       async screenValue(d) {
         const m = await d.screens.operationsMonitor();
-        const v = m?.last24Hours?.totalCalls;
+        const v = m?.calls?.total;
         return v === null || v === undefined ? { value: null, note: 'the screen returned no call count' } : { value: Number(v) };
       },
       async truthValue(d) {
