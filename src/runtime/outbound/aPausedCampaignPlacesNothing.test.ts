@@ -425,4 +425,20 @@ describe("a Pause pressed while a tick is under way (review of #531)", () => {
     await runTextTick("test-lane", lane, deps);
     expect(send).toHaveBeenCalledTimes(2);
   });
+
+  it("a status that cannot be read at the last check sends no text", async () => {
+    const store = new FakeOutboundStore(() => NOW);
+    store.addContact({ id: "c1", phone: "+15555550111" });
+    const real = store.campaignRunState.bind(store);
+    let reads = 0;
+    store.campaignRunState = async (id: string) => {
+      if (++reads > 1) throw new Error("db down");
+      return real(id);
+    };
+    const send = vi.fn(async () => ({ sid: "SM1" }));
+    const deps = { store, env: ON, host: "voice.example.test", sms: async () => ({ send }), now: () => NOW, log: () => undefined };
+    const result = await runTextTick("test-lane", policy, deps);
+    expect(send).not.toHaveBeenCalled();
+    expect(result.held).toEqual({ campaign_held: 1 });
+  });
 });
