@@ -27,7 +27,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { VoiceCallBridge, type BridgeSessionHandlers, type CallOutcome, type VoiceCallRecord } from "./mediaStreamBridge";
 import { answeredQuestionResult } from "../agents/afterHoursAnsweredQuestion";
 import { followUpEvent } from "./followUpTelemetry";
-import { providerMarkupIndex, providerMarkupMayOpen, withoutProviderMarkup } from "./providerMarkup";
+import { providerMarkupIndex, providerMarkupMayOpen, withoutAnyProviderMarkup, withoutProviderMarkup } from "./providerMarkup";
 
 const ANSWERED = "record_answered_question";
 /** What a lookup or a filing answers: something the caller IS waiting on. */
@@ -465,7 +465,7 @@ describe("FIX 2: provider markup is not played or recorded", () => {
     const h = harness();
     await h.say("Your request is filed. Is there anything else I can help you with?");
     h.caller("No, thank you.");
-    await h.respond({ deltas: [`${GOODBYE} `, "<turn_end>", " more"], done: `${GOODBYE} <turn_end> more` });
+    await h.respond({ deltas: [`${GOODBYE} `, "<turn_end>"], done: `${GOODBYE} <turn_end>` });
     await h.end();
     expect(h.outcomes).toEqual(["agent_ended"]);
     expect(h.records[0].goodbyeGraceHangup).toBe(true);
@@ -592,7 +592,8 @@ describe("FIX 2: provider markup is not played or recorded", () => {
     await h.say("Is there anything else I can help you with?");
     h.caller("No, thank you.");
     await h.respond({ deltas: [`${GOODBYE} <`, "silence /> more words"], noWireTranscript: true });
-    await h.end();
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" } as never);
+    await h.flush();
     expect(h.agentLines().slice(-1)[0]).toBe(`AGENT: ${GOODBYE}`);
     expect(h.records[0].providerMarkupCuts).toBe(1);
   });
@@ -602,7 +603,8 @@ describe("FIX 2: provider markup is not played or recorded", () => {
     await h.say("Is there anything else I can help you with?");
     h.caller("No, thank you.");
     await h.respond({ deltas: [`${GOODBYE} `, "<silence />", " more words"], noWireTranscript: true });
-    await h.end();
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" } as never);
+    await h.flush();
     expect(h.agentLines().slice(-1)[0]).toBe(`AGENT: ${GOODBYE}`);
   });
 
@@ -815,7 +817,7 @@ describe("FIX 2: provider markup is not played or recorded", () => {
       const mediaBefore = h.media.length;
       hs.onAgentTranscriptDelta("<");
       hs.onAudioDelta(chunk("a"));
-      hs.onAudioDone("<");
+      hs.onAudioDone("< 3 minutes away.");
       await h.finish();
       expect(h.media.slice(mediaBefore)).toEqual([chunk("a")]);
     });
@@ -839,10 +841,11 @@ describe("FIX 2: provider markup is not played or recorded", () => {
     expect(h.agentLines().slice(-1)[0]).toBe("AGENT: Let me check.");
   });
 
-  it("a completed transcript that drops the tag but keeps the words after it does not bring back what was muted", async () => {
-    // P2 on 35cba36: the wire's transcript overrode the cut already made on
-    // the streamed text, so the muted words reached the line and the goodbye
-    // check.
+  it("a completed transcript that drops the tag but keeps the words after it: the caller heard those words, so the goodbye does not end the turn", async () => {
+    // P2 on 35cba36 kept the muted words off the stored line. Round 8
+    // (github-actions on b048aacc): the line played its audio whole, so the
+    // caller heard "Is there anything else?" after the goodbye, and that
+    // question, not the goodbye, is where the turn ends.
     const [, q, closing] = LEAD[0];
     const h = harness();
     await answeredThenClosing(h, q, closing);
@@ -852,10 +855,11 @@ describe("FIX 2: provider markup is not played or recorded", () => {
       done: `${GOODBYE} Is there anything else?`,
       tools: [[ANSWERED, { follow_up_owed: false }]],
     });
-    expect(h.session.requestResponse.mock.calls.length).toBe(before);
-    await h.end();
+    expect(h.session.requestResponse.mock.calls.length).toBe(before + 1);
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" } as never);
+    await h.flush();
+    expect(h.records[0].goodbyeGraceHangup).not.toBe(true);
     expect(h.agentLines().slice(-1)[0]).toBe(`AGENT: ${GOODBYE}`);
-    expect(h.records[0].goodbyeGraceHangup).toBe(true);
     expect(h.records[0].providerMarkupCuts).toBe(1);
   });
 
@@ -971,6 +975,120 @@ describe("v275 round 7: the guardrails read what the caller hears", () => {
   });
 });
 
+describe("v275 round 8: what the caller heard decides the goodbye, and a lone \"<\" plays nothing", () => {
+  const chunk = (c: string) => Buffer.alloc(400, c.charCodeAt(0)).toString("base64");
+  const stop = async (h: ReturnType<typeof harness>) => {
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" } as never);
+    await h.flush();
+  };
+
+  it("(a) a words-first line whose question after the tag was heard is not a goodbye: the turn is asked for", async () => {
+    // github-actions P2 on b048aacc: the goodbye check read the stored line,
+    // cut at the tag, so "Is there anything else?" (heard, the audio plays
+    // whole) read as a bare goodbye and the follow-up was skipped.
+    const [, q, closing] = LEAD[0];
+    const h = harness();
+    await answeredThenClosing(h, q, closing);
+    const before = h.session.requestResponse.mock.calls.length;
+    await h.respond({
+      deltas: [`${GOODBYE} `, "<turn_end>", " Is there anything else?"],
+      done: `${GOODBYE} <turn_end> Is there anything else?`,
+      tools: [[ANSWERED, { follow_up_owed: false }]],
+    });
+    expect(h.session.requestResponse.mock.calls.length).toBe(before + 1);
+    await stop(h);
+    expect(h.records[0].goodbyeGraceHangup).not.toBe(true);
+    expect(h.agentLines().slice(-1)[0]).toBe(`AGENT: ${GOODBYE}`);
+    expect(followUpEvent(h.records[0])?.data).toMatchObject({ skippedAfterGoodbye: 0, providerMarkupCuts: 1 });
+  });
+
+  it("(a) control: a farewell after the tag is still a goodbye, and the call ends on the grace", async () => {
+    const [, q, closing] = LEAD[0];
+    const h = harness();
+    await answeredThenClosing(h, q, closing);
+    const before = h.session.requestResponse.mock.calls.length;
+    await h.respond({
+      deltas: [`${GOODBYE} `, "<turn_end>", " Take care."],
+      done: `${GOODBYE} <turn_end> Take care.`,
+      tools: [[ANSWERED, { follow_up_owed: false }]],
+    });
+    expect(h.session.requestResponse.mock.calls.length).toBe(before);
+    await h.end();
+    expect(h.outcomes).toEqual(["agent_ended"]);
+    expect(h.records[0].goodbyeGraceHangup).toBe(true);
+    expect(h.agentLines().slice(-1)[0]).toBe(`AGENT: ${GOODBYE}`);
+  });
+
+  it("(b) a line that ends while its text is only \"<\" plays none of its held audio and records no line", async () => {
+    // Codex on b048aacc: the held audio was released at the line's end
+    // because "<" alone is not a tag, so markup the wire never finished
+    // reached the caller.
+    const h = harness();
+    h.caller("Okay.");
+    h.begin();
+    const hs = h.handlers();
+    const mediaBefore = h.media.length;
+    hs.onAgentTranscriptDelta("<");
+    hs.onAudioDelta(chunk("a"));
+    hs.onAudioDelta(chunk("b"));
+    hs.onAudioDone("<");
+    await h.finish();
+    expect(h.media.length).toBe(mediaBefore);
+    await stop(h);
+    expect(h.agentLines()).toEqual([]);
+  });
+
+  it("(b) the same with no completed transcript from the wire", async () => {
+    const h = harness();
+    h.caller("Okay.");
+    h.begin();
+    const hs = h.handlers();
+    const mediaBefore = h.media.length;
+    hs.onAgentTranscriptDelta(" </");
+    hs.onAudioDelta(chunk("a"));
+    hs.onAudioDone(undefined);
+    await h.finish();
+    expect(h.media.length).toBe(mediaBefore);
+    await stop(h);
+    expect(h.agentLines()).toEqual([]);
+  });
+
+  it("(c) a words-first markup line counts as heard only once audio is sent", async () => {
+    // Codex on b048aacc: a words-first line found to carry markup before any
+    // of its audio arrived was counted as heard though nothing had played.
+    const h = harness();
+    h.caller("Thanks.");
+    h.begin();
+    const hs = h.handlers();
+    hs.onAgentTranscriptDelta(`${GOODBYE} `);
+    hs.onAgentTranscriptDelta("<turn_end>");
+    hs.onAudioDone(`${GOODBYE} <turn_end>`);
+    await h.finish();
+    await stop(h);
+    expect(h.records[0].providerMarkupCuts).toBe(1);
+    expect(h.records[0].providerMarkupHeard).toBe(0);
+  });
+
+  it("(c) and is counted once, not per chunk, when its audio does play", async () => {
+    const h = harness();
+    h.caller("Thanks.");
+    h.begin();
+    const hs = h.handlers();
+    hs.onAgentTranscriptDelta(`${GOODBYE} `);
+    hs.onAgentTranscriptDelta("<turn_end>");
+    const mediaBefore = h.media.length;
+    hs.onAudioDelta(chunk("a"));
+    hs.onAudioDelta(chunk("b"));
+    expect(h.media.length).toBe(mediaBefore + 2);
+    hs.onAudioDone(`${GOODBYE} <turn_end>`);
+    await h.finish();
+    h.echo();
+    await stop(h);
+    expect(h.records[0].providerMarkupCuts).toBe(1);
+    expect(h.records[0].providerMarkupHeard).toBe(1);
+  });
+});
+
 describe("providerMarkup", () => {
   it.each(["<", " < ", "</", "< /", "\t</ "])("%j may open a tag", (text) => {
     expect(providerMarkupMayOpen(text)).toBe(true);
@@ -998,5 +1116,12 @@ describe("providerMarkup", () => {
   it("keeps the words before the first tag", () => {
     expect(withoutProviderMarkup("Great, have a good day! <silence /> more")).toBe("Great, have a good day!");
     expect(withoutProviderMarkup(ECHO_MARKUP)).toBe("");
+  });
+
+  it("withoutAnyProviderMarkup keeps every word and drops every tag", () => {
+    expect(withoutAnyProviderMarkup(`${GOODBYE} <turn_end> Is there anything else?`)).toBe(`${GOODBYE} Is there anything else?`);
+    expect(withoutAnyProviderMarkup("<silence />")).toBe("");
+    expect(withoutAnyProviderMarkup("We open at 8, and 2 < 3.")).toBe("We open at 8, and 2 < 3.");
+    expect(withoutAnyProviderMarkup("Okay. </response_segment_0_already_spoken")).toBe("Okay.");
   });
 });

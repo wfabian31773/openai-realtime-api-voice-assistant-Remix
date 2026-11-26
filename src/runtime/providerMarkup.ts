@@ -42,3 +42,13 @@ export const PROVIDER_MARKUP_MAY_OPEN = /^\s*<\s*\/?\s*$/;
 export function providerMarkupMayOpen(text: string): boolean {
   return PROVIDER_MARKUP_MAY_OPEN.test(text);
 }
+
+/**
+ * What a words-first line said aloud, tags taken out and everything else kept.
+ * Such a line plays its audio whole, so a goodbye check reads what the caller
+ * heard, the words after the tag included, never only the stored cut (#524
+ * review, round 8). A tag left open runs to the end of the text.
+ */
+export function withoutAnyProviderMarkup(text: string): string {
+  return text.replace(/<\s*\/?\s*[A-Za-z_][^>]*>?/g, " ").replace(/\s+/g, " ").trim();
+}

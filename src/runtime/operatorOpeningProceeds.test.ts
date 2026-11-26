@@ -263,6 +263,32 @@ describe("v159: an operator call carries on after its opening", () => {
       expect(audioSent(c)).toBeGreaterThan(before);
     });
 
+    it("a first answer that is only markup sends no audio and does not cost the real one", async () => {
+      // Codex on b048aacc: the guard counted the answer as spoken when its
+      // audio was muted, so the real reply that followed was cancelled.
+      const c = await carryOn();
+      start(c);
+      const before = audioSent(c);
+      speak(c, "<turn_end>");
+      expect(audioSent(c)).toBe(before);
+      start(c);
+      speak(c, "Thanks for taking my call.");
+      expect(c.session.cancelResponse).not.toHaveBeenCalled();
+      expect(audioSent(c)).toBeGreaterThan(before);
+    });
+
+    it("a first answer held on a lone \"<\" sends no audio and does not cost the real one", async () => {
+      const c = await carryOn();
+      start(c);
+      const before = audioSent(c);
+      speak(c, "<");
+      expect(audioSent(c)).toBe(before);
+      start(c);
+      speak(c, "Thanks for taking my call.");
+      expect(c.session.cancelResponse).not.toHaveBeenCalled();
+      expect(audioSent(c)).toBeGreaterThan(before);
+    });
+
     it("the person speaking again ends the guard: their next reply is not cancelled", async () => {
       const c = await carryOn();
       start(c);

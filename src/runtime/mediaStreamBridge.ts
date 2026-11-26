@@ -115,7 +115,7 @@ import { noteCallerTranscript } from "../services/symptomCorroboration";
 import { noteCallLanguage } from "../services/callLanguage";
 import { ghostCallRefusal } from "../services/ghostCallProtection";
 import { callerConclusion, completesGoodbye, type CallerConclusion } from "./goodbye";
-import { providerMarkupIndex, providerMarkupMayOpen, withoutProviderMarkup } from "./providerMarkup";
+import { providerMarkupIndex, providerMarkupMayOpen, withoutAnyProviderMarkup, withoutProviderMarkup } from "./providerMarkup";
 import {
   CallUsage,
   providerUsageMarker,
@@ -1006,7 +1006,7 @@ export class VoiceCallBridge {
   /** The utterance currently being spoken, opened by its first audio or
    * transcript delta and closed by its completion. `epoch` is what makes a
    * cancelled utterance's late completion recognisable (module doc). */
-  private current: { seq: number; epoch: number; text: string; bytes: number; muted: boolean; audioOff?: boolean; heldAudio?: string[]; heardText?: string } | null = null;
+  private current: { seq: number; epoch: number; text: string; bytes: number; muted: boolean; audioOff?: boolean; heldAudio?: string[]; heardText?: string; markupHeardPending?: boolean } | null = null;
   /** The response epoch a barge-in cancelled. Everything that epoch emits
    * afterwards is stale: dropped, not forwarded, not recorded. */
   private cancelledEpoch: number | null = null;
@@ -1652,7 +1652,7 @@ export class VoiceCallBridge {
   /** Opens the current utterance on its first event, whichever arrives
    * first — audio delta or transcript delta. Returns null when the event
    * belongs to a cancelled epoch (stale). */
-  private openOrGetCurrent(): { seq: number; epoch: number; text: string; bytes: number; muted: boolean; audioOff?: boolean; heldAudio?: string[]; heardText?: string } | null {
+  private openOrGetCurrent(): { seq: number; epoch: number; text: string; bytes: number; muted: boolean; audioOff?: boolean; heldAudio?: string[]; heardText?: string; markupHeardPending?: boolean } | null {
     const epoch = this.session.getResponseEpoch();
     if (this.cancelledEpoch !== null && epoch === this.cancelledEpoch) return null;
     // Also supports sessions that report only audio/transcript events.
@@ -1889,7 +1889,6 @@ export class VoiceCallBridge {
   private handleAudioDelta(base64Audio: string): void {
     if (this.ended) return;
     const current = this.openOrGetCurrent();
-    if (current && this.openingTurn?.answerEpoch === current.epoch) this.openingTurn.answerSpoke = true;
     // Stale audio from a cancelled response is DROPPED, not forwarded:
     // Twilio was just told to `clear`, and pushing the tail of the
     // cancelled line straight back is the one thing `clear` exists to
@@ -1910,8 +1909,17 @@ export class VoiceCallBridge {
       this.armDeadAir("utterance");
       return;
     }
+    // The opening's answer has spoken only once its audio is sent: audio of a
+    // line that opened with markup is not sent, and audio held while the text
+    // is only "<" is not sent yet (released audio comes back through here),
+    // so neither counts as the agent answering (#524 review, round 8).
+    if (this.openingTurn?.answerEpoch === current.epoch) this.openingTurn.answerSpoke = true;
     const forwarded = Buffer.from(base64Audio, "base64").length;
     current.bytes += forwarded;
+    if (current.markupHeardPending && forwarded > 0) {
+      current.markupHeardPending = false;
+      this.providerMarkupHeard += 1;
+    }
     // AND THE CALLER'S SILENCE BOUND COUNTS IT HERE, at the moment it is handed
     // to Twilio, NOT when its utterance completes (Codex P1, #328 round 3). An
     // utterance superseded by a new response epoch is dropped by
@@ -2205,10 +2213,19 @@ export class VoiceCallBridge {
     // v275: audio still held for a possible tag is settled by the completed
     // transcript before the utterance closes: markup at its start, and the
     // audio was the markup's; anything else, and it is sent now.
+    // A line that ends while its text is still only "<" (the completed
+    // transcript says no more, or a provider drop ended it with no
+    // transcript) never said whether a tag opened it: its held audio is
+    // dropped, not sent, and it records no line (#524 review, round 8).
     const settling = this.current;
+    let unresolvedPrefix = false;
     if (settling?.heldAudio) {
-      if (withoutProviderMarkup(transcript ?? settling.text).trim() === "" &&
-          providerMarkupIndex(transcript ?? settling.text) >= 0) {
+      const settled = transcript ?? settling.text;
+      if (providerMarkupMayOpen(settled)) {
+        settling.heldAudio = undefined;
+        settling.audioOff = true;
+        unresolvedPrefix = true;
+      } else if (withoutProviderMarkup(settled).trim() === "" && providerMarkupIndex(settled) >= 0) {
         settling.heldAudio = undefined;
         settling.audioOff = true;
       } else this.releaseHeldAudio(settling);
@@ -2284,18 +2301,29 @@ export class VoiceCallBridge {
     // utterance's audio was sent: nothing can be recalled, so the count and
     // the log say so instead of claiming it was not played.
     if (providerMarkupIndex(wire) >= 0) this.muteForMarkup(done, "completed");
-    const text = (mutedOnStream ? done.text : withoutProviderMarkup(wire)).trim();
+    const text = unresolvedPrefix ? "" : (mutedOnStream ? done.text : withoutProviderMarkup(wire)).trim();
+    // What the caller heard, which the goodbye checks read: a words-first line
+    // plays its audio whole, so the words after its tag count too, and a
+    // question or a tool written out after the goodbye means it was not one
+    // (#524 review, round 8). The stored line keeps the cut (`text`).
+    const heardSource = done.heardText ?? wire;
+    const heard =
+      done.audioOff || unresolvedPrefix
+        ? ""
+        : providerMarkupIndex(heardSource) >= 0
+          ? withoutAnyProviderMarkup(heardSource)
+          : text;
     const markName = `utt-${done.seq}`;
     // v275: what this response said, for a goodbye a tool answer follows
     // (see `goodbyeThatEndsTheTurn`). Audio, not text, as ever.
-    if (done.bytes > 0 && text) {
+    if (done.bytes > 0 && heard) {
       if (this.responseSpeech?.epoch !== epoch) this.responseSpeech = { epoch, text: "", mark: markName };
-      this.responseSpeech.text += ` ${text}`;
+      this.responseSpeech.text += ` ${heard}`;
       this.responseSpeech.mark = markName;
     }
     if (this.goodbyeResponse?.epoch === epoch) {
-      if (done.bytes > 0 && text) {
-        this.goodbyeResponse.text += ` ${text}`;
+      if (done.bytes > 0 && heard) {
+        this.goodbyeResponse.text += ` ${heard}`;
         this.goodbyeResponse.mark = markName;
       } else this.cancelGoodbye();
     }
@@ -2980,7 +3008,7 @@ export class VoiceCallBridge {
    * the markup has its audio cut; or only in the wire's completed transcript,
    * after whatever audio the utterance had was sent. */
   private muteForMarkup(
-    utterance: { muted: boolean; audioOff?: boolean; bytes: number },
+    utterance: { muted: boolean; audioOff?: boolean; bytes: number; markupHeardPending?: boolean },
     found: "stream" | "completed",
   ): void {
     if (utterance.muted) return;
@@ -3012,10 +3040,22 @@ export class VoiceCallBridge {
       console.warn(`${on} opens the agent's line on ${callSid} — none of its audio is played and no line is recorded`);
       return;
     }
-    this.providerMarkupHeard += 1;
+    // Words first: the audio plays whole, but the caller has heard nothing of
+    // it until a byte reaches Twilio, and the line can still be held (its text
+    // was only "<") or end before any audio arrives. It is counted once its
+    // audio is sent (handleAudioDelta), never before (#524 review, round 8).
+    if (utterance.bytes > 0) {
+      this.providerMarkupHeard += 1;
+      console.warn(
+        `${on} after the agent's words on ${callSid} — the line is recorded without it, ` +
+          `but its audio plays whole, so the caller may have heard it`,
+      );
+      return;
+    }
+    utterance.markupHeardPending = true;
     console.warn(
-      `${on} after the agent's words on ${callSid} — the line is recorded without it, ` +
-        `but its audio plays whole, so the caller may have heard it`,
+      `${on} after the agent's words on ${callSid} — the line is recorded without it; ` +
+        `its audio plays whole, and it is counted as possibly heard once that audio is sent`,
     );
   }
 
