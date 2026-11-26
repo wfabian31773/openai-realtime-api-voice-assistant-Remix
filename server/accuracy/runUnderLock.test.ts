@@ -1,78 +1,71 @@
 /**
- * The hourly accuracy run takes a SESSION advisory lock. Taking it and
- * releasing it through the pool could use two connections, leaving the lock
- * held on the first and every later run skipped (Codex review of #525). Both
- * statements must run on one checked-out connection.
+ * The hourly accuracy run's lock. Production reaches the Hub through Supabase's
+ * PgBouncer in transaction mode, where a session advisory lock can be taken on
+ * one backend and "released" on another, leaving it held and every later run
+ * skipped (Codex review of #525). The run uses the app's lease lock instead
+ * (distributed_locks), and always releases it.
  */
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
 import { describe, expect, it, vi } from 'vitest';
-import { LOCK_SQL, UNLOCK_SQL, runUnderLock, type LockablePool } from './accuracy';
+import { RUN_LOCK_NAME, runUnderLock, type RunLock } from './accuracy';
 
-function fakePool(opts: { got?: boolean; unlockFails?: boolean; connectFails?: boolean } = {}) {
-  const clients: Array<{ id: number; sql: string[]; released: Array<boolean | Error | undefined> }> = [];
-  const poolSql: string[] = [];
-  const pool: LockablePool = {
-    async query(text) {
-      poolSql.push(text);
-      return { rows: [] };
+function fakeLock(opts: { got?: boolean; acquireThrows?: boolean; releaseThrows?: boolean } = {}) {
+  const calls: string[] = [];
+  const lock: RunLock = {
+    async acquire() {
+      calls.push('acquire');
+      if (opts.acquireThrows) throw new Error('no database');
+      return opts.got ?? true;
     },
-    async connect() {
-      if (opts.connectFails) throw new Error('no connection');
-      const c = { id: clients.length, sql: [] as string[], released: [] as Array<boolean | Error | undefined> };
-      clients.push(c);
-      return {
-        async query(text: string) {
-          c.sql.push(text);
-          if (text === LOCK_SQL) return { rows: [{ got: opts.got ?? true }] };
-          if (text === UNLOCK_SQL && opts.unlockFails) throw new Error('unlock failed');
-          return { rows: [] };
-        },
-        release(destroy?: boolean | Error) {
-          c.released.push(destroy);
-        },
-      };
+    async release() {
+      calls.push('release');
+      if (opts.releaseThrows) throw new Error('release failed');
     },
   };
-  return { pool, clients, poolSql };
+  return { lock, calls };
 }
 
 describe('the hourly accuracy run lock', () => {
-  it('takes and releases the lock on the same connection, then returns it', async () => {
-    const { pool, clients, poolSql } = fakePool();
+  it('runs once and releases the lock', async () => {
+    const { lock, calls } = fakeLock();
     const run = vi.fn(async () => {});
-    expect(await runUnderLock(pool, run)).toBe(true);
+    expect(await runUnderLock(lock, run)).toBe(true);
     expect(run).toHaveBeenCalledOnce();
-    expect(clients).toHaveLength(1);
-    expect(clients[0].sql).toEqual([LOCK_SQL, UNLOCK_SQL]);
-    expect(clients[0].released).toEqual([undefined]);
-    expect(poolSql).toEqual([]);
+    expect(calls).toEqual(['acquire', 'release']);
   });
 
-  it('releases the lock on that connection when the run throws', async () => {
-    const { pool, clients } = fakePool();
-    expect(await runUnderLock(pool, async () => { throw new Error('boom'); })).toBe(false);
-    expect(clients[0].sql).toEqual([LOCK_SQL, UNLOCK_SQL]);
-    expect(clients[0].released).toEqual([undefined]);
+  it('releases the lock when the run throws', async () => {
+    const { lock, calls } = fakeLock();
+    expect(await runUnderLock(lock, async () => { throw new Error('boom'); })).toBe(false);
+    expect(calls).toEqual(['acquire', 'release']);
   });
 
-  it('skips the run when another process holds the lock, and does not unlock', async () => {
-    const { pool, clients } = fakePool({ got: false });
+  it('skips the run when another process holds the lock, and releases nothing', async () => {
+    const { lock, calls } = fakeLock({ got: false });
     const run = vi.fn(async () => {});
-    expect(await runUnderLock(pool, run)).toBe(false);
+    expect(await runUnderLock(lock, run)).toBe(false);
     expect(run).not.toHaveBeenCalled();
-    expect(clients[0].sql).toEqual([LOCK_SQL]);
-    expect(clients[0].released).toEqual([undefined]);
+    expect(calls).toEqual(['acquire']);
   });
 
-  it('destroys the connection when the unlock fails, so the session and its lock end', async () => {
-    const { pool, clients } = fakePool({ unlockFails: true });
-    await runUnderLock(pool, async () => {});
-    expect(clients[0].released).toEqual([true]);
-  });
-
-  it('skips quietly when no connection can be had', async () => {
-    const { pool } = fakePool({ connectFails: true });
+  it('skips quietly when the lock cannot be read', async () => {
+    const { lock } = fakeLock({ acquireThrows: true });
     const run = vi.fn(async () => {});
-    expect(await runUnderLock(pool, run)).toBe(false);
+    expect(await runUnderLock(lock, run)).toBe(false);
     expect(run).not.toHaveBeenCalled();
+  });
+
+  it('does not throw when the release fails (the lease expires on its own)', async () => {
+    const { lock } = fakeLock({ releaseThrows: true });
+    await expect(runUnderLock(lock, async () => {})).resolves.toBe(true);
+  });
+
+  it('uses the lease lock, never a session advisory lock', () => {
+    const src = readFileSync(join(__dirname, 'accuracy.ts'), 'utf8');
+    expect(src).not.toMatch(/pg_try_advisory_lock|pg_advisory_unlock/);
+    expect(src).toContain("import('../../src/services/distributedLock')");
+    expect(src).toContain('const lock = deps.runLock ?? leaseRunLock();');
+    expect(RUN_LOCK_NAME).toBe('accuracy-check-run');
   });
 });

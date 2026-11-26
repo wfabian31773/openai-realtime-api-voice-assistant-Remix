@@ -15,9 +15,9 @@
  * check, so none is in the table. Rows older than 90 days are deleted by the
  * run that writes new ones.
  *
- * The hourly run is OFF unless ACCURACY_CHECKS_SCHEDULE is not "off": it is on
+ * The hourly run is on unless ACCURACY_CHECKS_SCHEDULE is "off": it is on
  * by default because a check nobody runs is no check. Each run takes a
- * session advisory lock so two processes do not both write a run.
+ * lease lock (distributed_locks) so two processes do not both write a run.
  * ─────────────────────────────────────────────────────────────────────────────
  */
 import type { Express, RequestHandler } from 'express';
@@ -27,50 +27,64 @@ import { buildChecks, type AccuracyDeps, type Queryable } from './checks';
 export const ACCURACY_API = '/api/observatory/accuracy';
 const RETENTION_DAYS = 90;
 const SCHEDULE_MS = 60 * 60_000;
-/** pg_try_advisory_lock key: hashtext('accuracy_check_run'), fixed so every process agrees. */
-export const LOCK_SQL = `SELECT pg_try_advisory_lock(hashtext('accuracy_check_run')) AS got`;
-export const UNLOCK_SQL = `SELECT pg_advisory_unlock(hashtext('accuracy_check_run'))`;
-
-/** A pool the lock can be taken on: one checked-out connection holds it. */
-export interface LockablePool extends Queryable {
-  connect(): Promise<Queryable & { release(destroy?: boolean | Error): void }>;
+/** The lock that keeps two processes from writing one hourly run. */
+export interface RunLock {
+  acquire(): Promise<boolean>;
+  release(): Promise<void>;
 }
 
+export const RUN_LOCK_NAME = 'accuracy-check-run';
+const RUN_LOCK_HOLDER = 'accuracy-check';
+/** Longer than a run (20 s timeout); the lock service refreshes it while held. */
+const RUN_LOCK_TTL_SECONDS = 120;
+
 /**
- * One hourly run under the session advisory lock. The lock belongs to a
- * database SESSION, so taking it and releasing it through the pool could land
- * on two different connections: the lock would stay held on the first, and
- * every later run would skip. Both statements run on one checked-out
- * connection; if the unlock fails, that connection is destroyed rather than
- * returned, which ends the session and so releases the lock.
+ * The app's lease lock (distributed_locks, src/services/distributedLock.ts),
+ * the one the filing-quality worker and the outbound dialler use. It is a row
+ * with an expiry, so it works through Supabase's PgBouncer in transaction
+ * mode, where a session advisory lock can be taken on one backend and
+ * "released" on another (Codex review of #525), and it frees itself if a
+ * process dies holding it. Both calls import the same module from this file,
+ * so the release reaches the instance that holds the refresh timer.
  */
-export async function runUnderLock(pool: LockablePool, run: () => Promise<unknown>): Promise<boolean> {
-  let client: Awaited<ReturnType<LockablePool['connect']>>;
+export function leaseRunLock(): RunLock {
+  return {
+    async acquire() {
+      const { distributedLockService } = await import('../../src/services/distributedLock');
+      const r = await distributedLockService.acquireLock({
+        lockName: RUN_LOCK_NAME,
+        holderId: RUN_LOCK_HOLDER,
+        ttlSeconds: RUN_LOCK_TTL_SECONDS,
+      });
+      return r.acquired;
+    },
+    async release() {
+      const { distributedLockService } = await import('../../src/services/distributedLock');
+      await distributedLockService.releaseLock(RUN_LOCK_NAME, RUN_LOCK_HOLDER);
+    },
+  };
+}
+
+/** One hourly run, only when this process holds the lock; the lock is always released. */
+export async function runUnderLock(lock: RunLock, run: () => Promise<unknown>): Promise<boolean> {
+  let got = false;
   try {
-    client = await pool.connect();
+    got = await lock.acquire();
   } catch (err) {
-    console.warn(`[ACCURACY] hourly run skipped, no database connection: ${safeError(err)}`);
+    console.warn(`[ACCURACY] hourly run skipped, the run lock could not be read: ${safeError(err)}`);
     return false;
   }
-  let got = false;
-  let destroy = false;
+  if (!got) return false;
   try {
-    got = (await client.query(LOCK_SQL)).rows[0]?.got === true;
-    if (!got) return false;
     await run();
     return true;
   } catch (err) {
     console.warn(`[ACCURACY] hourly run failed: ${safeError(err)}`);
     return false;
   } finally {
-    if (got) {
-      try {
-        await client.query(UNLOCK_SQL);
-      } catch {
-        destroy = true;
-      }
-    }
-    client.release(destroy || undefined);
+    await lock.release().catch((err) => {
+      console.warn(`[ACCURACY] the run lock was not released (it expires on its own): ${safeError(err)}`);
+    });
   }
 }
 
@@ -200,7 +214,9 @@ export async function withHistory(q: Queryable, report: AccuracyReport): Promise
 export interface AccuracyMountDeps {
   authenticate: RequestHandler;
   /** The Hub pool (the app's own database), read live per request. */
-  hub: () => LockablePool;
+  hub: () => Queryable;
+  /** The hourly run's lock; the app's lease lock unless a test supplies one. */
+  runLock?: RunLock;
   /** Everything the checks read; built per run so pools that fail over are re-read. */
   checkDeps: () => AccuracyDeps;
   env: NodeJS.ProcessEnv;
@@ -246,8 +262,9 @@ export function mountAccuracyCheck(app: Express, deps: AccuracyMountDeps) {
         console.log('[ACCURACY] hourly run is off (ACCURACY_CHECKS_SCHEDULE=off)');
         return () => {};
       }
+      const lock = deps.runLock ?? leaseRunLock();
       const tick = async () => {
-        await runUnderLock(deps.hub(), () => runner.report(true));
+        await runUnderLock(lock, () => runner.report(true));
       };
       console.log('[ACCURACY] hourly run on: every screen number read twice, results in accuracy_check_results');
       const first = setTimeout(() => void tick(), 2 * 60_000);
