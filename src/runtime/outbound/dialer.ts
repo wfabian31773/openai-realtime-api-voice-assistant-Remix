@@ -185,6 +185,9 @@ export interface DialerDeps {
   log?: (line: string) => void;
 }
 
+/** A row given back because the campaign was paused while the tick ran. */
+export const CAMPAIGN_HELD = "campaign_held";
+
 /**
  * Say a campaign's hold once when it starts, and once when it ends. Absent a
  * map (a test calling one tick), every held tick says it.
@@ -355,6 +358,8 @@ export async function runCampaignTick(
       const held = await dialOne(slug, policy, candidate, campaignId, from, now, deps, source);
       if (held) result.held[held] = (result.held[held] ?? 0) + 1;
       else result.dialled += 1;
+      // Paused mid-tick: nobody else is claimed this tick.
+      if (held === CAMPAIGN_HELD) break;
     }
   } catch (error) {
     log(
@@ -598,6 +603,20 @@ async function dialOne(
     await deps.store.settleContact(contact.id, "do_not_call");
     await notPlaced("do_not_contact");
     return "do_not_contact";
+  }
+  // THE CAMPAIGNS SCREEN once more, last (review of #531): a tick reads
+  // `running` at its start and can then spend seconds on the source refresh,
+  // the re-check and the offer check, so a Pause pressed meanwhile is read
+  // again here, before anybody is rung. The row goes back exactly as it was,
+  // so Resume dials it on the next tick; a status that cannot be read rings
+  // nobody.
+  const lateHold = await deps.store
+    .campaignRunState(campaignId)
+    .then(campaignHoldReason, () => "the campaign's status could not be read");
+  if (lateHold) {
+    noteHold(policy.campaignKey, lateHold, deps);
+    await deps.store.releaseContact(contact.id, candidate.status, candidate.nextAttemptAt);
+    return CAMPAIGN_HELD;
   }
 
   const attemptId = await deps.store.startAttempt(contact.id, campaignId, prior.length + 1);

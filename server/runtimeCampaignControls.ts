@@ -36,9 +36,11 @@
  *     deleted row rather than creating a second one, src/runtime/outbound/
  *     store.ts ensureCampaign, so even a delete made in SQL stops the
  *     campaign instead of restarting it.)
- *   - An edit (PATCH) may change the description, and the status to running,
- *     paused or cancelled; never the name, type or agent the runtime finds
- *     the row by, and never the deleted mark.
+ *   - An edit (PATCH) may change the description only. Never the status:
+ *     the general edit route asks only that the user is signed in, and the
+ *     Pause, Resume and Cancel routes ask for an admin or a manager (review
+ *     of #531). Never the name, type or agent the runtime finds the row by,
+ *     and never the deleted mark.
  *
  * Whether Pause should be a button on this screen at all is the operator's
  * call; this makes the button do what it says. The environment switch
@@ -99,11 +101,12 @@ export const RUNTIME_DELETE_REFUSAL =
 export const RUNTIME_DELETED_REFUSAL =
   "This campaign was deleted, so the voice runtime does not dial it. Restoring it is a database change.";
 
-/** The statuses an edit may write on a runtime campaign. */
-export const RUNTIME_EDITABLE_STATUSES = ["running", "paused", "cancelled"] as const;
-
 /** The fields an edit may change on a runtime campaign. */
-const RUNTIME_EDITABLE_FIELDS = new Set(["description", "status"]);
+const RUNTIME_EDITABLE_FIELDS = new Set(["description"]);
+
+export const RUNTIME_STATUS_EDIT_REFUSAL =
+  "A runtime outbound campaign's status is changed with Pause, Resume and Cancel, which need an " +
+  "admin or a manager. The edit form changes only its description.";
 
 function isDeleted(campaign: RuntimeCampaignRow): boolean {
   return campaign.deletedAt !== null && campaign.deletedAt !== undefined;
@@ -150,7 +153,10 @@ export async function runtimeCampaignControl(
  * Why an edit (PATCH) may not be applied to this runtime campaign, or null
  * when it may (or the campaign is not a runtime one). The name, type and
  * agent are how the runtime finds the row (store.ensureCampaign); changing
- * one would make it create a second campaign and call everyone again.
+ * one would make it create a second campaign and call everyone again. The
+ * status starts and stops live outreach, so it goes through the Pause,
+ * Resume and Cancel routes, which check the role; this route checks only
+ * that the user is signed in (review of #531).
  */
 export function runtimeCampaignEditRefusal(
   campaign: RuntimeCampaignRow | null | undefined,
@@ -158,23 +164,17 @@ export function runtimeCampaignEditRefusal(
 ): string | null {
   if (!campaign || !isRuntimeCampaign(campaign)) return null;
   if (!updates || typeof updates !== "object" || Array.isArray(updates)) {
-    return "A runtime outbound campaign takes only a description or a status (running, paused or cancelled).";
+    return "A runtime outbound campaign's edit form changes only its description.";
   }
   const fields = Object.keys(updates as Record<string, unknown>);
+  if (fields.includes("status")) return RUNTIME_STATUS_EDIT_REFUSAL;
   const refused = fields.filter((f) => !RUNTIME_EDITABLE_FIELDS.has(f));
   if (refused.length > 0) {
     return (
       `A runtime outbound campaign's ${refused.join(", ")} cannot be changed here: the voice runtime ` +
       "finds the campaign by its name, type and agent, and its record must stay whole. Only the " +
-      "description and the status (running, paused or cancelled) can be."
+      "description can be."
     );
-  }
-  if ("status" in (updates as Record<string, unknown>)) {
-    const status = (updates as Record<string, unknown>).status;
-    if (!(RUNTIME_EDITABLE_STATUSES as readonly unknown[]).includes(status)) {
-      return "A runtime outbound campaign's status can be running, paused or cancelled.";
-    }
-    if (isDeleted(campaign)) return RUNTIME_DELETED_REFUSAL;
   }
   return null;
 }

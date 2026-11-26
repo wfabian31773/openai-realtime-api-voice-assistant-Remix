@@ -13,6 +13,7 @@ import {
   RUNTIME_START_REFUSAL,
   runtimeCampaignControl,
   runtimeCampaignEditRefusal,
+  RUNTIME_STATUS_EDIT_REFUSAL,
   type RuntimeCampaignAction,
 } from "./runtimeCampaignControls";
 
@@ -94,11 +95,18 @@ describe("a runtime campaign's buttons", () => {
 });
 
 describe("an edit (PATCH) of a runtime campaign", () => {
-  it("may change the description and the status to running, paused or cancelled", () => {
+  it("may change the description", () => {
     expect(runtimeCampaignEditRefusal(RUNTIME, { description: "x" })).toBeNull();
-    for (const status of ["running", "paused", "cancelled"]) {
-      expect(runtimeCampaignEditRefusal(RUNTIME, { status })).toBeNull();
+  });
+
+  it("never the status: that route checks only sign-in, and Pause, Resume and Cancel check the role (review of #531)", () => {
+    for (const status of ["running", "paused", "cancelled", "completed", "running "]) {
+      expect(runtimeCampaignEditRefusal(RUNTIME, { status }), status).toBe(RUNTIME_STATUS_EDIT_REFUSAL);
+      expect(runtimeCampaignEditRefusal(RUNTIME, { description: "x", status }), status).toBe(RUNTIME_STATUS_EDIT_REFUSAL);
     }
+    // The current status re-sent unchanged is still refused: one rule, no reading of the row.
+    expect(runtimeCampaignEditRefusal({ ...RUNTIME, status: "paused" }, { status: "paused" })).toBe(RUNTIME_STATUS_EDIT_REFUSAL);
+    expect(RUNTIME_STATUS_EDIT_REFUSAL).toMatch(/Pause, Resume and Cancel/);
   });
 
   it("never the name, type or agent the runtime finds it by, nor the deleted mark", () => {
@@ -107,15 +115,14 @@ describe("an edit (PATCH) of a runtime campaign", () => {
     }
   });
 
-  it("refuses another status, a body that is not an object, and a status on a deleted row", () => {
-    expect(runtimeCampaignEditRefusal(RUNTIME, { status: "completed" })).toMatch(/running, paused or cancelled/);
-    expect(runtimeCampaignEditRefusal(RUNTIME, null)).toMatch(/only a description or a status/);
-    expect(runtimeCampaignEditRefusal(RUNTIME, [])).toMatch(/only a description or a status/);
-    expect(runtimeCampaignEditRefusal({ ...RUNTIME, deletedAt: NOW }, { status: "running" })).toBe(RUNTIME_DELETED_REFUSAL);
+  it("refuses a body that is not an object", () => {
+    expect(runtimeCampaignEditRefusal(RUNTIME, null)).toMatch(/only its description/);
+    expect(runtimeCampaignEditRefusal(RUNTIME, [])).toMatch(/only its description/);
   });
 
   it("leaves every other campaign's edits alone", () => {
     expect(runtimeCampaignEditRefusal(OLD, { name: "renamed", deletedAt: NOW })).toBeNull();
+    expect(runtimeCampaignEditRefusal(OLD, { status: "paused" })).toBeNull();
     expect(runtimeCampaignEditRefusal(undefined, { name: "renamed" })).toBeNull();
   });
 });
@@ -143,6 +150,21 @@ describe("the routes ask before the old code acts", () => {
       expect(asked).toBeLessThan(body.indexOf(oldCode));
     });
   }
+
+  it("every route that can change a runtime campaign's status asks for an admin or a manager (review of #531)", () => {
+    for (const path of [
+      "app.post('/api/campaigns/:id/start'",
+      "app.post('/api/campaigns/:id/pause'",
+      "app.post('/api/campaigns/:id/resume'",
+      "app.post('/api/campaigns/:id/cancel'",
+      "app.post('/api/campaigns/:id/stop-outbound-scheduler'",
+      "app.post('/api/campaigns/:id/start-outbound-scheduler'",
+      "app.delete('/api/campaigns/:id'",
+    ]) {
+      const line = routeBody(path).split("\n")[0];
+      expect(line, path).toContain("requireRole('admin', 'manager')");
+    }
+  });
 
   it("delete: refuses a runtime campaign before the soft delete and the running check", () => {
     const body = routeBody("app.delete('/api/campaigns/:id'");

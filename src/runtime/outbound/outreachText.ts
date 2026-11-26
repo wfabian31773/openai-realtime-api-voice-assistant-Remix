@@ -63,6 +63,9 @@ export const MAX_SEND_TRIES = 3;
 /** How long a refused send, or a row the source could not answer for, waits. */
 export const TEXT_RETRY_MS = 60 * 60 * 1000;
 
+/** A text given back because the campaign was paused while the tick ran. */
+export const TEXT_CAMPAIGN_HELD = "campaign_held";
+
 
 /** What one row's text came to, and what its booking page has done since. */
 export interface OutreachTextRecord {
@@ -209,6 +212,8 @@ export async function runTextTick(
       const held = await textOne(slug, candidate, text, from, now, deps, source, policy);
       if (held) result.held[held] = (result.held[held] ?? 0) + 1;
       else result.sent += 1;
+      // Paused mid-tick: nobody else is texted this tick.
+      if (held === TEXT_CAMPAIGN_HELD) break;
     }
   } catch (error) {
     log(`[outbound] ${policy.campaignKey}: text tick failed — ${error instanceof Error ? error.message : String(error)}`);
@@ -312,6 +317,17 @@ async function textOne(
   if (await deps.store.isDoNotContact(phone)) {
     await deps.store.patchText(claimed.id, { state: "skipped", reason: "do_not_contact" });
     return "do_not_contact";
+  }
+  // The Campaigns screen once more, last (review of #531): a Pause pressed
+  // while this tick waited on the re-check or the offer check sends nothing.
+  // The text waits, due at once, so Resume sends it on the next tick; no try
+  // is spent. A status that cannot be read sends nothing.
+  const lateHold = await deps.store
+    .campaignRunState(claimed.campaignId)
+    .then(campaignHoldReason, () => "the campaign's status could not be read");
+  if (lateHold) {
+    await deps.store.patchText(claimed.id, { state: "retry", retry_after: at.toISOString(), reason: TEXT_CAMPAIGN_HELD });
+    return TEXT_CAMPAIGN_HELD;
   }
 
   const sender = await deps.sms();

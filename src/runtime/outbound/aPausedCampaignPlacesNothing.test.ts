@@ -20,6 +20,7 @@ import type { LaneConfig, LaneSource } from "../laneRegistry";
 import type { ContactSource, OutboundLanePolicy } from "./campaign";
 import { DEFAULT_ATTEMPT_CAPS, DEFAULT_CALLING_WINDOW } from "./callingWindow";
 import { runCampaignTick, type OutboundTwilio } from "./dialer";
+import { runTextTick } from "./outreachText";
 import { runOutboundTick, type SchedulerDeps } from "./scheduler";
 import { campaignHoldReason } from "./store";
 import { FakeOutboundStore } from "./store.testkit";
@@ -325,4 +326,103 @@ describe("what is owed never reads the hold", () => {
       expect(src).not.toContain("campaignHoldReason");
     });
   }
+});
+
+describe("a Pause pressed while a tick is under way (review of #531)", () => {
+  // A tick reads `running` at its start, then can spend seconds on the source
+  // refresh, the re-check and the offer check. The status is read again just
+  // before the call or the text, so a Pause pressed meanwhile places nothing.
+  function pausingMidTick(store: FakeOutboundStore) {
+    let pressed = false;
+    const offerCheck = vi.fn(async () => {
+      if (!pressed) {
+        pressed = true;
+        await screen(store).press("pause");
+      }
+      return "offerable" as const;
+    });
+    return { lane: { ...policy, offerCheck }, offerCheck };
+  }
+
+  function dialDeps(store: FakeOutboundStore, lines: string[] = []) {
+    let n = 0;
+    const createCall = vi.fn(async () => ({ sid: `CA${String(++n).padStart(32, "0")}` }));
+    const twilio: OutboundTwilio = { createCall, voiceUrlFor: async () => "https://voice.example.test/voice/test-lane" };
+    return {
+      deps: { store, twilio, env: ON, host: "voice.example.test", now: () => NOW, log: (l: string) => lines.push(l), holdNoted: new Map<string, string | null>() },
+      createCall,
+    };
+  }
+
+  it("the dialler rings nobody, gives the row back as it was, and claims nobody else this tick", async () => {
+    const store = new FakeOutboundStore(() => NOW);
+    store.addContact({ id: "c1", phone: "+15555550111" });
+    store.addContact({ id: "c2", phone: "+15555550112" });
+    const before = (id: string) => ({ status: store.contacts.get(id)!.status, next: store.contacts.get(id)!.nextAttemptAt });
+    const c1 = before("c1");
+    const { lane, offerCheck } = pausingMidTick(store);
+    const lines: string[] = [];
+    const { deps, createCall } = dialDeps(store, lines);
+    const result = await runCampaignTick("test-lane", lane, deps);
+    expect(createCall).not.toHaveBeenCalled();
+    expect(result.dialled).toBe(0);
+    expect(result.held).toEqual({ campaign_held: 1 });
+    expect(offerCheck).toHaveBeenCalledTimes(1);
+    expect(before("c1")).toEqual(c1);
+    expect(store.contacts.get("c2")!.status).toBe("pending");
+    expect(lines).toContain("[outbound] test-campaign: NOT dialling — the campaign is paused on the Campaigns screen");
+
+    // Resume on the screen, and the next tick dials both.
+    await screen(store).press("resume");
+    await runCampaignTick("test-lane", lane, deps);
+    expect(createCall).toHaveBeenCalledTimes(2);
+  });
+
+  it("a status that cannot be read at the last check rings nobody", async () => {
+    const store = new FakeOutboundStore(() => NOW);
+    store.addContact({ id: "c1", phone: "+15555550111" });
+    const real = store.campaignRunState.bind(store);
+    let reads = 0;
+    store.campaignRunState = async (id: string) => {
+      if (++reads > 1) throw new Error("db down");
+      return real(id);
+    };
+    const { deps, createCall } = dialDeps(store);
+    const result = await runCampaignTick("test-lane", policy, deps);
+    expect(createCall).not.toHaveBeenCalled();
+    expect(result.held).toEqual({ campaign_held: 1 });
+    expect(store.contacts.get("c1")!.status).toBe("pending");
+  });
+
+  it("a running campaign is read twice and dials as before (the control)", async () => {
+    const store = new FakeOutboundStore(() => NOW);
+    store.addContact({ id: "c1", phone: "+15555550111" });
+    const spy = vi.spyOn(store, "campaignRunState");
+    const { deps, createCall } = dialDeps(store);
+    const result = await runCampaignTick("test-lane", policy, deps);
+    expect(result.dialled).toBe(1);
+    expect(createCall).toHaveBeenCalledTimes(1);
+    expect(spy).toHaveBeenCalledTimes(2);
+  });
+
+  it("the outreach text is not sent, waits with no try spent, and goes on Resume", async () => {
+    const store = new FakeOutboundStore(() => NOW);
+    store.addContact({ id: "c1", phone: "+15555550111" });
+    store.addContact({ id: "c2", phone: "+15555550112" });
+    const { lane, offerCheck } = pausingMidTick(store);
+    const send = vi.fn(async () => ({ sid: "SM1" }));
+    const deps = { store, env: ON, host: "voice.example.test", sms: async () => ({ send }), now: () => NOW, log: () => undefined };
+    const result = await runTextTick("test-lane", lane, deps);
+    expect(send).not.toHaveBeenCalled();
+    expect(result.held).toEqual({ campaign_held: 1 });
+    expect(offerCheck).toHaveBeenCalledTimes(1);
+    const record = store.contacts.get("c1")!.customData.outreach_text as Record<string, unknown>;
+    expect(record).toMatchObject({ state: "retry", retry_after: NOW.toISOString(), reason: "campaign_held" });
+    expect(record.tries).toBeUndefined();
+    expect(store.contacts.get("c2")!.customData.outreach_text).toBeUndefined();
+
+    await screen(store).press("resume");
+    await runTextTick("test-lane", lane, deps);
+    expect(send).toHaveBeenCalledTimes(2);
+  });
 });
