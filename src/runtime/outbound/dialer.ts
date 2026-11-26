@@ -596,15 +596,7 @@ async function dialOne(
     await deps.store.releaseContact(contact.id, candidate.status, nextLookAt(at, stillOpen.reason, policy));
     return stillOpen.reason;
   }
-  // The do-not-contact list again, last: an opt-out recorded while the offer
-  // check waited on NPX is honoured before anybody is rung (review of #519,
-  // round 3).
-  if (await deps.store.isDoNotContact(contact.phone)) {
-    await deps.store.settleContact(contact.id, "do_not_call");
-    await notPlaced("do_not_contact");
-    return "do_not_contact";
-  }
-  // THE CAMPAIGNS SCREEN once more, last (review of #531): a tick reads
+  // THE CAMPAIGNS SCREEN once more (review of #531): a tick reads
   // `running` at its start and can then spend seconds on the source refresh,
   // the re-check and the offer check, so a Pause pressed meanwhile is read
   // again here, before anybody is rung. The row goes back exactly as it was,
@@ -612,7 +604,7 @@ async function dialOne(
   // nobody. Between this read and Twilio taking the call sit one attempt
   // insert (a single row) and the createCall request itself, which no read
   // can close; the Pause route promises only "from its next minute's tick"
-  // (review of #531, rounds 2 and 3, declined with that reasoning; closing it
+  // (review of #531, rounds 2 to 4, declined with that reasoning; closing it
   // fully needs a lock the Pause route and the dialler share, the operator's).
   const lateHold = await deps.store
     .campaignRunState(campaignId)
@@ -623,6 +615,15 @@ async function dialOne(
     return CAMPAIGN_HELD;
   }
 
+  // The do-not-contact list again, last of all: an opt-out recorded while the
+  // offer check or the campaign status read waited is honoured before anybody
+  // is rung (review of #519, round 3; kept last over the status read, review
+  // of #531, round 4: an opt-out outranks a Pause).
+  if (await deps.store.isDoNotContact(contact.phone)) {
+    await deps.store.settleContact(contact.id, "do_not_call");
+    await notPlaced("do_not_contact");
+    return "do_not_contact";
+  }
   const attemptId = await deps.store.startAttempt(contact.id, campaignId, prior.length + 1);
   let call: { sid: string };
   try {

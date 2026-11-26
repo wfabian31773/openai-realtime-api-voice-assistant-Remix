@@ -311,21 +311,14 @@ async function textOne(
     });
     return stillOpen.reason;
   }
-  // The do-not-contact list again, last: an opt-out recorded while the offer
-  // check waited on NPX is honoured before the text goes (review of #519,
-  // round 3).
-  if (await deps.store.isDoNotContact(phone)) {
-    await deps.store.patchText(claimed.id, { state: "skipped", reason: "do_not_contact" });
-    return "do_not_contact";
-  }
   const sender = await deps.sms();
   if (!sender) {
     await deps.store.patchText(claimed.id, { state: "retry", retry_after: later, reason: "no_sms_sender" });
     return "no_sms_sender";
   }
-  // The Campaigns screen once more, last, immediately before the send (review
-  // of #531, two rounds): a Pause pressed while this tick waited on the
-  // re-check, the offer check or the sender sends nothing.
+  // The Campaigns screen once more, just before the send (review of #531,
+  // two rounds): a Pause pressed while this tick waited on the re-check, the
+  // offer check or the sender sends nothing.
   // The text waits, due at once, so Resume sends it on the next tick; no try
   // is spent. A status that cannot be read sends nothing.
   const lateHold = await deps.store
@@ -334,6 +327,15 @@ async function textOne(
   if (lateHold) {
     await deps.store.patchText(claimed.id, { state: "retry", retry_after: at.toISOString(), reason: TEXT_CAMPAIGN_HELD });
     return TEXT_CAMPAIGN_HELD;
+  }
+
+  // The do-not-contact list again, last of all: an opt-out recorded while the
+  // offer check, the sender or the campaign status read waited is honoured
+  // before the text goes (review of #519, round 3; kept last over the status
+  // read, review of #531, round 4: an opt-out outranks a Pause).
+  if (await deps.store.isDoNotContact(phone)) {
+    await deps.store.patchText(claimed.id, { state: "skipped", reason: "do_not_contact" });
+    return "do_not_contact";
   }
 
   try {

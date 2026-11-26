@@ -469,4 +469,38 @@ describe("a Pause pressed while a tick is under way (review of #531)", () => {
     expect(send).not.toHaveBeenCalled();
     expect(result.held).toEqual({ campaign_held: 1 });
   });
+
+  // The do-not-contact check stays the very last step (review of #531, round
+  // 4): an opt-out outranks a Pause, so one recorded while the status is read
+  // must still stop the call or the text.
+  function optOutDuringTheLastStatusRead(store: FakeOutboundStore, phone: string, source: string) {
+    const real = store.campaignRunState.bind(store);
+    let reads = 0;
+    store.campaignRunState = async (id: string) => {
+      if (++reads === 2) await store.stampDoNotContact(phone, source);
+      return real(id);
+    };
+  }
+
+  it("an opt-out recorded while the dialler reads the status is still honoured: nobody is rung", async () => {
+    const store = new FakeOutboundStore(() => NOW);
+    store.addContact({ id: "c1", phone: "+15555550111" });
+    optOutDuringTheLastStatusRead(store, "+15555550111", "voice");
+    const { deps, createCall } = dialDeps(store);
+    const result = await runCampaignTick("test-lane", policy, deps);
+    expect(createCall).not.toHaveBeenCalled();
+    expect(result.held).toEqual({ do_not_contact: 1 });
+    expect(store.contacts.get("c1")!.status).toBe("do_not_call");
+  });
+
+  it("an SMS STOP recorded while the text tick reads the status is still honoured: nothing is sent", async () => {
+    const store = new FakeOutboundStore(() => NOW);
+    store.addContact({ id: "c1", phone: "+15555550111" });
+    optOutDuringTheLastStatusRead(store, "+15555550111", "sms_stop");
+    const send = vi.fn(async () => ({ sid: "SM1" }));
+    const deps = { store, env: ON, host: "voice.example.test", sms: async () => ({ send }), now: () => NOW, log: () => undefined };
+    const result = await runTextTick("test-lane", policy, deps);
+    expect(send).not.toHaveBeenCalled();
+    expect(result.held).toEqual({ do_not_contact: 1 });
+  });
 });
