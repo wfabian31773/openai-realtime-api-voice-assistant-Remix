@@ -4,6 +4,7 @@ import apiClient from '@/lib/apiClient'
 import { describePipeline } from '@/lib/pipelineSplit'
 import { briefCorrectionNotice, briefNeighbours } from '@/lib/briefDayPicker'
 import { LIVE_WINDOW_MINUTES, liveCalls } from '@/lib/liveCalls'
+import { AccuracyTab } from '@/components/observatory/AccuracyTab'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import {
@@ -459,13 +460,14 @@ function StatusDot({ tone }: { tone: Tone }) {
 // 2026-08-07). Overview answers "is anything red"; every red opens into
 // the tab that explains WHY.
 
-type ObsTab = 'overview' | 'brief' | 'replays' | 'health' | 'guards' | 'director' | 'telemetry' | 'openings' | 'funnel' | 'syncs' | 'changes'
+type ObsTab = 'overview' | 'brief' | 'replays' | 'health' | 'accuracy' | 'guards' | 'director' | 'telemetry' | 'openings' | 'funnel' | 'syncs' | 'changes'
 
 const TABS: Array<{ key: ObsTab; label: string }> = [
   { key: 'overview', label: 'Overview' },
   { key: 'brief', label: 'Daily Brief' },
   { key: 'replays', label: 'New Core Replays' },
   { key: 'health', label: 'Health' },
+  { key: 'accuracy', label: 'Accuracy' },
   { key: 'guards', label: 'Guards & Failures' },
   { key: 'director', label: 'Director' },
   { key: 'telemetry', label: 'Telemetry & Tools' },
@@ -638,6 +640,7 @@ export default function ObservatoryPage() {
       {tab === 'telemetry' && <TelemetryTab days={windowDays} />}
       {tab === 'openings' && <OpeningsTab />}
       {tab === 'funnel' && <FunnelTab />}
+      {tab === 'accuracy' && <AccuracyTab />}
       {tab === 'syncs' && <SyncsTab />}
       {tab === 'changes' && <ChangesTab />}
     </div>
