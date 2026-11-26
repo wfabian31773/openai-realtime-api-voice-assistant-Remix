@@ -24,8 +24,9 @@ import {
   TableHeader,
   TableRow,
 } from '@/components/ui/table'
-import { Plus, Upload, Eye, Phone, PhoneOff, Calendar, Search, Database, Trash2, FileSpreadsheet, CheckCircle2 } from 'lucide-react'
+import { Plus, Upload, Eye, Phone, PhoneOff, Calendar, Search, Database, Trash2, FileSpreadsheet, CheckCircle2, Pause, Play } from 'lucide-react'
 import type { Campaign, CampaignContact, Agent } from '@/types'
+import { campaignButtons } from '@/lib/campaignControls'
 
 interface TwilioPhoneNumber {
   phoneNumber: string
@@ -295,11 +296,11 @@ export function CampaignsPage() {
       const { data } = await apiClient.post(`/campaigns/${id}/stop-outbound-scheduler`)
       return data
     },
-    onSuccess: () => {
+    onSuccess: (data: { message?: string }) => {
       queryClient.invalidateQueries({ queryKey: ['campaigns'] })
       addToast({
         title: 'Outbound Calls Stopped',
-        description: 'The campaign has stopped making calls',
+        description: data?.message || 'The campaign has stopped making calls',
         variant: 'success',
       })
     },
@@ -307,6 +308,30 @@ export function CampaignsPage() {
       addToast({
         title: 'Error',
         description: 'Failed to stop outbound calls',
+        variant: 'destructive',
+      })
+    },
+  })
+
+  // A runtime campaign's Pause and Resume (v277): the voice runtime reads the
+  // status they write every minute. The server's message says what happens.
+  const runtimeControlMutation = useMutation({
+    mutationFn: async ({ id, action }: { id: string; action: 'pause' | 'resume' }) => {
+      const { data } = await apiClient.post(`/campaigns/${id}/${action}`)
+      return data as { message?: string }
+    },
+    onSuccess: (data, { action }) => {
+      queryClient.invalidateQueries({ queryKey: ['campaigns'] })
+      addToast({
+        title: action === 'pause' ? 'Campaign Paused' : 'Campaign Resumed',
+        description: data?.message ?? '',
+        variant: 'success',
+      })
+    },
+    onError: (error: any, { action }) => {
+      addToast({
+        title: 'Error',
+        description: error?.response?.data?.message || `Failed to ${action} the campaign`,
         variant: 'destructive',
       })
     },
@@ -489,7 +514,7 @@ export function CampaignsPage() {
               campaign.totalContacts > 0
                 ? (campaign.completedContacts / campaign.totalContacts) * 100
                 : 0
-            const showStartButton = campaign.status !== 'running' && campaign.totalContacts > 0
+            const buttons = campaignButtons(campaign)
             return (
               <Card key={campaign.id}>
                 <CardHeader>
@@ -544,7 +569,7 @@ export function CampaignsPage() {
                       <Eye className="mr-2 h-3 w-3" />
                       View
                     </Button>
-                    {campaign.status !== 'running' && (
+                    {buttons.add && (
                       <Button
                         size="sm"
                         variant="outline"
@@ -554,7 +579,7 @@ export function CampaignsPage() {
                         Add
                       </Button>
                     )}
-                    {showStartButton && (
+                    {buttons.start && (
                       <Button
                         size="sm"
                         variant="default"
@@ -568,7 +593,30 @@ export function CampaignsPage() {
                         Start
                       </Button>
                     )}
-                    {campaign.status === 'running' && (
+                    {buttons.pause && (
+                      <Button
+                        size="sm"
+                        variant="destructive"
+                        onClick={() => runtimeControlMutation.mutate({ id: campaign.id, action: 'pause' })}
+                        disabled={runtimeControlMutation.isPending}
+                      >
+                        <Pause className="mr-2 h-3 w-3" />
+                        Pause
+                      </Button>
+                    )}
+                    {buttons.resume && (
+                      <Button
+                        size="sm"
+                        variant="default"
+                        className="bg-green-600 hover:bg-green-700"
+                        onClick={() => runtimeControlMutation.mutate({ id: campaign.id, action: 'resume' })}
+                        disabled={runtimeControlMutation.isPending}
+                      >
+                        <Play className="mr-2 h-3 w-3" />
+                        Resume
+                      </Button>
+                    )}
+                    {buttons.stop && (
                       <Button
                         size="sm"
                         variant="destructive"
@@ -579,7 +627,7 @@ export function CampaignsPage() {
                         Stop
                       </Button>
                     )}
-                    {campaign.status !== 'running' && (
+                    {buttons.delete && (
                       <Button
                         size="sm"
                         variant="ghost"
@@ -591,6 +639,9 @@ export function CampaignsPage() {
                       </Button>
                     )}
                   </div>
+                  {buttons.note && (
+                    <p className="text-xs text-muted-foreground">{buttons.note}</p>
+                  )}
                 </CardContent>
               </Card>
             )

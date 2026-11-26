@@ -143,7 +143,7 @@ function asWebhookRequest(req: Request): WebhookRequest {
 
 function enqueueHttpStatus(reason: string): number {
   if (reason === "do_not_contact" || reason === "invalid_phone" || reason === "call_already_queued") return 409;
-  if (reason === "no_campaign") return 503;
+  if (reason === "no_campaign" || reason === "campaign_paused" || reason === "campaign_status_unreadable") return 503;
   return 422;
 }
 

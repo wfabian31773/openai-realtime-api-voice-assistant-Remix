@@ -2262,8 +2262,24 @@ import { callEnvironment } from "./callRecord";
  * no request (AskAnswer keeps none apart from failed). Above main's v276
  * (#526, `184fcecf`). No migration.
  */
+/*
+ * v278 (2026-11-26): campaign controls stop a runtime campaign, and never
+ * destroy its record. The runtime dialler never read the campaigns row's
+ * status, so Pause, Stop and Cancel on the Campaigns screen left a runtime
+ * outbound campaign (NPX outreach) ringing; Resume and Start marked it
+ * cancelled through the old executor's refusal; and Delete would have made
+ * the runtime create a fresh campaign and queue everyone again. The dialler
+ * and the outreach-text tick now place new outreach only while the row reads
+ * running and is not deleted (campaignRunState, campaignHoldReason);
+ * confirmations, held cancels and returned calls still run. The routes answer
+ * a runtime campaign before the old code (server/runtimeCampaignControls.ts):
+ * Delete and Start refused, PATCH limited. ensureCampaign never creates a
+ * second row for a key. Measured on the Hub: four runtime campaigns, all
+ * running, none deleted. Written as v277; renumbered when #532 took v277 on
+ * main. Above v277 (#532, `5183de93`). No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v277-the-heard-name-is-held-and-only-a-null-is-no-request-20261126";
+  "voice-runtime-v278-campaign-controls-stop-a-runtime-campaign-20261126";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
