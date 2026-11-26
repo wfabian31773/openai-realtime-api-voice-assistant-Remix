@@ -4,7 +4,7 @@
  *
  * Before: any signed-in user; rows older than 5 minutes; a call Twilio still
  * reported live after 10 minutes was hung up. Measured 2026-11-26 (Hub
- * call_logs, 30 days): 840 runtime calls ran 5 to 10 minutes, 436 ran past 10
+ * call_logs, 30 days): 840 runtime calls ran 5 to 10 minutes, 440 ran past 10
  * minutes at Twilio, 403 of them PCP queue transfers that stayed live a median
  * 871 s (up to 3,447 s) after our side let go; 0 rows were open at the time
  * of measuring and 0 were reaped as stale in 90 days.
