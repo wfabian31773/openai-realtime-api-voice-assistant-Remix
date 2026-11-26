@@ -30,24 +30,3 @@ export function withoutProviderMarkup(text: string): string {
   const at = providerMarkupIndex(text);
   return at < 0 ? text : text.slice(0, at).trimEnd();
 }
-
-/**
- * How many bytes of 8 kHz mu-law audio (8,000 a second) the words before a tag
- * may play. xAI sends a sentence's text before its audio, so when a tag shows
- * up the words before it are often still being spoken (handleAgentTranscriptDelta
- * in mediaStreamBridge.ts). The audio cannot be split at the tag exactly, so
- * this errs toward letting those words finish: it is above every line measured
- * on grok-voice-3.0 (synthetic lines, 2026-11-26), from 419 bytes a character
- * on a long sentence to 756 on "Okay, bye.", with a fixed part for the pause a
- * response starts and ends with. A tag that makes no sound (`<turn_end>`,
- * `<silence />`) then costs the words nothing. A tag that is read aloud (a tool
- * call written out as text) can still be heard for the slack, at most about
- * 0.75 s after a goodbye-length line.
- */
-export const MARKUP_AUDIO_FIXED_BYTES = 6000;
-export const MARKUP_AUDIO_BYTES_PER_CHAR = 550;
-
-export function audioForWordsBeforeMarkup(wordsBeforeTag: string): number {
-  const chars = wordsBeforeTag.trim().length;
-  return chars === 0 ? 0 : MARKUP_AUDIO_FIXED_BYTES + MARKUP_AUDIO_BYTES_PER_CHAR * chars;
-}

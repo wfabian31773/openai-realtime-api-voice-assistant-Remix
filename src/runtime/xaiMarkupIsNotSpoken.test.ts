@@ -27,7 +27,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { VoiceCallBridge, type BridgeSessionHandlers, type CallOutcome, type VoiceCallRecord } from "./mediaStreamBridge";
 import { answeredQuestionResult } from "../agents/afterHoursAnsweredQuestion";
 import { followUpEvent } from "./followUpTelemetry";
-import { audioForWordsBeforeMarkup, providerMarkupIndex, withoutProviderMarkup } from "./providerMarkup";
+import { providerMarkupIndex, withoutProviderMarkup } from "./providerMarkup";
 
 const ANSWERED = "record_answered_question";
 /** What a lookup or a filing answers: something the caller IS waiting on. */
@@ -536,9 +536,12 @@ describe("FIX 2: provider markup is not played or recorded", () => {
     expect(h.agentLines().slice(-1)[0]).toBe(`AGENT: ${GOODBYE}`);
   });
 
-  it("a tag that is read aloud is cut where the words before it could have ended", async () => {
+  it("OPERATOR'S CHOICE: a tag read aloud after real words plays whole, and only the line is cut", async () => {
     // Probed: "Great, have a good day! <tool_call>end_call<arg_key>…" took
-    // 35,717 bytes, 23,040 of them the tool call read aloud.
+    // 35,717 bytes, 23,040 of them the tool call read aloud. Where the
+    // goodbye's audio ends is not known, and an estimate drew opposite review
+    // findings on #524 (0 such lines in the 30 days to 2026-11-26), so the
+    // audio plays as it did before v275 (operator, 2026-11-26: the exact cut).
     const h = harness();
     h.caller("No, thank you.");
     const from = h.media.length;
@@ -548,11 +551,29 @@ describe("FIX 2: provider markup is not played or recorded", () => {
       [[3869], [3176, 4160, 496, 976, 8000, 8000, 7040]],
       `${GOODBYE} <tool_call>end_call<arg_key>reason</arg_key></tool_call>`,
     );
-    const budget = audioForWordsBeforeMarkup(GOODBYE);
-    expect(sentBytes(h, from)).toBe(budget);
-    expect(budget).toBeLessThan(35717);
-    // The chunk that crosses the budget is cut, not dropped whole or sent whole.
-    expect(Buffer.from(h.media[h.media.length - 1], "base64").length).toBe(budget - 12677);
+    expect(sentBytes(h, from)).toBe(35717);
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" } as never);
+    await h.flush();
+    expect(h.agentLines().slice(-1)[0]).toBe(`AGENT: ${GOODBYE}`);
+    expect(h.records[0].providerMarkupCuts).toBe(1);
+  });
+
+  it("CODEX SHAPE: a number read back before a tag is never cut short", async () => {
+    // Codex P2 on #524 (604741080d): a character-count budget gave a ticket
+    // number read back before a tag less audio than it takes to say.
+    // CA08109d2bc937b876b609dc096e269be3 (pcp) is the one such line in the 30
+    // days to 2026-11-26. Probed: the number said as words ("…V A seven three
+    // six zero one.") took 33,157 bytes; written with digits the line is 31
+    // characters, which the withdrawn estimate allowed 23,050.
+    const line = "Your ticket number is VA-73601.";
+    const h = harness();
+    h.caller("What's the ticket number?");
+    const from = h.media.length;
+    await goodbyeThenTag(h, [line, " <turn_end>"], [[4000], [8000, 8000, 8000, 5157]], `${line} <turn_end>`);
+    expect(sentBytes(h, from)).toBe(33157);
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" } as never);
+    await h.flush();
+    expect(h.agentLines().slice(-1)[0]).toBe(`AGENT: ${line}`);
   });
 
   it("a tag split across two deltas is still caught", async () => {
@@ -720,27 +741,6 @@ describe("providerMarkup", () => {
   it.each(["2 < 3", "a <3", "x <-y", "less than <", "We open at 8."])("finds no tag in %j", (text) => {
     expect(providerMarkupIndex(text)).toBe(-1);
     expect(withoutProviderMarkup(text)).toBe(text);
-  });
-
-  it.each([
-    // Probed 2026-11-26 on grok-voice-3.0, synthetic lines: [text, audio bytes].
-    ["Great, have a good day!", 12677],
-    ["Great, have a good day! Take care.", 20357],
-    ["You're welcome. Take care.", 15237],
-    ["Okay, bye.", 7557],
-    ["Perfect, thank you. Goodbye!", 17797],
-    ["Thank you for calling Azul Vision. Have a great evening.", 25477],
-    ["I'm sorry, I'm not able to transfer calls. I can only take a message and put in a request, and the team will follow up with you.", 53637],
-    ["Your ticket number is V A seven three six zero one.", 33157],
-    ["Gracias por llamar. Que tenga un buen día.", 20357],
-    ["Igualmente, bendiciones. Adiós.", 22917],
-  ])("lets %j play all %i bytes of its measured audio before a tag", (text, measured) => {
-    expect(audioForWordsBeforeMarkup(text)).toBeGreaterThanOrEqual(measured);
-  });
-
-  it("gives no audio to a line that opens with the tag", () => {
-    expect(audioForWordsBeforeMarkup("")).toBe(0);
-    expect(audioForWordsBeforeMarkup("   ")).toBe(0);
   });
 
   it("keeps the words before the first tag", () => {
