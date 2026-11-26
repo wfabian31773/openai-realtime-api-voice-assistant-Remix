@@ -19,6 +19,8 @@ import { normalizeCallLog } from './callLogShape';
 import { mountOnCallAdmin, storePerPool } from './onCallAdmin';
 import { createPgOnCallAdminStore, type OnCallAdminStore } from './onCallAdmin/store';
 import { pool } from './db';
+import { mountAccuracyCheck } from './accuracy/accuracy';
+import { opsHubAgentScorecards, todayOverview } from './observatory/queries';
 
 // Hybrid authentication middleware - supports both Replit Auth and custom auth
 const isAuthenticated = (req: Request, res: Response, next: NextFunction) => {
@@ -78,6 +80,33 @@ export async function registerRoutes(app: Express): Promise<Server> {
       return { userId, email };
     },
   });
+
+  // The accuracy check (operator, 2026-11-26: "yes, build the accuracy check
+  // too"): every screen number read twice, the screen's own function beside an
+  // independent truth query, hourly, with history. server/accuracy/.
+  const accuracy = mountAccuracyCheck(app, {
+    authenticate: isAuthenticated,
+    hub: () => pool,
+    env: process.env,
+    checkDeps: () => ({
+      hub: pool,
+      screens: {
+        todayOverview: () => todayOverview(),
+        scorecards: (days) => opsHubAgentScorecards(days),
+        budgetStatus: async () => {
+          const { budgetGuardService } = await import('../src/services/budgetGuardService');
+          return budgetGuardService.getStatus();
+        },
+        // Served by the voice process; the API proxies /api/voice there.
+        operationsMonitor: async () => {
+          const res = await fetch('http://localhost:8000/api/voice/diagnostics', { signal: AbortSignal.timeout(5_000) });
+          if (!res.ok) throw new Error(`the voice process answered HTTP ${res.status}`);
+          return (await res.json()) as { last24Hours?: { totalCalls?: number | null } };
+        },
+      },
+    }),
+  });
+  accuracy.startSchedule();
 
   // ==================== Observatory (docs/observatory/) ====================
   // OBS-0 health: proves both data planes before any widget ships — this
