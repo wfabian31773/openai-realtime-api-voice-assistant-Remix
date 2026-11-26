@@ -371,6 +371,35 @@ describe('v276: a request read from the recording files only under a name', () =
     expect(payload?.patientFullName).toBe('Owen Lark');
   });
 
+  it('a retry that throws files a named caller with the note, and no stand-in (review of #532)', async () => {
+    let calls = 0;
+    const throwsOnRetry = async () => {
+      calls += 1;
+      if (calls % 2 === 1) return { request: 'Wants to speak with Owen Lark.' };
+      throw new Error('synthetic outage');
+    };
+    const named = await sweep(
+      [GREETING, 'CALLER: My name is Owen Lark, I need to move my appointment.', 'AGENT: I will pass that on.'].join('\n'),
+      { request: throwsOnRetry, heard: { firstName: 'Owen', lastName: 'Lark' } },
+    );
+    expect(named.askRequest).toHaveBeenCalledTimes(2);
+    expect(named.payload?.patientFullName).toBe('Owen Lark');
+    expect(named.payload.additionalDetails).toContain(floor.FLOOR_REQUEST_NOT_CONFIRMED_NOTE);
+
+    h.submitSimplifiedTicket.mockClear();
+    const standIn = await sweep(
+      [GREETING, 'CALLER: I need to move my appointment.', 'AGENT: I will pass that on.'].join('\n'),
+      {
+        request: async () => {
+          calls += 1;
+          if (calls % 2 === 1) return { request: 'Wants to move an appointment on March 3.' };
+          throw new Error('synthetic outage');
+        },
+      },
+    );
+    expect(standIn.payload).toBeUndefined();
+  });
+
   it('two answers that both fail a content check still read as a request (files under a name, not under a stand-in)', async () => {
     const named = await sweep(
       [GREETING, 'CALLER: My name is Owen Lark, I need to talk to Dr. Lin about my drops.', 'AGENT: I will pass that on.'].join('\n'),

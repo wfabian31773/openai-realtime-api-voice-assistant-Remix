@@ -124,18 +124,29 @@ describe('v277: the second answer decides what the reader reads (review of #526)
   });
 
   for (const text of ['...', '!?', '--', '12345', "'", "''", '"', "' '"]) {
-    it(`a second answer of only "${text}" is still a request, never a retraction (review of #532)`, async () => {
+    it(`a second answer of only "${text}" is unavailable, never a retraction (review of #532)`, async () => {
       replies.push(JSON.stringify({ request: 'Mara Quill wants a refill.' }));
       replies.push(JSON.stringify({ request: text }));
       const reading = await readTheRequest(TRANSCRIPT, askModelForTheRequest, ['Mara', 'Quill']);
-      expect(reading).toEqual({ kind: 'request' });
+      expect(reading).toEqual({ kind: 'unavailable' });
     });
   }
 
-  it('a second answer the model failed to give is still a request (the first had a topic)', async () => {
+  it('a second answer the model failed to give is unavailable, never a request (review of #532)', async () => {
     replies.push(JSON.stringify({ request: 'Mara Quill wants a refill.' }));
     replies.push('{}');
     const reading = await readTheRequest(TRANSCRIPT, askModelForTheRequest, ['Mara', 'Quill']);
-    expect(reading).toEqual({ kind: 'request' });
+    expect(reading).toEqual({ kind: 'unavailable' });
+  });
+
+  it('a second ask that throws is unavailable (review of #532)', async () => {
+    let calls = 0;
+    const ask = async () => {
+      calls += 1;
+      if (calls === 1) return { request: 'Wants to speak with Mara Quill.' };
+      throw new Error('timeout');
+    };
+    const reading = await readTheRequest(TRANSCRIPT, ask, ['Mara', 'Quill']);
+    expect(reading).toEqual({ kind: 'unavailable' });
   });
 });

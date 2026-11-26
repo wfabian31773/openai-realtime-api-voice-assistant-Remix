@@ -591,6 +591,11 @@ export async function readTheRequest(
   // v276 (review of #526): the model answering the retry with an explicit null
   // takes the request back once what it was told to leave out is gone.
   if (second.kind === "none") return { kind: "none" };
+  // v277 (review of #532): a retry the model failed to answer, or answered
+  // with no words, settles nothing; the first answer was refused, so neither
+  // established a request. The floor files a named caller with its
+  // request-not-confirmed note and files nothing under the stand-in.
+  if (second.kind === "failed") return { kind: "unavailable" };
   if (second.kind === "sentence") {
     const again = checkRequest(second.text, heldNames);
     if ("sentence" in again) {
@@ -607,6 +612,6 @@ export async function readTheRequest(
     }
     console.warn(`[REQUEST FROM RECORDING] the second answer failed a check too (${again.kind})${where}`);
   }
-  // The first answer named a request; only its wording was unusable.
+  // Both answers named a request; only their wording was unusable.
   return { kind: "request" };
 }
