@@ -10,6 +10,12 @@
  * 2026-08-24 the voice process was exactly the thing that was sick (its DB
  * layer wedged after a Supabase restart) and every existing cleanup
  * mechanism lived inside it.
+ *
+ * The Live Calls "Cleanup Stale" button runs the same sweep on demand
+ * (server/staleCallCleanup.ts, 2026-11-26), with its own age line and
+ * `closeUnverified: false`, so there is one set of rules and no second copy
+ * of them. Nothing here can hang up a call: the Twilio client this file is
+ * typed against has no write method.
  */
 import { inArray, lt, and, eq } from 'drizzle-orm';
 import { db } from '../db';
@@ -20,6 +26,7 @@ import {
   summarizeSweepLine,
   STALE_CALL_CEILING_MS,
   STALE_SWEEPER_MARKER,
+  type SweepAction,
   type TwilioLookup,
   type SweepSummary,
 } from './staleCallSweep.logic';
@@ -27,10 +34,45 @@ import {
 const SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 const SWEEP_BATCH_LIMIT = 200;
 
+/** The statuses a row can be stuck in. A close lands only while the row still reads one of them. */
+export const LIVE_CALL_STATUSES = ['in_progress', 'ringing', 'initiated'] as const;
+
 let sweeperInterval: NodeJS.Timeout | null = null;
 
-async function lookupTwilio(
-  client: any | null,
+/** Read-only view of the Twilio client: the sweeper can fetch a call and do nothing else to it. */
+export interface TwilioCallReader {
+  calls(callSid: string): { fetch(): Promise<any> };
+}
+
+export interface StaleDbRow {
+  id: string;
+  callSid: string | null;
+  status: string | null;
+  createdAt: Date | null;
+}
+
+export type ClosePatch = Extract<SweepAction, { type: 'close' }>['patch'];
+
+export interface SweepDeps {
+  /** Rows in a live status created before `cutoff`. */
+  findStaleRows(cutoff: Date, limit: number): Promise<StaleDbRow[]>;
+  /** Close one row; true only when the row was still in a live status. */
+  closeRow(id: string, patch: ClosePatch): Promise<boolean>;
+  /** null when Twilio credentials are not available. */
+  twilioClient(): Promise<TwilioCallReader | null>;
+  now(): Date;
+}
+
+export interface SweepOptions {
+  /** How old a live row must be. Default STALE_CALL_CEILING_MS (the automatic sweep). */
+  minAgeMs?: number;
+  /** See DecideOptions. Default true (the automatic sweep). */
+  closeUnverified?: boolean;
+  limit?: number;
+}
+
+export async function lookupTwilio(
+  client: TwilioCallReader | null,
   callSid: string | null,
 ): Promise<TwilioLookup> {
   if (!client || !callSid) return { kind: 'unavailable' };
@@ -46,7 +88,8 @@ async function lookupTwilio(
         endTime: call.endTime ? new Date(call.endTime) : null,
       };
     }
-    // queued / ringing / in-progress — genuinely live at Twilio
+    // queued / initiated / ringing / in-progress, or a status we do not know:
+    // treated as live, so it is never closed on a guess.
     return { kind: 'live', twilioStatus };
   } catch (err: any) {
     if (err?.code === 20404 || err?.status === 404) return { kind: 'not_found' };
@@ -54,61 +97,96 @@ async function lookupTwilio(
   }
 }
 
-export async function sweepStaleCalls(): Promise<SweepSummary> {
+export const productionSweepDeps: SweepDeps = {
+  async findStaleRows(cutoff, limit) {
+    return db
+      .select({
+        id: callLogs.id,
+        callSid: callLogs.callSid,
+        status: callLogs.status,
+        createdAt: callLogs.createdAt,
+      })
+      .from(callLogs)
+      .where(
+        and(
+          inArray(callLogs.status, [...LIVE_CALL_STATUSES]),
+          lt(callLogs.createdAt, cutoff),
+        ),
+      )
+      .limit(limit);
+  },
+  async closeRow(id, patch) {
+    // Guarded on the status the row was read with: if the call's own
+    // teardown (or a concurrent sweep) closed it after the read, that
+    // record stands and this write changes nothing.
+    const closed = await db
+      .update(callLogs)
+      .set({
+        status: patch.status,
+        duration: patch.duration ?? undefined,
+        endTime: patch.endTime,
+        twilioStatus: patch.twilioStatus ?? undefined,
+        callDisposition: patch.callDisposition,
+      })
+      .where(and(eq(callLogs.id, id), inArray(callLogs.status, [...LIVE_CALL_STATUSES])))
+      .returning({ id: callLogs.id });
+    return closed.length > 0;
+  },
+  async twilioClient() {
+    try {
+      const { getTwilioClient } = await import('../../src/lib/twilioClient');
+      return (await getTwilioClient()) as unknown as TwilioCallReader;
+    } catch (err: any) {
+      console.warn(
+        `[StaleCallSweeper] Twilio client unavailable (${err?.message ?? err}) — ` +
+          `stale rows cannot be checked against Twilio`,
+      );
+      return null;
+    }
+  },
+  now: () => new Date(),
+};
+
+export async function sweepStaleCalls(
+  options: SweepOptions = {},
+  deps: SweepDeps = productionSweepDeps,
+): Promise<SweepSummary> {
+  const minAgeMs = options.minAgeMs ?? STALE_CALL_CEILING_MS;
+  const closeUnverified = options.closeUnverified ?? true;
   const summary: SweepSummary = {
     examined: 0,
     closedFromTwilioTruth: 0,
     closedUnresolvable: 0,
     stillLiveAtTwilio: 0,
     errors: 0,
+    leftUnverified: 0,
+    alreadyClosed: 0,
   };
 
-  const ceiling = new Date(Date.now() - STALE_CALL_CEILING_MS);
-  const staleRows = await db
-    .select({
-      id: callLogs.id,
-      callSid: callLogs.callSid,
-      status: callLogs.status,
-      createdAt: callLogs.createdAt,
-    })
-    .from(callLogs)
-    .where(
-      and(
-        inArray(callLogs.status, ['in_progress', 'ringing', 'initiated']),
-        lt(callLogs.createdAt, ceiling),
-      ),
-    )
-    .limit(SWEEP_BATCH_LIMIT);
+  const now = deps.now();
+  const cutoff = new Date(now.getTime() - minAgeMs);
+  const staleRows = await deps.findStaleRows(cutoff, options.limit ?? SWEEP_BATCH_LIMIT);
 
   summary.examined = staleRows.length;
   if (staleRows.length === 0) return summary;
 
-  let twilioClient: any | null = null;
-  try {
-    const { getTwilioClient } = await import('../../src/lib/twilioClient');
-    twilioClient = await getTwilioClient();
-  } catch (err: any) {
-    console.warn(
-      `[StaleCallSweeper] Twilio client unavailable (${err?.message ?? err}) — ` +
-        `stale rows will close as failed with no invented duration`,
-    );
-  }
+  const twilioClient = await deps.twilioClient();
 
   for (const row of staleRows) {
     const lookup = await lookupTwilio(twilioClient, row.callSid);
-    const action = decideSweep({ id: row.id, callSid: row.callSid, status: row.status ?? '' }, lookup);
+    const action = decideSweep(
+      { id: row.id, callSid: row.callSid, status: row.status ?? '' },
+      lookup,
+      now,
+      { closeUnverified },
+    );
 
     if (action.type === 'close') {
-      await db
-        .update(callLogs)
-        .set({
-          status: action.patch.status,
-          duration: action.patch.duration ?? undefined,
-          endTime: action.patch.endTime,
-          twilioStatus: action.patch.twilioStatus ?? undefined,
-          callDisposition: action.patch.callDisposition,
-        })
-        .where(eq(callLogs.id, row.id));
+      const closed = await deps.closeRow(row.id, action.patch);
+      if (!closed) {
+        summary.alreadyClosed = (summary.alreadyClosed ?? 0) + 1;
+        continue;
+      }
       if (lookup.kind === 'terminal') summary.closedFromTwilioTruth++;
       else summary.closedUnresolvable++;
       console.info(
@@ -120,8 +198,14 @@ export async function sweepStaleCalls(): Promise<SweepSummary> {
       summary.stillLiveAtTwilio++;
       console.error(
         `[StaleCallSweeper] ⚠ CallSid ${row.callSid} is STILL ${action.twilioStatus} at Twilio after ` +
-          `${Math.round(STALE_CALL_CEILING_MS / 60000)}+ minutes — NOT touched. This is billing in real ` +
-          `time and needs a human decision.`,
+          `${Math.round(minAgeMs / 60000)}+ minutes — NOT touched. A transferred call or a long ` +
+          `operator call can be live here; a stuck one needs a human decision.`,
+      );
+    } else if (action.type === 'leave_unverified') {
+      summary.leftUnverified = (summary.leftUnverified ?? 0) + 1;
+      console.info(
+        `[StaleCallSweeper] left ${row.id} open (CallSid ${row.callSid ?? 'none'}): Twilio ` +
+          `${action.reason === 'not_found' ? 'has no such call' : 'could not be asked'}, so nothing says it ended`,
       );
     } else {
       summary.errors++;
