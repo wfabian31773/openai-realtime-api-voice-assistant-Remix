@@ -521,6 +521,21 @@ describe("FIX 2: provider markup is not played or recorded", () => {
     expect(h.agentLines().slice(-1)[0]).toBe(`AGENT: ${GOODBYE}`);
   });
 
+  it("REVIEW SHAPE: the delta with the tag also carries the end of the goodbye, and the end still plays", async () => {
+    // github-actions on a42a38f9: the caller has heard only "Great," when the
+    // delta carrying "have a good day! <turn_end>" arrives. The rest of the
+    // goodbye's audio comes after that delta and must still be sent.
+    const h = harness();
+    await h.say("Is there anything else I can help you with?");
+    h.caller("No, thank you.");
+    const from = h.media.length;
+    await goodbyeThenTag(h, ["Great, ", "have a good day! <turn_end>"], [[2000], [1869, 3176, 4160, 496, 976]], `${GOODBYE} <turn_end>`);
+    expect(sentBytes(h, from)).toBe(12677);
+    await h.end();
+    expect(h.records[0].goodbyeGraceHangup).toBe(true);
+    expect(h.agentLines().slice(-1)[0]).toBe(`AGENT: ${GOODBYE}`);
+  });
+
   it("a tag that is read aloud is cut where the words before it could have ended", async () => {
     // Probed: "Great, have a good day! <tool_call>end_call<arg_key>…" took
     // 35,717 bytes, 23,040 of them the tool call read aloud.
