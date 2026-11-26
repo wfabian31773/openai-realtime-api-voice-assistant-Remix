@@ -17,7 +17,7 @@
  * of them. Nothing here can hang up a call: the Twilio client this file is
  * typed against has no write method.
  */
-import { inArray, lt, gt, and, eq, or, asc, sql } from 'drizzle-orm';
+import { inArray, and, eq, asc, sql } from 'drizzle-orm';
 import { db } from '../db';
 import { callLogs } from '../../shared/schema';
 import {
@@ -56,13 +56,19 @@ export interface StaleDbRow {
   callSid: string | null;
   status: string | null;
   createdAt: Date | null;
+  /**
+   * created_at exactly as Postgres holds it (microseconds), for the page
+   * cursor. A JavaScript Date keeps milliseconds only, and a cursor built
+   * from one re-reads the row it ended on (Codex on #529, round 2).
+   */
+  createdAtKey: string | null;
 }
 
 export type ClosePatch = Extract<SweepAction, { type: 'close' }>['patch'];
 
 /** Where the next page starts: after this row, in (created_at, id) order. */
 export interface StaleCursor {
-  createdAt: Date;
+  createdAtKey: string;
   id: string;
 }
 
@@ -125,20 +131,19 @@ export const productionSweepDeps: SweepDeps = {
         callSid: callLogs.callSid,
         status: callLogs.status,
         createdAt: callLogs.createdAt,
+        createdAtKey: sql<string | null>`${callLogs.createdAt}::text`,
       })
       .from(callLogs)
       .where(
         and(
+          // The status filter is the predicate of the partial index
+          // idx_call_logs_open_status_created, which holds only open rows.
           inArray(callLogs.status, [...LIVE_CALL_STATUSES]),
-          // created_at keeps the partial index idx_call_logs_open_status_created
-          // in play; the start time is what the board reads (Codex on #529).
-          lt(callLogs.createdAt, cutoff),
+          // Age as the Live Calls board reads it: the start time, else the
+          // creation time (Codex on #529, rounds 1 and 2).
           sql`coalesce(${callLogs.startTime}, ${callLogs.createdAt}) < ${cutoff}`,
           after
-            ? or(
-                gt(callLogs.createdAt, after.createdAt),
-                and(eq(callLogs.createdAt, after.createdAt), gt(callLogs.id, after.id)),
-              )
+            ? sql`(${callLogs.createdAt}, ${callLogs.id}) > (${after.createdAtKey}::timestamp, ${after.id}::varchar)`
             : undefined,
         ),
       )
@@ -207,8 +212,8 @@ export async function sweepStaleCalls(
     if (twilioClient === undefined) twilioClient = await deps.twilioClient();
     await sweepPage(staleRows, twilioClient, now, minAgeMs, closeUnverified, deps, summary);
     const last = staleRows[staleRows.length - 1];
-    if (staleRows.length < limit || !last.createdAt) break;
-    after = { createdAt: last.createdAt, id: last.id };
+    if (staleRows.length < limit || !last.createdAtKey) break;
+    after = { createdAtKey: last.createdAtKey, id: last.id };
   }
 
   if (summary.examined > 0) console.info(summarizeSweepLine(summary));

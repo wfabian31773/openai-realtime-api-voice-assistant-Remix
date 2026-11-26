@@ -82,19 +82,24 @@ function fakeDeps(rows: FakeRow[], twilio: ReturnType<typeof fakeTwilio> | null,
   const closed: { id: string; patch: any }[] = [];
   const cutoffs: Date[] = [];
   const pages: string[][] = [];
+  const cursors: ({ createdAtKey: string; id: string } | null)[] = [];
   const at = (minutes: number) => new Date(NOW.getTime() - minutes * 60000);
+  // What Postgres's created_at::text gives: microseconds a Date cannot hold.
+  const keyOf = (d: Date) => d.toISOString().replace('T', ' ').replace('Z', '') + '456';
   return {
     closed,
     cutoffs,
     pages,
+    cursors,
     deps: {
-      async findStaleRows(cutoff: Date, limit: number, after: { createdAt: Date; id: string } | null) {
+      async findStaleRows(cutoff: Date, limit: number, after: { createdAtKey: string; id: string } | null) {
         cutoffs.push(cutoff);
+        cursors.push(after);
         const page = rows
-          .map((r) => ({ id: r.id, callSid: r.callSid, status: 'in_progress', createdAt: at(r.ageMinutes), startTime: at(r.startedMinutesAgo ?? r.ageMinutes) }))
-          .filter((r) => r.createdAt < cutoff && r.startTime < cutoff)
-          .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || a.id.localeCompare(b.id))
-          .filter((r) => !after || r.createdAt > after.createdAt || (r.createdAt.getTime() === after.createdAt.getTime() && r.id > after.id))
+          .map((r) => ({ id: r.id, callSid: r.callSid, status: 'in_progress', createdAt: at(r.ageMinutes), createdAtKey: keyOf(at(r.ageMinutes)), startTime: at(r.startedMinutesAgo ?? r.ageMinutes) }))
+          .filter((r) => r.startTime < cutoff)
+          .sort((a, b) => a.createdAtKey.localeCompare(b.createdAtKey) || a.id.localeCompare(b.id))
+          .filter((r) => !after || r.createdAtKey > after.createdAtKey || (r.createdAtKey === after.createdAtKey && r.id > after.id))
           .slice(0, limit)
           .map(({ startTime: _s, ...r }) => r);
         pages.push(page.map((r) => r.id));
@@ -322,20 +327,36 @@ describe('rows the sweep must leave cannot hide the rows behind them (Codex on #
     expect(g.pages.length).toBe(5);
   });
 
-  it('the production read is oldest first, after the cursor, on the start time, inside the open-row index', async () => {
+  it('the production read is oldest first, after an exact cursor, on the start time alone', async () => {
     const dialect = new PgDialect();
-    await productionSweepDeps.findStaleRows(NOW, 200, { createdAt: new Date('2026-11-26T17:00:00.000Z'), id: 'row-9' });
+    await productionSweepDeps.findStaleRows(NOW, 200, { createdAtKey: '2026-11-26 17:00:00.123456', id: 'row-9' });
     const q = dialect.sqlToQuery(dbSelects[0].where as any);
-    expect(q.sql).toContain('"call_logs"."status" in ($1, $2, $3)');
-    expect(q.sql).toContain('"call_logs"."created_at" < $4');
-    expect(q.sql).toContain('coalesce("call_logs"."start_time", "call_logs"."created_at") < $5');
-    expect(q.sql).toContain('("call_logs"."created_at" > $6 or ("call_logs"."created_at" = $7 and "call_logs"."id" > $8))');
+    expect(q.sql).toBe(
+      '("call_logs"."status" in ($1, $2, $3) and coalesce("call_logs"."start_time", "call_logs"."created_at") < $4 ' +
+      'and ("call_logs"."created_at", "call_logs"."id") > ($5::timestamp, $6::varchar))',
+    );
+    // the cursor travels as the database's own text, microseconds and all
+    expect(q.params).toEqual([...LIVE_CALL_STATUSES, NOW, '2026-11-26 17:00:00.123456', 'row-9']);
     const order = (dbSelects[0].orderBy ?? []).map((o) => dialect.sqlToQuery(o as any).sql);
     expect(order).toEqual(['"call_logs"."created_at" asc', '"call_logs"."id" asc']);
     expect(dbSelects[0].limit).toBe(200);
 
     await productionSweepDeps.findStaleRows(NOW, 200, null);
-    expect(dialect.sqlToQuery(dbSelects[1].where as any).sql).not.toContain('"call_logs"."id" >');
+    expect(dialect.sqlToQuery(dbSelects[1].where as any).sql).not.toContain('"call_logs"."id")');
+  });
+
+  it('the next page starts after the exact key of the row the last page ended on (Codex on #529, round 2)', async () => {
+    const t = fakeTwilio({ [SID(27)]: async () => ({ status: 'in-progress' }), [SID(28)]: async () => ({ status: 'in-progress' }), [SID(29)]: async () => ({ status: 'completed' }) });
+    const f = fakeDeps([
+      { id: 'a', callSid: SID(27), ageMinutes: 50 },
+      { id: 'b', callSid: SID(28), ageMinutes: 45 },
+      { id: 'c', callSid: SID(29), ageMinutes: 20 },
+    ], t);
+    const s = await sweepStaleCalls({ ...MANUAL_CLEANUP_OPTIONS, limit: 1 }, f.deps);
+    expect(f.cursors[0]).toBeNull();
+    expect(f.cursors[1]).toEqual({ createdAtKey: new Date(NOW.getTime() - 50 * 60000).toISOString().replace('T', ' ').replace('Z', '') + '456', id: 'a' });
+    expect(f.pages).toEqual([['a'], ['b'], ['c'], []]);
+    expect(s.examined).toBe(3); // no row read twice
   });
 });
 
