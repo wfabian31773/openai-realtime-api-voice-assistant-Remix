@@ -1455,6 +1455,37 @@ function gradeCallbackFieldsCompleteness(input: DeterministicGraderInput): Grade
     };
   }
 
+  /**
+   * TWO FIELDS SHORT IN THE TRANSCRIPT IS A WARNING, NOT A CRITICAL.
+   * 2026-11-26.
+   *
+   * This check only runs when a ticket was filed, and it reads the TRANSCRIPT
+   * for fields the TICKET carries. Measured over the 7 days to 2026-11-26: it
+   * graded 180 calls critical, 58% of the fleet's 312 critical calls and the
+   * largest share of the Observatory's red "critical fails" rate; every one of
+   * the 180 had a ticket, and in the Support Center 177 of the 179 found
+   * carried a callback phone and all 179 a description (172 a name). The
+   * stated harm, "patient may not receive callback", was false on all but 2.
+   * The cause is the source, not the agents: the runtime fills caller ID onto
+   * the ticket and the name from the record, so the transcript need not say
+   * them (2026-09-09 made the same finding one branch up).
+   *
+   * Two of three missing stays a failure, at warning severity, so it is still
+   * counted and still listed. All three missing (the transcript shows no name,
+   * no number and no reason) stays CRITICAL: graderFalsePositives.test.ts
+   * keeps that over-correction guard.
+   */
+  if (missingFields.length < CALLBACK_REQUIRED_FIELDS.length) {
+    return {
+      grader: 'callback_fields_completeness',
+      pass: false,
+      score: completeness,
+      severity: 'warning',
+      reason: `Ticket filed; the transcript does not show: ${missingFields.join(', ')}. Check the ticket: it usually carries caller ID and the record's name.`,
+      metadata: { collectedFields, missingFields, completeness },
+    };
+  }
+
   return {
     grader: 'callback_fields_completeness',
     pass: false,
@@ -1892,7 +1923,11 @@ Respond with a JSON object only, no other text:
   // transcript, which also repairs the rows graded against a partial one
   // (9 of 9 "missing reason" verdicts on 09-09 contradict the transcript now
   // stored).
-  static readonly CURRENT_GRADER_VERSION = 11;
+  // v12 (2026-11-26): callback_fields_completeness two fields short in the
+  // transcript is a warning (180 of 312 critical calls in 7 days; 177 of 179
+  // of their tickets carried a phone). The sweep re-scores newest first, so
+  // the last week reads right within about a day.
+  static readonly CURRENT_GRADER_VERSION = 12;
 
   /** Re-run the deterministic graders on calls graded under an older
    *  grader version. Deterministic-only — the LLM analysis is not re-run,

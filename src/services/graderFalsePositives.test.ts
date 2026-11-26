@@ -308,6 +308,27 @@ describe('callback_fields_completeness — the 2026-09-09 audit', () => {
     expect(r.pass).toBe(true);
   });
 
+  /**
+   * 2026-11-26: two fields short in the transcript is a warning. Measured over
+   * 7 days, 180 calls graded critical this way and 177 of the 179 tickets found
+   * carried a callback phone (all 179 a description): the transcript is the
+   * wrong place to look for what the ticket holds. The shape below is the
+   * commonest (the PCP and after-hours lines: a reason the indicator list does
+   * not know, the callback from caller ID).
+   */
+  it('two fields missing from the transcript, with a ticket filed, is a warning', () => {
+    const shortOnTwo = [
+      'AGENT: Thank you for calling Azul Vision PCP Support. How can I help you today?',
+      'CALLER: This is Testa from Example Medical Group.',
+      'AGENT: Thank you. I have taken this down as ticket PCP-50005.',
+    ].join('\n');
+    const r = check(run({ transcript: shortOnTwo, ticketNumber: 'PCP-50005' }), 'callback_fields_completeness');
+    expect(r.metadata?.missingFields).toHaveLength(2);
+    expect(r.pass).toBe(false);
+    expect(r.severity).toBe('warning');
+    expect(r.reason).not.toMatch(/CRITICAL|may not receive callback/);
+  });
+
   /** The over-correction guard: a ticket filed off a transcript that shows
    *  nothing at all must still be reported. */
   it('still critical when the call shows none of the three', () => {

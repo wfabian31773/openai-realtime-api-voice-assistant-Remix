@@ -10,6 +10,7 @@
  */
 import { pool } from '../db';
 import { fivestarQuery } from './fivestarDb';
+import { aggregateOpenings } from './openingMask';
 import {
   assessTicketFiling,
   readTicketFilingSnapshot,
@@ -30,7 +31,13 @@ export interface OpsHubScorecard {
   avgQualityScore: number | null;
   longCalls: number; // > 45 turns
   avgInterruptions: number | null;
-  telephonyErrors: number;
+  /**
+   * Calls that dropped on the voice provider's side (runtime_outcome
+   * provider_failure) or never connected (status failed). Replaces
+   * "telephonyErrors", which read twilio_error_code: that column is never
+   * written, so the tile read 0 while 539 calls dropped in 7 days (2026-11-26).
+   */
+  droppedCalls: number;
   outcomes: Record<string, number>;
   avgDurationSec: number | null;
   /** Calls served by the Media Streams runtime (voice_provider = 'grok'). */
@@ -52,7 +59,7 @@ export async function opsHubAgentScorecards(days = 30): Promise<OpsHubScorecard[
            ROUND(AVG(cl.quality_score)::numeric, 2) AS avg_quality,
            COUNT(cl.id) FILTER (WHERE cl.total_turns > 45)::int AS long_calls,
            ROUND(AVG(cl.interruption_count)::numeric, 2) AS avg_interruptions,
-           COUNT(cl.id) FILTER (WHERE cl.twilio_error_code IS NOT NULL)::int AS telephony_errors,
+           COUNT(cl.id) FILTER (WHERE cl.runtime_outcome = 'provider_failure' OR cl.status = 'failed')::int AS dropped_calls,
            ROUND(AVG(cl.duration)::numeric, 0) AS avg_duration_sec,
            COUNT(cl.id) FILTER (WHERE cl.voice_provider = 'grok')::int AS runtime_calls,
            COUNT(cl.id) FILTER (WHERE cl.voice_provider IS DISTINCT FROM 'grok')::int AS legacy_calls
@@ -88,7 +95,7 @@ export async function opsHubAgentScorecards(days = 30): Promise<OpsHubScorecard[
     avgQualityScore: r.avg_quality === null ? null : Number(r.avg_quality),
     longCalls: r.long_calls,
     avgInterruptions: r.avg_interruptions === null ? null : Number(r.avg_interruptions),
-    telephonyErrors: r.telephony_errors,
+    droppedCalls: Number(r.dropped_calls) || 0,
     outcomes: outcomeMap.get(r.agent_id) ?? {},
     avgDurationSec: r.avg_duration_sec === null ? null : Number(r.avg_duration_sec),
     runtimeCalls: Number(r.runtime_calls) || 0,
@@ -277,8 +284,9 @@ export async function sageFunnelWeekly(weeks = 12): Promise<SageFunnelWeek[]> {
 // ────────────────────────────────────────────────────────────────────────
 // Openings — what each agent ACTUALLY says first, vs its configured
 // greeting (Wayne 2026-08-06: greetings drifting/improvised; adherence
-// must be observable). "Up to the verify point": the first three assistant
-// turns are sampled so the whole opening ramp is reviewable.
+// must be observable). The first line only, with any caller's name masked
+// (2026-11-26: the panel had been sending patients' first names, and the
+// first three lines of each lane's newest call, to the browser).
 // ────────────────────────────────────────────────────────────────────────
 
 export interface AgentOpenings {
@@ -288,8 +296,8 @@ export interface AgentOpenings {
   callsSampled: number;
   /** Share of calls whose first assistant turn starts with the configured greeting (first 24 chars, case/space-insensitive). */
   greetingAdherence: number | null;
+  /** The agents' first lines, any caller's name replaced by [name] (openingMask.ts). */
   topOpenings: Array<{ opening: string; n: number }>;
-  sampleOpeningSequences: Array<{ callLogId: string; turns: string[] }>;
 }
 
 export async function agentOpenings(days = 7): Promise<AgentOpenings[]> {
@@ -318,11 +326,15 @@ export async function agentOpenings(days = 7): Promise<AgentOpenings[]> {
     `,
     [days],
   );
+  // The first line of each call, whole (up to 300 characters), so a name that a
+  // 120-character cut would split is still masked before it leaves the server.
+  // Grouped here, then masked and re-counted in aggregateOpenings: the panel
+  // shows greetings, never a patient's name (openingMask.ts).
   const tops = await pool.query(
     `
     WITH firsts AS (
       SELECT ct.agent_slug, ct.call_log_id,
-             LEFT(COALESCE(ct.final_transcript, ct.raw_transcript), 120) AS opening,
+             LEFT(COALESCE(ct.final_transcript, ct.raw_transcript), 300) AS opening,
              ROW_NUMBER() OVER (PARTITION BY ct.call_log_id ORDER BY ct.turn_index) AS rn
       FROM call_turns ct
       WHERE ct.role IN ('assistant','agent','ai')
@@ -331,41 +343,10 @@ export async function agentOpenings(days = 7): Promise<AgentOpenings[]> {
     SELECT agent_slug, opening, COUNT(*)::int AS n
     FROM firsts WHERE rn = 1 AND opening IS NOT NULL AND LENGTH(opening) > 12
     GROUP BY 1, 2
-    ORDER BY agent_slug, n DESC
     `,
     [days],
   );
-  const seqs = await pool.query(
-    `
-    WITH recent_calls AS (
-      SELECT DISTINCT ON (ct.agent_slug) ct.agent_slug, ct.call_log_id
-      FROM call_turns ct
-      WHERE ct.created_at >= NOW() - make_interval(days => $1::int)
-      ORDER BY ct.agent_slug, ct.created_at DESC
-    )
-    SELECT rc.agent_slug, rc.call_log_id,
-           ARRAY(
-             SELECT LEFT(COALESCE(t.final_transcript, t.raw_transcript), 160)
-             FROM call_turns t
-             WHERE t.call_log_id = rc.call_log_id AND t.role IN ('assistant','agent','ai')
-             ORDER BY t.turn_index LIMIT 3
-           ) AS turns
-    FROM recent_calls rc
-    `,
-    [days],
-  );
-  const topMap = new Map<string, Array<{ opening: string; n: number }>>();
-  for (const r of tops.rows) {
-    const arr = topMap.get(r.agent_slug) ?? [];
-    if (arr.length < 6) arr.push({ opening: r.opening, n: r.n });
-    topMap.set(r.agent_slug, arr);
-  }
-  const seqMap = new Map<string, Array<{ callLogId: string; turns: string[] }>>();
-  for (const r of seqs.rows) {
-    const arr = seqMap.get(r.agent_slug) ?? [];
-    arr.push({ callLogId: r.call_log_id, turns: r.turns ?? [] });
-    seqMap.set(r.agent_slug, arr);
-  }
+  const topMap = aggregateOpenings(tops.rows);
   return rows.map((r: any) => ({
     agentSlug: r.agent_slug,
     agentName: r.agent_name,
@@ -373,7 +354,6 @@ export async function agentOpenings(days = 7): Promise<AgentOpenings[]> {
     callsSampled: r.calls_sampled,
     greetingAdherence: r.adherence === null ? null : Number(r.adherence),
     topOpenings: topMap.get(r.agent_slug) ?? [],
-    sampleOpeningSequences: seqMap.get(r.agent_slug) ?? [],
   }));
 }
 
@@ -992,7 +972,11 @@ export async function todayOverview(): Promise<TodayOverview> {
     WITH la AS (SELECT (NOW() AT TIME ZONE 'America/Los_Angeles')::date AS today)
     SELECT a.id AS agent_id, a.name AS agent_name, a.slug AS agent_slug,
            COUNT(cl.id)::int AS calls_today,
-           COUNT(cl.id) FILTER (WHERE cl.status IN ('in_progress','ringing','initiated'))::int AS active_now,
+           -- Live = still open AND started in the last 15 minutes. The runtime
+           -- ends every call at 10; an older open row is an end never written
+           -- (the Operations Monitor's "End never written"), not a live call.
+           COUNT(cl.id) FILTER (WHERE cl.status IN ('in_progress','ringing','initiated')
+                                  AND cl.created_at >= (NOW() AT TIME ZONE 'UTC') - INTERVAL '15 minutes')::int AS active_now,
            COUNT(cl.id) FILTER (WHERE COALESCE(((cl.grader_results::jsonb)->'summary'->>'criticalFailures')::int, 0) > 0)::int AS criticals_today,
            ROUND(AVG(cl.quality_score)::numeric, 2) AS quality_today,
            -- The legacy bucket is IS DISTINCT FROM, not <>: voice_provider is
