@@ -48,7 +48,9 @@
  *      the caller words, the agent is asked for its turn.
  *   5. If the new session is not configured within the budget, or cannot be
  *      opened, the bridge is told the session closed, which ends the call as
- *      `provider_failure` exactly as it did before v263.
+ *      `provider_failure` exactly as it did before v263. So does a drop past
+ *      the fifth reconnect, or a reconnected session that drops again inside
+ *      30 s of being configured (v274).
  *
  * Every drop, recovered or not, keeps its close diagnostics on the reconnect
  * event, so a recovered call still counts toward finding out why the far
@@ -61,8 +63,23 @@ import type { BridgeSession, BridgeSessionHandlers } from "./mediaStreamBridge";
 import type { GrokSessionConfig } from "./wireTypes";
 import { frameIsVoiced } from "./callerAudioEnergy";
 
-/** At most this many reconnects on one call; the next drop ends it. */
-export const DEFAULT_MAX_RECONNECTS = 2;
+/**
+ * At most this many reconnects on one call; the next drop ends it (v274, was
+ * 2). The far side resets a fresh socket about every 100 s while an episode
+ * lasts (2026-11-25: every reconnected session that dropped again had lived
+ * 94 to 102 s), so a long call in an episode needs more than two; five keeps
+ * a bound on a call whose line keeps going, at most five pauses of a second
+ * or two each.
+ */
+export const DEFAULT_MAX_RECONNECTS = 5;
+/**
+ * A reconnected session that drops again sooner than this after it was
+ * configured ends the call (v274): a path that cannot hold a session for
+ * half a minute is not one a caller should be put through again and again.
+ * The first session's drop never counts; nothing is known about a path
+ * until a reconnect has tried it. 0 turns the check off.
+ */
+export const DEFAULT_QUICK_REDROP_MS = 30_000;
 /** From the drop to the new session configured. Past it, the call ends. */
 export const DEFAULT_RECONNECT_BUDGET_MS = 8_000;
 /** The call so far, as handed to the new session: the tail, in characters. */
@@ -116,6 +133,9 @@ export function reconnectEnabledFor(slug: string, raw: string | undefined): bool
 }
 
 /**
+ * `limit`: the call had reconnected `maxReconnects` times already.
+ * `redropped`: the reconnected session in use dropped sooner than
+ * `quickRedropMs` after it was configured (v274).
  * `call_ended`: the call ended (the caller hung up, or the bridge tore down)
  * while the reconnect was still under way (#511 review).
  */
@@ -125,6 +145,7 @@ export type ReconnectResult =
   | "budget_spent"
   | "closed_before_configured"
   | "limit"
+  | "redropped"
   | "call_ended";
 
 /** One drop and what came of it. PHI-free: counts, timings, diagnostics. */
@@ -180,6 +201,8 @@ export interface ReconnectingSessionDeps {
     handlers: GrokVoiceSessionHandlers,
   ) => GrokVoiceSession;
   maxReconnects?: number;
+  /** See DEFAULT_QUICK_REDROP_MS. */
+  quickRedropMs?: number;
   budgetMs?: number;
   now?: () => number;
   setTimer?: (fn: () => void, ms: number) => unknown;
@@ -310,6 +333,7 @@ export class ReconnectingSession implements BridgeSession {
   private readonly clearTimer: (handle: unknown) => void;
   private readonly log: (line: string) => void;
   private readonly maxReconnects: number;
+  private readonly quickRedropMs: number;
   private readonly budgetMs: number;
 
   private generation = 1;
@@ -319,6 +343,8 @@ export class ReconnectingSession implements BridgeSession {
   private epochBase = 0;
   private closing = false;
   private configuredAtMs: number | null = null;
+  /** When the session in use was configured: the first, or the latest reconnect. */
+  private liveConfiguredAtMs: number | null = null;
   private reconnects = 0;
   private readonly events: ReconnectEvent[] = [];
   /** A socket error held for the close behind it (TRANSPORT_ERROR_HOLD_MS). */
@@ -371,6 +397,7 @@ export class ReconnectingSession implements BridgeSession {
     this.clearTimer = deps.clearTimer ?? ((h) => clearTimeout(h as NodeJS.Timeout));
     this.log = deps.log ?? ((line) => console.log(line));
     this.maxReconnects = deps.maxReconnects ?? DEFAULT_MAX_RECONNECTS;
+    this.quickRedropMs = deps.quickRedropMs ?? DEFAULT_QUICK_REDROP_MS;
     this.budgetMs = deps.budgetMs ?? DEFAULT_RECONNECT_BUDGET_MS;
     this.liveTransport = deps.transport;
     this.live = this.build(deps.transport, deps.config, 1);
@@ -462,6 +489,7 @@ export class ReconnectingSession implements BridgeSession {
         if (this.closing) return;
         if (generation === 1 && this.generation === 1) {
           this.configuredAtMs = this.now();
+          this.liveConfiguredAtMs = this.configuredAtMs;
           this.deps.onFirstConfigured?.();
           h.onConfigured();
           return;
@@ -539,10 +567,10 @@ export class ReconnectingSession implements BridgeSession {
     }
     const attempt = this.reconnects + 1;
     const dropped = this.diagnosticsOf(this.liveTransport);
-    if (this.reconnects >= this.maxReconnects) {
+    const endHere = (result: "limit" | "redropped") => {
       this.record({
         attempt,
-        result: "limit",
+        result,
         msIntoCall: this.msIntoCall(),
         msToConfigured: null,
         heldAudioFrames: 0,
@@ -554,6 +582,20 @@ export class ReconnectingSession implements BridgeSession {
         dropped,
       });
       h.onClosed();
+    };
+    if (this.reconnects >= this.maxReconnects) {
+      endHere("limit");
+      return;
+    }
+    // A reconnected session that could not last half a minute: the path is
+    // not holding, so the call ends here rather than pausing again (v274).
+    const livedMs = this.liveConfiguredAtMs === null ? null : this.now() - this.liveConfiguredAtMs;
+    if (this.reconnects > 0 && this.quickRedropMs > 0 && livedMs !== null && livedMs < this.quickRedropMs) {
+      this.log(
+        `[RECONNECT] ${this.deps.slug} ${this.deps.callSid}: the reconnected session dropped ${livedMs} ms ` +
+          `after it was configured (under ${this.quickRedropMs} ms); ending the call`,
+      );
+      endHere("redropped");
       return;
     }
     this.reconnects = attempt;
@@ -637,6 +679,7 @@ export class ReconnectingSession implements BridgeSession {
     this.epochBase += this.live.getResponseEpoch();
     this.live = pending.session;
     this.liveTransport = pending.transport;
+    this.liveConfiguredAtMs = this.now();
     this.pending = null;
     this.gap = null;
     this.responseActive = false;
@@ -699,7 +742,7 @@ export class ReconnectingSession implements BridgeSession {
     });
   }
 
-  private failReconnect(result: Exclude<ReconnectResult, "reconnected" | "limit" | "call_ended">): void {
+  private failReconnect(result: Exclude<ReconnectResult, "reconnected" | "limit" | "redropped" | "call_ended">): void {
     const gap = this.gap;
     if (gap === null) return;
     this.clearTimer(gap.timer);
