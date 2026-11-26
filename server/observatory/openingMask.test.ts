@@ -27,12 +27,29 @@ describe('maskOpening', () => {
     expect(maskOpening('Hi Testa Lake, this is Azul Vision.')).toBe('Hi [name], this is Azul Vision.');
   });
 
+  it('masks a name in lower case, and a name behind a title (Codex review of #525)', () => {
+    expect(maskOpening('Hello, testa lake.')).toBe('Hello, [name].');
+    expect(maskOpening('hi testa, this is Azul Vision.')).toBe('hi [name], this is Azul Vision.');
+    expect(maskOpening('hola maría.')).toBe('hola [name].');
+    expect(maskOpening('May I speak with Mrs. Lake?')).toBe('May I speak with [name]?');
+    expect(maskOpening('Am I speaking with Dr. Testa Lake?')).toBe('Am I speaking with [name]?');
+    expect(maskOpening('Hello, Mrs. Lake.')).toBe('Hello, [name].');
+    expect(maskOpening('¿Hablo con la Sra. Lake?')).toBe('¿Hablo con [name]?');
+    for (const out of ['Hello, testa lake.', 'May I speak with Mrs. Lake?', '¿Hablo con la Sra. Lake?'].map(maskOpening)) {
+      expect(out).not.toMatch(/testa|lake/i);
+    }
+  });
+
   it('leaves a greeting with no name in it alone', () => {
     for (const line of [
       'Hello, this is an automated assistant calling for Azul Vision. This call is recorded.',
       'Hello, thank you for calling Azul Vision. This is an automated assistant.',
       'Thank you for calling Azul Vision PCP Support. How can I help you today?',
       'Good afternoon. Thank you for calling Azul Vision.',
+      'Hi there!',
+      'Good morning, everyone.',
+      'Hola, buenos días.',
+      'Hey, how are you?',
       'Thank you for calling Azul Vision. May I have your first and last name?',
     ]) {
       expect(maskOpening(line)).toBe(line);

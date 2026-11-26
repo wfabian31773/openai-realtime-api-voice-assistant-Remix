@@ -17,8 +17,8 @@
  * them; that query is removed rather than masked.
  *
  * The mask errs toward masking: anything after "speaking with" up to the next
- * punctuation is replaced, and a one-to-three-word capitalised greeting after
- * "Hello," or "Hi," is too. A masked "Hello, Thanks." costs nothing; a name
+ * punctuation is replaced, and a one-to-three-word greeting after "Hello," or
+ * "Hi," is too, in any case. A masked "Hello, folks." costs nothing; a name
  * left on the page is the defect.
  * ─────────────────────────────────────────────────────────────────────────────
  */
@@ -26,14 +26,36 @@
 export const NAME_PLACEHOLDER = '[name]';
 
 /** Asks for a person by name: everything up to the next punctuation is the name. */
-const ASKS_FOR_A_PERSON =
-  /\b(am i speaking with|am i talking (?:with|to)|may i (?:please )?speak (?:with|to)|can i (?:please )?speak (?:with|to)|is this|hablo con|estoy hablando con|puedo hablar con)\s+(?!\[name\])[^?.!,;\n]{1,60}/gi;
+// A title's full stop ("Mrs. Lopez") is not the end of the name.
+const TITLE = "(?:(?:(?:el|la)\\s+)?(?:mr|mrs|ms|miss|dr|sr|sra|srta|señor|señora|señorita)\\.?\\s+)?";
 
-/** A greeting that addresses the person: "Hello, Maria." / "Hi Maria Lopez,". */
-// No `i` flag: under /iu, \p{Lu} also matches lower-case letters, and the
-// name must be capitalised so "Hello, this is Azul Vision" is left alone.
-const ADDRESSES_A_PERSON =
-  /\b([Hh]ello|[Hh]i|[Hh]ey|[Hh]ola|[Gg]ood (?:morning|afternoon|evening)|[Bb]uenos días|[Bb]uenas tardes)(,?\s+)(?!\[name\])(\p{Lu}[\p{L}'’-]*(?:\s+\p{Lu}[\p{L}'’-]*){0,2})(?=\s*[?.!,;]|\s*$)/gu;
+const ASKS_FOR_A_PERSON = new RegExp(
+  "\\b(am i speaking with|am i talking (?:with|to)|may i (?:please )?speak (?:with|to)|can i (?:please )?speak (?:with|to)|is this|hablo con|estoy hablando con|puedo hablar con)\\s+(?!\\[name\\])" +
+    TITLE +
+    "[^?.!,;\\n]{1,60}",
+  'giu',
+);
+
+/**
+ * Ordinary words a greeting is followed by, which are left unmasked so the
+ * panel stays readable ("Hello, this is Azul Vision", "Hi there"). The list
+ * only keeps words readable: a word missing from it is masked, never leaked.
+ */
+const NOT_A_NAME =
+  "(?:this|that|there|thank|thanks|how|it|its|it's|i|i'm|im|we|my|welcome|and|again|everyone|all|yes|you|am|is|can|so|okay|ok|good|esta|este|habla|soy|gracias|buenos|buenas|como|cómo)";
+
+/**
+ * A greeting that addresses the person: "Hello, Maria." / "Hi maria lopez,".
+ * Any case: a transcriber or a model can write a name in lower case (Codex
+ * review of #525), so one to three words between the greeting and the next
+ * punctuation are masked unless the first is an ordinary word above.
+ */
+const ADDRESSES_A_PERSON = new RegExp(
+  "\\b(hello|hi|hey|hola|good (?:morning|afternoon|evening)|buenos días|buenas tardes)(,?\\s+)(?!\\[name\\])" +
+    `(?!${NOT_A_NAME}(?![\\p{L}'’]))` +
+    `(${TITLE}[\\p{L}'’-]+(?:\\s+[\\p{L}'’-]+){0,2})(?=\\s*[?.!,;]|\\s*$)`,
+  'giu',
+);
 
 /** The opening line with any person's name replaced by [name]. */
 export function maskOpening(text: string): string {

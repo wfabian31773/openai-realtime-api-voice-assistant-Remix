@@ -46,15 +46,22 @@ export interface AccuracyDeps {
 /** The Pacific day a call_logs row belongs to (created_at is UTC wall time without a zone). */
 export const PACIFIC_DAY_OF_CREATED = `((created_at AT TIME ZONE 'UTC') AT TIME ZONE 'America/Los_Angeles')::date`;
 export const PACIFIC_TODAY = `(now() AT TIME ZONE 'America/Los_Angeles')::date`;
+/**
+ * "Now" as UTC wall time, the form created_at is stored in. Comparing
+ * created_at with a bare now() would read created_at in the database
+ * session's time zone, which is UTC on the Hub today but is not promised
+ * (Codex review of #525).
+ */
+export const UTC_NOW = `(now() AT TIME ZONE 'UTC')`;
 
 export const TRUTH_CALLS_PACIFIC_TODAY_SQL = `
 SELECT count(*)::int AS n FROM call_logs WHERE ${PACIFIC_DAY_OF_CREATED} = ${PACIFIC_TODAY}`;
 
 export const TRUTH_CALLS_LAST_DAYS_SQL = `
-SELECT count(*)::int AS n FROM call_logs WHERE created_at >= now() - make_interval(days => $1::int)`;
+SELECT count(*)::int AS n FROM call_logs WHERE created_at >= ${UTC_NOW} - make_interval(days => $1::int)`;
 
 export const TRUTH_CALLS_LAST_24H_SQL = `
-SELECT count(*)::int AS n FROM call_logs WHERE created_at >= now() - interval '24 hours'`;
+SELECT count(*)::int AS n FROM call_logs WHERE created_at >= ${UTC_NOW} - interval '24 hours'`;
 
 /**
  * A call that dropped or failed: the runtime records a provider drop as
@@ -63,7 +70,7 @@ SELECT count(*)::int AS n FROM call_logs WHERE created_at >= now() - interval '2
  */
 export const TRUTH_DROPPED_LAST_DAYS_SQL = `
 SELECT count(*)::int AS n FROM call_logs
- WHERE created_at >= now() - make_interval(days => $1::int)
+ WHERE created_at >= ${UTC_NOW} - make_interval(days => $1::int)
    AND (runtime_outcome = 'provider_failure' OR status = 'failed')`;
 
 /**

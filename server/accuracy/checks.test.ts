@@ -137,3 +137,15 @@ describe('the truth statements', () => {
     }
   });
 });
+
+describe('the truth queries read created_at as UTC (Codex review of #525)', () => {
+  it('never compares created_at with a bare now()', () => {
+    for (const sql of [TRUTH_CALLS_LAST_24H_SQL, TRUTH_CALLS_LAST_DAYS_SQL, TRUTH_DROPPED_LAST_DAYS_SQL]) {
+      expect(sql).toContain("created_at >= (now() AT TIME ZONE 'UTC')");
+      expect(sql).not.toMatch(/created_at\s*>=\s*now\(\)/i);
+    }
+    for (const sql of [TRUTH_CALLS_PACIFIC_TODAY_SQL, TRUTH_VOICE_AI_PACIFIC_TODAY_SQL]) {
+      expect(sql).toContain("((created_at AT TIME ZONE 'UTC') AT TIME ZONE 'America/Los_Angeles')::date");
+    }
+  });
+});
