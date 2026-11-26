@@ -21,7 +21,7 @@ export interface Campaign {
   name: string
   description?: string
   agentId: string
-  campaignType: 'call' | 'sms' | 'both'
+  campaignType: 'call' | 'sms' | 'both' | 'outbound' | 'runtime_outbound'
   status: 'draft' | 'scheduled' | 'running' | 'paused' | 'completed' | 'cancelled'
   scheduledStartTime?: string
   scheduledEndTime?: string

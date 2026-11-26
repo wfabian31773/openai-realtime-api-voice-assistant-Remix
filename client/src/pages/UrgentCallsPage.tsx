@@ -20,9 +20,17 @@ import { AlertTriangle, Phone, Eye, Clock, User, Copy, Check, X, ExternalLink, L
 import type { CallLog } from '@/types'
 import { ticketNumbersOf } from '@/lib/callTickets'
 
+/**
+ * The date in Pacific time. It was `toISOString().slice(0, 10)`, the UTC date,
+ * so from 4 PM Pacific the default end date was already tomorrow's and, read
+ * back by the server as midnight UTC, the page stopped at 4 PM Pacific the day
+ * before: last night's urgent calls were hidden until the next afternoon.
+ */
 function toDateInputValue(date: Date): string {
-  return date.toISOString().slice(0, 10)
+  return date.toLocaleDateString('en-CA', { timeZone: 'America/Los_Angeles' })
 }
+
+type UrgentCall = CallLog & { urgentReason?: string | null; transferResult?: 'connected' | 'not_answered' | 'unknown' }
 
 function CopyPhoneButton({ phone, formatted }: { phone: string; formatted: string }) {
   const [copied, setCopied] = React.useState(false)
@@ -87,47 +95,6 @@ function LastUpdatedIndicator({ dataUpdatedAt }: { dataUpdatedAt: number }) {
   )
 }
 
-function getEscalationReason(call: CallLog): string | null {
-  if (call.escalationReason) return call.escalationReason
-
-  const dc: unknown = call.detectedConditions
-  if (!dc) return null
-
-  if (Array.isArray(dc)) {
-    const items = dc.filter((item): item is string => typeof item === 'string')
-    return items.length > 0 ? items.join(', ') : null
-  }
-
-  if (typeof dc === 'object' && dc !== null) {
-    const obj = dc as Record<string, unknown>
-
-    if (typeof obj.escalationReason === 'string' && obj.escalationReason) {
-      return obj.escalationReason
-    }
-
-    if (Array.isArray(obj.conditions)) {
-      const items = obj.conditions.filter((item): item is string => typeof item === 'string')
-      if (items.length > 0) return items.join(', ')
-    }
-
-    const trueKeys = Object.entries(obj)
-      .filter(([, v]) => v === true)
-      .map(([k]) => k.replace(/([A-Z])/g, ' $1').trim())
-    if (trueKeys.length > 0) return trueKeys.join(', ')
-
-    const strVals = Object.values(obj).filter(
-      (v): v is string => typeof v === 'string' && v.length > 0
-    )
-    if (strVals.length > 0) return strVals[0]
-  }
-
-  return null
-}
-
-function isNoAnswerTransfer(call: CallLog): boolean {
-  return !!(call.humanAgentNumber && call.status === 'transferred' && !call.duration)
-}
-
 export function UrgentCallsPage() {
   const navigate = useNavigate()
   const queryClient = useQueryClient()
@@ -156,7 +123,7 @@ export function UrgentCallsPage() {
     queryFn: async () => {
       const params = new URLSearchParams({ limit: '100', startDate, endDate })
       const { data } = await apiClient.get<{
-        data: CallLog[]
+        data: UrgentCall[]
         pagination: {
           page: number
           limit: number
@@ -276,7 +243,9 @@ export function UrgentCallsPage() {
           <AlertTriangle className="h-8 w-8 text-red-600" />
           <div>
             <h1 className="text-2xl font-bold">Urgent Calls</h1>
-            <p className="text-muted-foreground">Calls transferred to on-call provider</p>
+            <p className="text-muted-foreground">
+              After-hours calls where the agent rang the on-call provider, answered or not. Dates are Pacific and the end date is the whole day.
+            </p>
           </div>
         </div>
         <div className="flex flex-col gap-3 sm:items-end">
@@ -330,7 +299,7 @@ export function UrgentCallsPage() {
           <div className="flex items-center gap-3">
             {dataUpdatedAt > 0 && <LastUpdatedIndicator dataUpdatedAt={dataUpdatedAt} />}
             <Badge variant="destructive" className="text-lg px-4 py-2">
-              {urgentCalls.length} Total
+              {(urgentCallsResponse?.pagination.total ?? urgentCalls.length).toLocaleString()} Total
             </Badge>
           </div>
         </div>
@@ -340,7 +309,12 @@ export function UrgentCallsPage() {
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <Phone className="h-5 w-5" />
-            Recent Urgent Transfers
+            Calls that rang the on-call provider
+            {urgentCallsResponse && urgentCallsResponse.pagination.total > urgentCalls.length && (
+              <span className="text-sm font-normal text-muted-foreground">
+                (showing the newest {urgentCalls.length} of {urgentCallsResponse.pagination.total}; the CSV has them all)
+              </span>
+            )}
           </CardTitle>
         </CardHeader>
         <CardContent>
@@ -351,7 +325,7 @@ export function UrgentCallsPage() {
                 No urgent calls from {startDate} to {endDate}
               </p>
               <p className="text-sm text-muted-foreground mt-1">
-                Calls transferred to the on-call provider appear here. An SMS notification is sent each time a new urgent transfer occurs.
+                After-hours calls where the agent rang the on-call provider appear here, whether or not the provider answered.
               </p>
             </div>
           ) : (
@@ -370,8 +344,8 @@ export function UrgentCallsPage() {
               </TableHeader>
               <TableBody>
                 {urgentCalls.map((call) => {
-                  const escalationReason = getEscalationReason(call)
-                  const noAnswer = isNoAnswerTransfer(call)
+                  const escalationReason = call.urgentReason ?? null
+                  const noAnswer = call.transferResult === 'not_answered'
                   // Every ticket the call created (v223). An urgent after-hours call is
                   // the one that most often has two: the caller's request, and the
                   // urgent transfer record filed beside it, which the row never held.
@@ -416,7 +390,7 @@ export function UrgentCallsPage() {
                       <TableCell>{formatDuration(call.duration)}</TableCell>
                       <TableCell className="max-w-[200px]">
                         {escalationReason ? (
-                          <span className="text-sm font-medium text-orange-700 capitalize">
+                          <span className="text-sm font-medium text-orange-700">
                             {escalationReason}
                           </span>
                         ) : (
@@ -424,14 +398,14 @@ export function UrgentCallsPage() {
                         )}
                       </TableCell>
                       <TableCell>
-                        <Badge variant="outline">{call.agentId || 'Greeter'}</Badge>
+                        <Badge variant="outline">{call.agentUsed || '—'}</Badge>
                       </TableCell>
                       <TableCell>
                         <div className="flex flex-col gap-1">
                           {getQualityBadge(call.qualityScore)}
                           {noAnswer && (
                             <Badge className="bg-orange-100 text-orange-800 border-orange-200 w-fit">
-                              No Answer
+                              On-call did not answer
                             </Badge>
                           )}
                         </div>

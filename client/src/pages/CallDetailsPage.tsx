@@ -25,6 +25,7 @@ import { useEffect, useMemo, useRef, useState, useCallback } from 'react'
 import apiClient from '@/lib/apiClient'
 import { toolChipsFrom, interleave, type TimedTurn } from '../lib/transcriptTimeline'
 import { ticketNumbersOf } from '../lib/callTickets'
+import { checksOf, type GraderCheck } from '@/lib/graderChecks'
 import {
   ArrowLeft, Copy, Link as LinkIcon, Download, Play, Pause, Check,
   MessageSquare, ListOrdered, LineChart, Braces, Code2, CircleDollarSign, Gauge,
@@ -64,21 +65,13 @@ interface EventRow {
   data: Record<string, unknown> | null
 }
 
-interface GraderCheck {
-  grader: string
-  pass: boolean
-  score: number
-  reason: string
-  severity?: string
-  metadata?: Record<string, unknown>
-}
 
 interface DetailPayload {
   callLog: Record<string, any>
   turns: TurnRow[]
   events: EventRow[]
   graderResults:
-    | { deterministic?: GraderCheck[]; results?: GraderCheck[]; summary?: Record<string, unknown> }
+    | { graders?: GraderCheck[]; deterministic?: GraderCheck[]; results?: GraderCheck[]; summary?: Record<string, unknown> }
     | GraderCheck[]
     | null
   toolTimeline: { events?: Array<Record<string, any>>; purpose?: string; result?: string } | null
@@ -382,12 +375,7 @@ export function CallDetailsPage() {
   // Derived
   const turns = data?.turns ?? []
   const events = data?.events ?? []
-  const checks: GraderCheck[] = useMemo(() => {
-    const gr = data?.graderResults as any
-    if (!gr) return []
-    if (Array.isArray(gr)) return gr
-    return gr.deterministic ?? gr.results ?? []
-  }, [data])
+  const checks: GraderCheck[] = useMemo(() => checksOf(data?.graderResults), [data])
 
   const callStart = turns[0]?.at ?? log?.startTime ?? log?.createdAt
   const costCents = log?.totalCostCents ?? (log?.twilioCostCents ?? 0) + (log?.openaiCostCents ?? 0)

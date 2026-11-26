@@ -4,6 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Badge } from '@/components/ui/badge'
 import { Bot, Megaphone, Phone, ClipboardList } from 'lucide-react'
 import type { Agent, Campaign, CallLog, CallbackQueueItem } from '@/types'
+import type { OperationsReport } from '@/lib/operationsView'
 
 export function Dashboard() {
   const { data: agents = [] } = useQuery({
@@ -32,17 +33,27 @@ export function Dashboard() {
     },
   })
 
+  // /api/call-logs answers { data, pagination }. This read an array, so the
+  // list was always empty and the card always read 0 (2026-11-26).
   const { data: callLogs = [] } = useQuery({
-    queryKey: ['call-logs'],
+    queryKey: ['call-logs', 'dashboard'],
     queryFn: async () => {
       try {
-        const { data } = await apiClient.get<CallLog[]>('/call-logs?limit=10')
-        return Array.isArray(data) ? data : []
+        const { data } = await apiClient.get<{ data?: CallLog[] } | CallLog[]>('/call-logs?limit=10')
+        if (Array.isArray(data)) return data
+        return Array.isArray(data?.data) ? data.data : []
       } catch (error) {
         console.error('Failed to fetch call logs:', error)
         return []
       }
     },
+  })
+
+  // The calls themselves, counted from the call records (the Operations Monitor's reader).
+  const { data: ops } = useQuery<OperationsReport>({
+    queryKey: ['operations', 24],
+    queryFn: async () => (await apiClient.get('/observatory/operations', { params: { hours: 24 } })).data,
+    refetchInterval: 60_000,
   })
 
   const { data: callbacks = [] } = useQuery({
@@ -59,11 +70,15 @@ export function Dashboard() {
   })
 
   const activeAgents = agents?.filter((a) => a.status === 'active').length || 0
+  const linesWithCalls = ops?.lanes.length
   const activeCampaigns =
     campaigns?.filter((c) => c.status === 'running').length || 0
-  const recentCalls = callLogs?.length || 0
   const pendingCallbacks =
     callbacks?.filter((c) => c.status === 'pending').length || 0
+  const newestCallback = callbacks.reduce<string | null>((max, c) => {
+    const t = (c as { createdAt?: string }).createdAt
+    return t && (!max || t > max) ? t : max
+  }, null)
 
   return (
     <div className="space-y-6">
@@ -77,14 +92,14 @@ export function Dashboard() {
         <Card>
           <CardHeader className="flex flex-row items-center justify-between pb-2">
             <CardTitle className="text-sm font-medium text-muted-foreground">
-              Active Agents
+              Lines that took calls
             </CardTitle>
             <Bot className="h-5 w-5 text-primary" />
           </CardHeader>
           <CardContent>
-            <div className="text-3xl font-bold text-foreground">{activeAgents}</div>
+            <div className="text-3xl font-bold text-foreground">{linesWithCalls ?? '—'}</div>
             <p className="text-xs text-muted-foreground">
-              {agents?.length || 0} total agents
+              In the last 24 hours · {activeAgents} of {agents?.length || 0} agents are marked active in settings
             </p>
           </CardContent>
         </Card>
@@ -99,7 +114,7 @@ export function Dashboard() {
           <CardContent>
             <div className="text-3xl font-bold text-foreground">{activeCampaigns}</div>
             <p className="text-xs text-muted-foreground">
-              {campaigns?.length || 0} total campaigns
+              Marked running, of {campaigns?.length || 0} campaigns (the operator line is one of them)
             </p>
           </CardContent>
         </Card>
@@ -107,13 +122,15 @@ export function Dashboard() {
         <Card>
           <CardHeader className="flex flex-row items-center justify-between pb-2">
             <CardTitle className="text-sm font-medium text-muted-foreground">
-              Recent Calls
+              Calls (last 24 hours)
             </CardTitle>
             <Phone className="h-5 w-5 text-purple-500" />
           </CardHeader>
           <CardContent>
-            <div className="text-3xl font-bold text-foreground">{recentCalls}</div>
-            <p className="text-xs text-muted-foreground">Last 10 calls</p>
+            <div className="text-3xl font-bold text-foreground">{ops ? ops.calls.total.toLocaleString() : '—'}</div>
+            <p className="text-xs text-muted-foreground">
+              {ops ? `${ops.calls.dropped} dropped by the voice provider` : 'Counted from the call records'}
+            </p>
           </CardContent>
         </Card>
 
@@ -127,7 +144,8 @@ export function Dashboard() {
           <CardContent>
             <div className="text-3xl font-bold text-foreground">{pendingCallbacks}</div>
             <p className="text-xs text-muted-foreground">
-              {callbacks?.length || 0} total in queue
+              {callbacks?.length || 0} in the queue
+              {newestCallback ? ` · nothing added since ${new Date(newestCallback).toLocaleDateString('en-US', { timeZone: 'America/Los_Angeles' })}; the agents file tickets instead` : ''}
             </p>
           </CardContent>
         </Card>
@@ -154,7 +172,8 @@ export function Dashboard() {
                         {call.direction === 'inbound' ? call.from : call.to}
                       </p>
                       <p className="text-sm text-muted-foreground">
-                        {new Date(call.createdAt).toLocaleString()}
+                        {call.agentUsed ? `${call.agentUsed} · ` : ''}
+                        {new Date(call.createdAt).toLocaleString('en-US', { timeZone: 'America/Los_Angeles' })} PT
                       </p>
                     </div>
                     <Badge
@@ -198,6 +217,11 @@ export function Dashboard() {
                         <p className="font-medium text-foreground">{campaign.name}</p>
                         <Badge>{campaign.status}</Badge>
                       </div>
+                      <p className="text-xs text-muted-foreground">
+                        {campaign.campaignType === 'runtime_outbound'
+                          ? `${campaign.completedContacts.toLocaleString()} of ${campaign.totalContacts.toLocaleString()} called at least once · ${campaign.successfulContacts.toLocaleString()} completed`
+                          : `${campaign.completedContacts} of ${campaign.totalContacts} done`}
+                      </p>
                       <div className="flex items-center gap-2">
                         <div className="h-2 flex-1 overflow-hidden rounded-full bg-muted">
                           <div

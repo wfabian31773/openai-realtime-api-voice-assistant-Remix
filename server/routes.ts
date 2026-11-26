@@ -22,6 +22,8 @@ import { pool } from './db';
 import { mountAccuracyCheck } from './accuracy/accuracy';
 import { opsHubAgentScorecards, todayOverview } from './observatory/queries';
 import { mountOperationsMonitor, readOperations } from './observatory/operations';
+import { urgentCondition, urgentFields, urgentWindow } from './urgentCalls';
+import { withRuntimeCounts } from './campaignCounts';
 
 // Hybrid authentication middleware - supports both Replit Auth and custom auth
 const isAuthenticated = (req: Request, res: Response, next: NextFunction) => {
@@ -812,7 +814,9 @@ export async function registerRoutes(app: Express): Promise<Server> {
   // Get all campaigns
   app.get('/api/campaigns', isAuthenticated, async (req, res) => {
     try {
-      const campaigns = await storage.getCampaigns();
+      // Runtime campaigns' counts are counted from their contacts
+      // (server/campaignCounts.ts); the columns are never written for them.
+      const campaigns = await withRuntimeCounts(pool, await storage.getCampaigns());
       res.json(campaigns);
     } catch (error) {
       console.error("Error fetching campaigns:", error);
@@ -1729,46 +1733,33 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Get urgent calls - calls transferred to human agent
+  // Urgent calls: after-hours calls that dialled the on-call provider,
+  // between two Pacific dates. Which calls and which days: server/urgentCalls.ts.
   app.get('/api/call-logs/urgent', isAuthenticated, async (req, res) => {
     try {
-      const page = req.query.page ? parseInt(req.query.page as string) : 1;
-      const limit = req.query.limit ? parseInt(req.query.limit as string) : 50;
+      const page = Math.max(1, req.query.page ? parseInt(req.query.page as string) || 1 : 1);
+      const limit = Math.min(500, Math.max(1, req.query.limit ? parseInt(req.query.limit as string) || 50 : 50));
+      const win = urgentWindow(req.query);
+      if ('error' in win) return res.status(400).json({ error: win.error });
 
       const { db } = await import('./db');
       const { callLogs } = await import('../shared/schema');
-      const { eq, and, desc, count, gte, lte } = await import('drizzle-orm');
-
-      const defaultStart = new Date();
-      defaultStart.setDate(defaultStart.getDate() - 90);
-      const startDate = req.query.startDate
-        ? new Date(req.query.startDate as string)
-        : defaultStart;
-      const endDate = req.query.endDate
-        ? new Date(req.query.endDate as string)
-        : new Date();
-
-      const urgentCondition = and(
-        eq(callLogs.transferredToHuman, true),
-        gte(callLogs.createdAt, startDate),
-        lte(callLogs.createdAt, endDate)
-      );
+      const { desc, count } = await import('drizzle-orm');
+      const where = urgentCondition(win.from, win.to);
 
       const urgentCalls = await db
         .select()
         .from(callLogs)
-        .where(urgentCondition)
-        .orderBy(desc(callLogs.createdAt))
+        .where(where)
+        .orderBy(desc(callLogs.createdAt), desc(callLogs.id))
         .limit(limit)
         .offset((page - 1) * limit);
 
-      const [{ count: totalCount }] = await db
-        .select({ count: count() })
-        .from(callLogs)
-        .where(urgentCondition);
+      const [{ count: totalCount }] = await db.select({ count: count() }).from(callLogs).where(where);
 
       res.json({
-        data: urgentCalls.map(normalizeCallLog),
+        data: urgentCalls.map((c) => ({ ...normalizeCallLog(c), ...urgentFields(c) })),
+        window: win,
         pagination: {
           page,
           limit,
@@ -1782,42 +1773,23 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Export urgent calls as CSV
+  // Export urgent calls as CSV: the same calls and days as the list.
   app.get('/api/call-logs/urgent/export', isAuthenticated, async (req, res) => {
     try {
+      const win = urgentWindow(req.query);
+      if ('error' in win) return res.status(400).json({ error: win.error });
+
       const { db } = await import('./db');
       const { callLogs } = await import('../shared/schema');
-      const { eq, and, desc, gte, lte } = await import('drizzle-orm');
-
-      const defaultStart = new Date();
-      defaultStart.setDate(defaultStart.getDate() - 90);
-
-      const rawStart = req.query.startDate as string | undefined;
-      const rawEnd = req.query.endDate as string | undefined;
-
-      const startDate = rawStart ? new Date(rawStart) : defaultStart;
-      const endDate = rawEnd ? new Date(rawEnd) : new Date();
-
-      if (rawStart && isNaN(startDate.getTime())) {
-        return res.status(400).json({ error: 'Invalid startDate' });
-      }
-      if (rawEnd && isNaN(endDate.getTime())) {
-        return res.status(400).json({ error: 'Invalid endDate' });
-      }
-
-      const urgentCondition = and(
-        eq(callLogs.transferredToHuman, true),
-        gte(callLogs.createdAt, startDate),
-        lte(callLogs.createdAt, endDate)
-      );
+      const { desc } = await import('drizzle-orm');
 
       const urgentCalls = await db
         .select()
         .from(callLogs)
-        .where(urgentCondition)
-        .orderBy(desc(callLogs.createdAt));
+        .where(urgentCondition(win.from, win.to))
+        .orderBy(desc(callLogs.createdAt), desc(callLogs.id));
 
-      const normalized = urgentCalls.map(normalizeCallLog);
+      const normalized = urgentCalls.map((c) => ({ ...normalizeCallLog(c), ...urgentFields(c) }));
 
       function csvEscape(val: unknown): string {
         if (val === null || val === undefined) return '';
@@ -1828,23 +1800,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return str;
       }
 
-      function getEscalationReasonCsv(call: ReturnType<typeof normalizeCallLog>): string {
-        if (call.escalationReason) return call.escalationReason as string;
-        const dc: unknown = call.detectedConditions;
-        if (!dc) return '';
-        if (Array.isArray(dc)) return dc.filter((i): i is string => typeof i === 'string').join('; ');
-        if (typeof dc === 'object' && dc !== null) {
-          const obj = dc as Record<string, unknown>;
-          if (typeof obj.escalationReason === 'string' && obj.escalationReason) return obj.escalationReason;
-          if (Array.isArray(obj.conditions)) return obj.conditions.filter((i): i is string => typeof i === 'string').join('; ');
-          const trueKeys = Object.entries(obj).filter(([, v]) => v === true).map(([k]) => k);
-          if (trueKeys.length > 0) return trueKeys.join('; ');
-          const strVals = Object.values(obj).filter((v): v is string => typeof v === 'string' && v.length > 0);
-          if (strVals.length > 0) return strVals[0];
-        }
-        return '';
-      }
-
       function formatDurationCsv(seconds: unknown): string {
         if (!seconds) return '';
         const s = Number(seconds);
@@ -1853,14 +1808,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
         return mins > 0 ? `${mins}m ${secs}s` : `${secs}s`;
       }
 
-      const headers = ['Date/Time', 'Caller Name', 'Phone', 'Duration', 'Escalation Reason', 'Agent', 'Ticket Number'];
+      const TRANSFER_TEXT = { connected: 'Connected', not_answered: 'Not answered', unknown: 'Not recorded' } as const;
+      const headers = ['Date/Time (Pacific)', 'Caller ID name', 'Phone', 'Duration', 'Escalation Reason', 'On-call provider', 'Line', 'Ticket Number'];
       const rows = normalized.map((call) => [
-        csvEscape(call.startTime ? new Date(call.startTime as string).toLocaleString('en-US') : ''),
+        csvEscape(call.startTime ? new Date(call.startTime as string).toLocaleString('en-US', { timeZone: 'America/Los_Angeles' }) : ''),
         csvEscape(call.callerName),
         csvEscape(call.from),
         csvEscape(formatDurationCsv(call.duration)),
-        csvEscape(getEscalationReasonCsv(call)),
-        csvEscape(call.agentId || 'Greeter'),
+        csvEscape(call.urgentReason ?? ''),
+        csvEscape(TRANSFER_TEXT[call.transferResult as keyof typeof TRANSFER_TEXT]),
+        csvEscape(call.agentUsed ?? ''),
         // v223: every ticket the call created, the row's own first.
         csvEscape(call.ticketNumbers.join('; ')),
       ]);
@@ -1868,7 +1825,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const csvLines = [headers.join(','), ...rows.map((r) => r.join(','))];
       const csv = csvLines.join('\r\n');
 
-      const filename = `urgent-calls-${startDate.toISOString().slice(0, 10)}-to-${endDate.toISOString().slice(0, 10)}.csv`;
+      const filename = `urgent-calls-${win.from}-to-${win.to}.csv`;
       res.setHeader('Content-Type', 'text/csv');
       res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
       res.send(csv);
@@ -2170,7 +2127,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
       let turns: unknown[] = [];
       try {
         const r = await db.execute(sql`
-          SELECT turn_index, role, at, raw_transcript, final_transcript, state,
+          -- call_turns.at is timestamp WITHOUT time zone holding UTC. Returned
+          -- bare, this raw query hands the page "2026-11-26 01:56:48" with no
+          -- zone and the browser reads it as local time: every transcript line
+          -- read 8 hours off and the tool chips sorted above the first line
+          -- (2026-11-26). AT TIME ZONE 'UTC' makes it an instant.
+          SELECT turn_index, role, (at AT TIME ZONE 'UTC') AS at, raw_transcript, final_transcript, state,
                  director_decision, model_output, since_prev_ms
           FROM call_turns
           WHERE call_log_id = ${logId} OR (${callSid}::varchar IS NOT NULL AND call_sid = ${callSid})
@@ -2187,7 +2149,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
         // deploy that has never taken a call since the feature shipped will
         // not have it, and that must read as "no events yet", not a 500.
         const r = await db.execute(sql`
-          SELECT at, level, category, message, data
+          SELECT (at AT TIME ZONE 'UTC') AS at, level, category, message, data
           FROM call_events
           WHERE call_log_id = ${logId} OR (${callSid}::varchar IS NOT NULL AND call_sid = ${callSid})
           ORDER BY at ASC, id ASC
