@@ -18,6 +18,7 @@ import {
 import { Phone, Search, Eye, X, ChevronLeft, ChevronRight, Ticket, UserCheck, ArrowDownLeft, ArrowUpRight, FileText, Mic } from 'lucide-react'
 import type { CallLog } from '@/types'
 import { ticketNumbersOf } from '@/lib/callTickets'
+import { transferKindOf, transferLabel } from '@/lib/callTransfer'
 
 interface CallLogsResponse {
   data: CallLog[]
@@ -122,7 +123,7 @@ export function CallLogsPage() {
     setSearchParams({}, { replace: true })
   }
 
-  const hasActiveFilters = search || status !== 'all' || direction !== 'all' || hasTicket !== 'all' || transferred !== 'all' || callQuality !== 'all' || sortBy !== 'date'
+  const hasActiveFilters = search || status !== 'all' || direction !== 'all' || hasTicket !== 'all' || transferred !== 'all' || callQuality !== 'all' || sortBy !== 'date' || sortOrder !== 'desc'
 
   const getStatusVariant = (callStatus: string) => {
     switch (callStatus) {
@@ -215,12 +216,13 @@ export function CallLogsPage() {
                 onChange={(e) => updateParams({ status: e.target.value, page: 1 })}
                 className="w-[140px]"
               >
+                {/* Only the statuses call rows carry: over the 30 days to
+                    2026-11-26, 17,885 completed and 129 failed, and no
+                    in-progress, no-answer or busy row, so those three
+                    choices always returned an empty list. */}
                 <option value="all">All Status</option>
                 <option value="completed">Completed</option>
-                <option value="in_progress">In Progress</option>
                 <option value="failed">Failed</option>
-                <option value="no_answer">No Answer</option>
-                <option value="busy">Busy</option>
               </Select>
 
               <Select 
@@ -256,11 +258,15 @@ export function CallLogsPage() {
               <Select
                 value={callQuality}
                 onChange={(e) => updateParams({ callQuality: e.target.value, page: 1 })}
-                className="w-[150px]"
+                className="w-[230px]"
               >
+                {/* A ghost is a call on which the caller was never heard,
+                    the runtime's own rule (v131), not "short or no
+                    recording", which put 1,006 heard callers in 14 days
+                    among the ghosts. */}
                 <option value="all">All Quality</option>
-                <option value="real">Real Calls</option>
-                <option value="ghost">Ghost Calls</option>
+                <option value="real">Real Calls (caller heard)</option>
+                <option value="ghost">Ghost Calls (caller never heard)</option>
               </Select>
 
               <Select
@@ -375,9 +381,15 @@ export function CallLogsPage() {
                             <span title={log.recordingUrl ? "Recording available" : "No recording"}>
                               <Mic className={`h-4 w-4 ${log.recordingUrl ? 'text-primary' : 'text-muted-foreground/30'}`} />
                             </span>
-                            <span title={log.transferredToHuman ? "Transferred to human" : "No transfer"}>
-                              <UserCheck className={`h-4 w-4 ${log.transferredToHuman ? 'text-orange-500' : 'text-muted-foreground/30'}`} />
-                            </span>
+                            {(() => {
+                              const kind = transferKindOf(log)
+                              const tone = kind === 'person' ? 'text-orange-500' : kind === 'queue' ? 'text-amber-400' : 'text-muted-foreground/30'
+                              return (
+                                <span title={transferLabel(kind)}>
+                                  <UserCheck className={`h-4 w-4 ${tone}`} />
+                                </span>
+                              )
+                            })()}
                           </div>
                         </TableCell>
                         <TableCell>

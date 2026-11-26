@@ -2279,17 +2279,39 @@ import { callEnvironment } from "./callRecord";
  * main. Above v277 (#532, `5183de93`). No migration.
  */
 /*
- * v279 (2026-11-26): on the floor's retry, only an explicit null is no
+ * v279 — A HELD OPTICAL OR SURGERY REQUEST REFUSED ON ITS REPLAY FOR THE
+ * OFFICE OR THE SURGEON IS FILED UNASSIGNED (2026-11-26). A queue filing whose
+ * create-ticket POST did not complete is held in the outbox and the caller is
+ * told it is logged; the worker's replay was then refused "Missing required
+ * information: surgeon" (or office) with nobody on the line to ask, and the row
+ * dead-lettered with no ticket (CA9f2717c562f8f8d72675faf5e05a52ea, 2026-10-30;
+ * CAb7e38750f96288150a675729d1de0d57, 2026-10-02). A first filing for
+ * department 1 or 2 now stores `refusalFallback.routingExit`, and only the
+ * worker's replay (never a send whose caller sees the answer) uses it, when
+ * the refusal names that department's routing field: the same payload with
+ * `routingAskExhausted: true` and a staff line, on the same key, once. A first
+ * filing held before this build stored no exit, and takes it whenever it was
+ * written unless it is a later addition (firstFilingWithoutTheExit; review of
+ * #533).
+ * Above main's v278 (#531, `5e411d9`), which it contains along with v277
+ * (#532, `5183de9`). (v277, then v278, while #533 was open; renumbered when
+ * #532 took v277 and #531 took v278 on main.) No migration.
+ */
+/*
+ * v280 (2026-11-26): on the floor's retry, only an explicit null is no
  * request. Operator, 2026-11-26, "Only null retracts": a second answer that
  * names no topic, reads as nothing asked, is the placeholder or fails a
  * content check again is the reader unsure (unavailable), so a named caller
  * files with FLOOR_REQUEST_NOT_CONFIRMED_NOTE and the stand-in files nothing.
  * Before, the first three filed nothing for a real request and the last filed
  * as confirmed with no note. Pushed to #532's branch 17 minutes after #532
- * merged, so it ships here. Above v278 (#531, `5e411d95`). No migration.
+ * merged, so it ships here. Written as v279; renumbered when #533 took v279
+ * on main.
+ * Above v279 (#533, `26f69e74`), which it contains along with v278 (#531,
+ * `5e411d95`). No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v279-only-a-null-retracts-on-the-retry-20261126";
+  "voice-runtime-v280-only-a-null-retracts-on-the-retry-20261126";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

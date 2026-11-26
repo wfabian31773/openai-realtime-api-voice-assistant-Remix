@@ -377,6 +377,13 @@ export async function registerRoutes(app: Express): Promise<Server> {
       if (!callSid || !phone) {
         return res.status(400).json({ message: 'callSid and phone are required' });
       }
+      // A runtime call has no conference to join (listenIn.ts): say so, rather
+      // than searching and answering that the call "may have just ended".
+      const { listenInRefusal } = await import('./observatory/listenIn');
+      const refusal = listenInRefusal(await storage.getCallLogByCallSid(String(callSid)));
+      if (refusal) {
+        return res.status(409).json({ message: refusal });
+      }
       const client = await getTwilioClient();
       // Conferences are named conf_<CallSid> (with optional prefixes).
       const candidates = [`conf_${callSid}`, `outbound_conf_${callSid}`, `test_conf_${callSid}`];
@@ -432,7 +439,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const weeks = Math.min(26, Math.max(1, parseInt(String(req.query.weeks ?? '12'), 10) || 12));
       const { sageFunnelWeekly } = await import('./observatory/queries');
-      res.json({ weeks, sage: await sageFunnelWeekly(weeks) });
+      const funnel = await sageFunnelWeekly(weeks);
+      res.json({ weeks, sage: funnel.weeks, mirrorRead: funnel.mirrorRead });
     } catch (error) {
       console.error('[observatory] funnel failed:', error);
       res.status(500).json({
@@ -692,7 +700,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Update phone endpoint webhook (and optionally sync to Twilio)
+  // Save a phone endpoint's webhook URL in our own table. Never writes to
+  // Twilio: updateTwilio: true is refused with a 409 (src/services/phoneLineGuard.ts).
   app.post('/api/phone-endpoints/:id/update-webhook', isAuthenticated, requireRole('admin'), async (req, res) => {
     try {
       const { twilioPhoneManagementService } = await import('../src/services/twilioPhoneManagementService');
@@ -710,7 +719,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       
       res.json({
         success: true,
-        message: updateTwilio ? 'Webhook updated in Twilio' : 'Webhook URL saved (not synced to Twilio)',
+        message: 'Webhook URL saved here only. Twilio was not changed; repoint a number in the Twilio console.',
         endpoint
       });
     } catch (error) {
@@ -2612,8 +2621,32 @@ export async function registerRoutes(app: Express): Promise<Server> {
       } catch {
         tableExists = false;
       }
+      // Per UTC day, the runtime calls and how many still carry no
+      // reconciliation, read from the call rows themselves: a day with no row
+      // in the day table (today, or a day the reconciler never reached) is
+      // still an estimate, and a day before the table existed whose calls were
+      // reconciled one by one is not.
+      let callDays: Array<{ day: string; calls: number; unreconciledCalls: number }> = [];
+      try {
+        const r = await db.execute(sql`
+          SELECT created_at::date::text AS day, count(*)::int AS calls,
+                 count(*) FILTER (WHERE cost_reconciled_at IS NULL)::int AS unreconciled
+          FROM call_logs
+          WHERE voice_provider = 'grok'
+            AND created_at >= ${startDate}::date AND created_at < (${endDate}::date + 1)
+          GROUP BY 1 ORDER BY 1
+        `);
+        callDays = (((r as any).rows ?? r) as any[]).map((c) => ({
+          day: c.day,
+          calls: Number(c.calls),
+          unreconciledCalls: Number(c.unreconciled),
+        }));
+      } catch (err) {
+        console.warn('[grok-usage] could not read the per-day call counts:', err instanceof Error ? err.message : err);
+      }
       res.json({
         tableExists,
+        callDays,
         // The published rate the estimate uses, so the page can say how far a
         // day's derived rate sits from it without a second copy of the number.
         publishedCentsPerMinute: 8,

@@ -22,6 +22,7 @@ import { DailyCostCharts } from '@/components/DailyCostCharts'
 import { CostReconciliation } from '@/components/CostReconciliation'
 import { BudgetWidget } from '@/components/BudgetWidget'
 import { ReconciliationRunHistory } from '@/components/ReconciliationRunHistory'
+import { dayCostStatus, dayIsEstimate, headlineEstimateNote, summarizeGrokCosts } from '@/lib/grokCostStatus'
 
 interface OpenAIUsage {
   /** Realtime plus every other model: everything OpenAI billed in the range. */
@@ -48,6 +49,8 @@ interface OpenAIUsage {
 
 interface GrokUsage {
   tableExists: boolean
+  /** Per UTC day, runtime calls and how many are unreconciled; absent on an older server. */
+  callDays?: Array<{ day: string; calls: number; unreconciledCalls: number }>
   publishedCentsPerMinute: number
   days: Array<{
     day: string
@@ -209,6 +212,11 @@ export function CostDashboardPage() {
     retry: 1,
   })
 
+  // Which days are xAI's own figure and which are still the estimate, so no
+  // total on this page presents an estimate as the bill.
+  const grokSummary = grokUsage ? summarizeGrokCosts(grokUsage.days, grokUsage.callDays ?? []) : null
+  const estimateNote = grokSummary ? headlineEstimateNote(grokSummary) : null
+
   const formatCurrency = (cents: number) => {
     return `$${(cents / 100).toFixed(2)}`
   }
@@ -285,6 +293,11 @@ export function CostDashboardPage() {
               <span className="text-primary">Twilio: {formatCurrency(costAnalytics?.summary.totalTwilioCents || 0)}</span>
               <span className="text-violet-600 dark:text-violet-400">Voice AI (xAI): {formatCurrency(costAnalytics?.summary.totalOpenAICents || 0)}</span>
             </div>
+            {estimateNote && (
+              <p className="mt-2 text-xs text-amber-600 dark:text-amber-300" data-testid="estimate-note">
+                {estimateNote}
+              </p>
+            )}
           </CardContent>
         </Card>
 
@@ -597,6 +610,20 @@ export function CostDashboardPage() {
             voice spend when the day reconciled, the published-rate estimate when it was refused. A refused day
             says why — a day whose voice line cannot be attributed to these calls is left estimated on purpose.
           </p>
+          {grokSummary && (grokSummary.reconciledDays > 0 || grokSummary.estimatedDays.length > 0) && (
+            <p className="text-xs text-foreground" data-testid="grok-summary">
+              {grokSummary.reconciledDays} day{grokSummary.reconciledDays === 1 ? '' : 's'} reconciled
+              {grokSummary.estimatedDays.length > 0 && (
+                <span className="text-amber-600 dark:text-amber-300">
+                  {' '}· {grokSummary.estimatedDays.length} estimated ({grokSummary.estimatedDays.join(', ')})
+                  {grokSummary.gapDollars !== 0 && <>, ${Math.abs(grokSummary.gapDollars).toFixed(2)} {grokSummary.gapDollars > 0 ? 'under' : 'over'} xAI's figure</>}
+                </span>
+              )}
+              {grokSummary.notYetDays.length > 0 && (
+                <span className="text-muted-foreground"> · not settled yet: {grokSummary.notYetDays.join(', ')}</span>
+              )}
+            </p>
+          )}
         </CardHeader>
         <CardContent>
           {!grokUsage ? (
@@ -616,6 +643,7 @@ export function CostDashboardPage() {
                     <th className="py-2 pr-3 text-right">xAI voice</th>
                     <th className="py-2 pr-3 text-right">Booked</th>
                     <th className="py-2 pr-3 text-right">¢/min</th>
+                    <th className="py-2 pr-3 text-right" title="xAI's reported voice spend minus what the call rows carry, on a day that did not reconcile">Gap</th>
                     <th className="py-2">Status</th>
                   </tr>
                 </thead>
@@ -630,18 +658,36 @@ export function CostDashboardPage() {
                       <td className="py-2 pr-3 text-right" title={`published ${grokUsage.publishedCentsPerMinute}¢/min`}>
                         {d.derivedCentsPerMinute == null ? '—' : d.derivedCentsPerMinute.toFixed(2)}
                       </td>
+                      <td className="py-2 pr-3 text-right">
+                        {(() => {
+                          const st = dayCostStatus(d)
+                          if (st.kind !== 'estimated' || st.gapDollars == null) return '—'
+                          return (
+                            <span className="text-amber-600 dark:text-amber-300">
+                              {st.gapDollars >= 0 ? '+' : '−'}${Math.abs(st.gapDollars).toFixed(2)}
+                            </span>
+                          )
+                        })()}
+                      </td>
                       <td className="py-2">
-                        {d.reconciled ? (
-                          <span className="rounded px-1.5 py-0.5 text-[11px] bg-emerald-500/15 text-emerald-600 dark:text-emerald-300">reconciled</span>
-                        ) : (
-                          <span className="rounded px-1.5 py-0.5 text-[11px] bg-amber-500/15 text-amber-600 dark:text-amber-300" title={d.refusedReason ?? ''}>
-                            refused — estimated
-                          </span>
-                        )}
+                        {(() => {
+                          const st = dayCostStatus(d)
+                          if (st.kind === 'reconciled') {
+                            return <span className="rounded px-1.5 py-0.5 text-[11px] bg-emerald-500/15 text-emerald-600 dark:text-emerald-300">reconciled</span>
+                          }
+                          return (
+                            <span className="rounded px-1.5 py-0.5 text-[11px] bg-amber-500/15 text-amber-600 dark:text-amber-300">
+                              {st.kind === 'unread' ? 'not read — estimated' : 'refused — estimated'}
+                            </span>
+                          )
+                        })()}
                         {d.ignoredLines.length > 0 && (
                           <span className="ml-2 text-[11px] text-muted-foreground" title={d.ignoredLines.map((l) => `${l.description}: $${l.usd.toFixed(2)}`).join('\n')}>
                             +{d.ignoredLines.length} non-voice line{d.ignoredLines.length === 1 ? '' : 's'}
                           </span>
+                        )}
+                        {!d.reconciled && d.refusedReason && (
+                          <p className="mt-1 max-w-md text-[11px] leading-snug text-muted-foreground">{d.refusedReason}</p>
                         )}
                       </td>
                     </tr>
@@ -850,7 +896,15 @@ export function CostDashboardPage() {
                           </div>
                         </div>
                       </div>
-                      <div className="flex w-36 items-center justify-end gap-2 text-xs">
+                      <div className="flex w-44 items-center justify-end gap-2 text-xs">
+                        {grokUsage && grokSummary && dayIsEstimate(day.date, grokUsage.days, grokSummary) && (
+                          <span
+                            className="rounded px-1 py-0.5 text-[10px] bg-amber-500/15 text-amber-600 dark:text-amber-300"
+                            title="The voice AI part of this day is still the 8¢/min estimate, not xAI's reported spend. See the Grok runtime table below."
+                          >
+                            est.
+                          </span>
+                        )}
                         <span className="font-medium">{formatCurrency(day.totalCents)}</span>
                         <span className="text-muted-foreground">({day.callCount} calls)</span>
                       </div>

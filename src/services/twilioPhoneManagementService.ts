@@ -1,12 +1,11 @@
 import { getTwilioClient, getTwilioAccountSid } from '../lib/twilioClient';
-import { getEnvironmentConfig, isDevCallbackUrl } from '../config/environment';
 import { db } from '../../server/db';
 import { phoneEndpoints } from '../../shared/schema';
 import { eq } from 'drizzle-orm';
 import type { PhoneEndpoint, InsertPhoneEndpoint } from '../../shared/schema';
 import {
   configureForAgentRefusal,
-  webhookWriteRefusal,
+  twilioWriteRefusal,
   type LiveVoiceUrl,
 } from './phoneLineGuard';
 
@@ -173,51 +172,24 @@ class TwilioPhoneManagementService {
     }
 
     if (options?.updateTwilio) {
-      // A number that already has a Voice URL is never repointed from here
-      // (src/services/phoneLineGuard.ts); that is done in the Twilio console,
-      // and moving a live line is Wayne's decision. The stored
-      // voiceWebhookUrl is not trusted for this: the Hub's copy was nine
-      // months stale on 2026-11-26, so the number is read from Twilio.
-      const refusal = webhookWriteRefusal(
-        endpoint.phoneNumber,
-        await this.readLiveVoiceUrl(endpoint.twilioSid),
-        webhookUrl,
+      // The dashboard never writes a Voice URL to Twilio
+      // (src/services/phoneLineGuard.ts). Repointing a number is done in the
+      // Twilio console, and moving a live line is Wayne's decision
+      // (standing instruction 11). Nothing is saved here either, so our table
+      // never claims a URL Twilio does not have.
+      const refusal = twilioWriteRefusal(endpoint.phoneNumber, webhookUrl);
+      console.warn(
+        `[TWILIO PHONE MGMT] ✗ REFUSED a Twilio webhook write on ${endpoint.phoneNumber}: ${refusal.reason}`,
       );
-      if (refusal) {
-        console.warn(
-          `[TWILIO PHONE MGMT] ✗ REFUSED a webhook write on ${endpoint.phoneNumber}: ${refusal.reason}`,
-        );
-        throw refusal;
-      }
-      // Never point a live number at a development host. Publishing recomputes
-      // callback URLs, and a dev URL written onto a production number sends every
-      // inbound call to a workspace that no longer answers — with the number looking
-      // correctly configured in Twilio. Saving the URL in our own table is still
-      // allowed (syncStatus stays 'pending') so the intent isn't lost.
-      if (getEnvironmentConfig().isProduction && isDevCallbackUrl(webhookUrl)) {
-        throw new Error(
-          `Refusing to write a development webhook (${webhookUrl}) onto ${endpoint.phoneNumber} from a production deployment. Use the published host, or set the DOMAIN secret and retry.`,
-        );
-      }
-      try {
-        const client = await getTwilioClient();
-        await client.incomingPhoneNumbers(endpoint.twilioSid).update({
-          voiceUrl: webhookUrl,
-          voiceMethod: options?.webhookMethod || 'POST',
-        });
-        console.log(`[TWILIO PHONE MGMT] Updated Twilio webhook for ${endpoint.phoneNumber} to ${webhookUrl}`);
-      } catch (error) {
-        console.error('[TWILIO PHONE MGMT] Error updating Twilio webhook:', error);
-        throw new Error('Failed to update webhook in Twilio');
-      }
+      throw refusal;
     }
 
     const [updated] = await db.update(phoneEndpoints)
       .set({
         voiceWebhookUrl: webhookUrl,
         voiceWebhookMethod: options?.webhookMethod || 'POST',
-        lastSyncedAt: options?.updateTwilio ? new Date() : undefined,
-        syncStatus: options?.updateTwilio ? 'synced' : 'pending',
+        // Saved here only; Twilio is not touched, so it is not synced.
+        syncStatus: 'pending',
         updatedAt: new Date(),
       })
       .where(eq(phoneEndpoints.id, endpointId))

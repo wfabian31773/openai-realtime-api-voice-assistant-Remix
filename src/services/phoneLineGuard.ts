@@ -26,16 +26,16 @@
  * number is pointed at now. Writing the runtime URL from the dashboard, with
  * a preview and a confirmation, is a separate decision left to him.
  *
- * `updatePhoneEndpointWebhook` (the admin-only update-webhook route, which
- * writes a URL the caller gives, and which no page or script calls) writes
- * to Twilio only when the number has no Voice URL. Four Codex rounds on #528
- * each found a URL that this module's copy of the server's routing read
- * differently from the real router (a longer path, another host, a mistyped
- * lane, a percent-encoded lane, a slash or case variant of the operator
- * line's path). So no write decision rests on that copy any more: a number
- * that has a Voice URL is not overwritten from the dashboard, whatever it
- * points at. `classifyVoiceUrl` only words the refusal (and says whether
- * the number has a Voice URL at all).
+ * Nothing in the dashboard writes a Voice URL to Twilio. The admin-only
+ * update-webhook route (`updatePhoneEndpointWebhook`, which no page or
+ * script calls) refuses `updateTwilio: true` and only saves the URL in our
+ * own `phone_endpoints` table. On #528 it wrote to Twilio onto a number with
+ * no Voice URL; four review rounds found a URL this module's copy of the
+ * server's routing read differently from the real router, and a fifth found
+ * a race (Twilio has no compare-and-set, so "this number has no Voice URL,
+ * now write one" is two steps another writer can slip between). Wayne,
+ * 2026-11-26, took the recommendation to remove the write: every repoint is
+ * done in the Twilio console. `classifyVoiceUrl` only words a refusal.
  */
 
 /** What a Voice URL is answered by. */
@@ -120,7 +120,9 @@ export type PhoneLineRefusalReason =
   | 'runtime_line'
   | 'live_line'
   | 'no_voice_url'
-  | 'voice_url_unreadable';
+  | 'voice_url_unreadable'
+  /** update-webhook asked to write to Twilio, which the dashboard never does. */
+  | 'twilio_write_not_allowed';
 
 /** A refusal the routes return as-is: nothing was written to Twilio or to
  * our own table. */
@@ -216,34 +218,15 @@ export function configureForAgentRefusal(
 }
 
 /**
- * For a write of a URL the caller chose (update-webhook): the dashboard
- * writes a Voice URL only onto a number that has none. A number that answers
- * calls, or points at a broken URL, is repointed in the Twilio console.
- * Returns null when the write may go ahead.
+ * update-webhook with `updateTwilio: true`: always refused. The dashboard
+ * never writes a Voice URL to Twilio, so Twilio is not read either, and
+ * `currentVoiceUrl` is null because nothing was looked up.
  */
-export function webhookWriteRefusal(
-  phoneNumber: string,
-  current: LiveVoiceUrl,
-  target: string,
-): PhoneLineRefusal | null {
-  if (!current.ok) {
-    return new PhoneLineRefusal(
-      'voice_url_unreadable',
-      `Could not read ${phoneNumber}'s current Voice URL from Twilio, so it was not checked. ${NOT_CHANGED}`,
-      null,
-      target,
-    );
-  }
-  const now = classifyVoiceUrl(current.url);
-  if (now.kind === 'none') return null;
-  const where =
-    now.kind === 'runtime'
-      ? `${phoneNumber} points at a voice runtime address (lane "${now.lane}"): ${current.url}.`
-      : `${phoneNumber} already has a Voice URL (${current.url}).`;
+export function twilioWriteRefusal(phoneNumber: string, target: string): PhoneLineRefusal {
   return new PhoneLineRefusal(
-    now.kind === 'runtime' ? 'runtime_line' : 'live_line',
-    `${where} The dashboard writes a Voice URL only onto a number that has none. ${NOT_CHANGED} ${WHERE_TO_REPOINT}`,
-    current.url,
+    'twilio_write_not_allowed',
+    `The dashboard does not write a Voice URL to Twilio, so ${phoneNumber} was not repointed. ${NOT_CHANGED} ${WHERE_TO_REPOINT}`,
+    null,
     target,
   );
 }

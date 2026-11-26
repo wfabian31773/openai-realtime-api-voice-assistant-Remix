@@ -89,7 +89,7 @@ export type RepeatAddition = 'added' | 'nothing_new' | 'not_confirmed';
  * re-sends these same payloads and needs the identical classification — see
  * that file.
  */
-import { isTerminalRefusal } from './terminalRefusal';
+import { isTerminalRefusal, refusedFieldNamed } from './terminalRefusal';
 
 /**
  * The ticketing app's hard-requires, mapped to whatever the INVOKING TOOL
@@ -150,10 +150,8 @@ function askAsFor(toolName: string, field: string): string | undefined {
  * whose schema decides the answer is known.
  */
 export function missingFieldFromError(error?: string): string | undefined {
-  const m = /missing required information:\s*([a-z_]+)/i.exec(error ?? '');
-  if (!m) return undefined;
-  const remote = m[1].toLowerCase();
-  return remote in REMOTE_FIELD_CANDIDATES ? remote : undefined;
+  const remote = refusedFieldNamed(error);
+  return remote && remote in REMOTE_FIELD_CANDIDATES ? remote : undefined;
 }
 
 /**
@@ -353,9 +351,17 @@ export async function createTicketDurable(
   params: CreateTicketParams,
   options: DurableFilingOptions = {},
 ): Promise<DurableCreateResult> {
-  const fallback = options.refusalFallbackDescription
-    ? { description: options.refusalFallbackDescription }
-    : undefined;
+  /**
+   * v279: every first filing carries the routing exit. `wrapCreateTicketPayload`
+   * keeps it only on an Optical or Surgery payload that has not taken the exit
+   * already, and the outbox uses it only when the worker's replay is refused
+   * for that department's office or surgeon. A later filing on the call
+   * (`forwardRepeatFiling`) carries none: it adds to a ticket that exists.
+   */
+  const fallback = {
+    ...(options.refusalFallbackDescription ? { description: options.refusalFallbackDescription } : {}),
+    routingExit: true,
+  };
   const sid = params.callData?.callSid;
   const key = params.idempotencyKey;
   const scoped = sid && key && new RegExp(`^call-${sid}-p\\d{1,3}$`).test(key);

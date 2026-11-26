@@ -51,3 +51,15 @@ export function isTerminalRefusal(status?: number): boolean {
 export function payloadRefusalSqlList(): string {
   return [...PAYLOAD_REFUSAL_STATUSES].sort((a, b) => a - b).join(', ');
 }
+
+/**
+ * The first field a create-ticket refusal names, lower-cased, in the app's own
+ * words ("Missing required information: surgeon" -> "surgeon"). The one copy
+ * of the matcher: `durableTicketFiling.missingFieldFromError` narrows it to the
+ * fields a tool can ask for, and the outbox reads it to decide whether a held
+ * request's replay was refused for its routing field (v279).
+ */
+export function refusedFieldNamed(error?: string): string | undefined {
+  const m = /missing required information:\s*([a-z_]+)/i.exec(error ?? '');
+  return m ? m[1].toLowerCase() : undefined;
+}
