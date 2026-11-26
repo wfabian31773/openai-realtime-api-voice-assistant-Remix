@@ -1227,9 +1227,11 @@ function OpeningsTab() {
                     {a.agentName}
                   </span>
                   <span className="text-sm font-normal">
-                    {a.callsSampled
-                      ? `${pct(a.greetingAdherence)} adherent · ${a.callsSampled} calls`
-                      : 'no calls sampled'}
+                    {!a.callsSampled
+                      ? 'no calls sampled'
+                      : a.greetingAdherence === null
+                        ? `no configured greeting to compare · ${a.callsSampled} calls`
+                        : `${pct(a.greetingAdherence)} adherent · ${a.callsSampled} calls`}
                   </span>
                 </CardTitle>
               </CardHeader>

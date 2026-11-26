@@ -314,8 +314,11 @@ export async function agentOpenings(days = 7): Promise<AgentOpenings[]> {
     first_only AS (SELECT * FROM firsts WHERE rn = 1 AND text IS NOT NULL AND LENGTH(text) > 12)
     SELECT a.slug AS agent_slug, a.name AS agent_name, a.welcome_greeting,
            COUNT(f.call_log_id)::int AS calls_sampled,
-           ROUND(AVG(CASE WHEN a.welcome_greeting IS NOT NULL AND
-             LOWER(REGEXP_REPLACE(f.text, '\\s+', ' ', 'g')) LIKE
+           -- No configured greeting (npx-outreach's comes from its outbound
+           -- policy) is no measurement, NULL, not 0%: it read a red "0%
+           -- adherent" on 113 calls (2026-11-26).
+           ROUND(AVG(CASE WHEN a.welcome_greeting IS NULL OR f.call_log_id IS NULL THEN NULL
+             WHEN LOWER(REGEXP_REPLACE(f.text, '\\s+', ' ', 'g')) LIKE
              LOWER(REGEXP_REPLACE(LEFT(a.welcome_greeting, 24), '\\s+', ' ', 'g')) || '%'
            THEN 1 ELSE 0 END)::numeric, 3) AS adherence
     FROM agents a

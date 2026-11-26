@@ -610,3 +610,40 @@ describe('agent_line_repeated — the wider net under question_repetition', () =
     expect(r.pass).toBe(true);
   });
 });
+
+describe('a call put into the PCP queue was handed over — 2026-11-26', () => {
+  /**
+   * A blind transfer into the PCP call-centre queue ends runtime_outcome
+   * 'transferred' while transferredToHuman stays false (v20). 27 of the 43 PCP
+   * human_request_deflection criticals in 7 days were such calls, graded "NO
+   * transfer and NO ticket". Invented words; the shape is the live calls'.
+   */
+  const askedTwice = [
+    'AGENT: Thank you for calling Azul Vision PCP Support. How can I help you today?',
+    'CALLER: I need to speak to a representative.',
+    'AGENT: I can connect you to our team. Would you like me to put you through?',
+    'CALLER: Yes, a representative please.',
+  ].join('\n');
+
+  it('passes when the runtime handed the caller to the queue', () => {
+    const r = check(run({ transcript: askedTwice, agentSlug: 'pcp', ticketNumber: null, transferredToHuman: false, runtimeOutcome: 'transferred' } as never), 'human_request_deflection');
+    expect(r.pass).toBe(true);
+    expect(r.severity).toBeUndefined();
+  });
+
+  it('still fails when the caller was neither handed over nor ticketed', () => {
+    const r = check(run({ transcript: askedTwice, agentSlug: 'pcp', ticketNumber: null, transferredToHuman: false, runtimeOutcome: 'caller_hangup' } as never), 'human_request_deflection');
+    expect(r.pass).toBe(false);
+    expect(r.severity).toBe('critical');
+  });
+});
+
+describe('the grader is given the call row\'s runtime outcome', () => {
+  it('runAndPersistDeterministicGraders fills runtimeOutcome from call_logs', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const src = readFileSync(join(__dirname, 'callGradingService.ts'), 'utf8');
+    const build = src.slice(src.indexOf('const input: DeterministicGraderInput = {'), src.indexOf('const results = this.runDeterministicGraders(input);'));
+    expect(build).toContain('runtimeOutcome: callLog.runtimeOutcome ?? null,');
+  });
+});
