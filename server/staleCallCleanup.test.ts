@@ -19,12 +19,12 @@ import type { Express, RequestHandler } from 'express';
 // A recording stand-in for the Hub's drizzle handle: the production close is
 // read back as SQL, and nothing reaches a database.
 const dbCalls: { set?: Record<string, unknown>; where?: unknown }[] = [];
-const dbSelects: { where?: unknown; orderBy?: unknown[]; limit?: number }[] = [];
+const dbSelects: { fields?: Record<string, unknown>; where?: unknown; orderBy?: unknown[]; limit?: number }[] = [];
 let returningRows: { id: string }[] = [{ id: 'row-1' }];
 vi.mock('./db', () => ({
   db: {
-    select: () => {
-      const call: { where?: unknown; orderBy?: unknown[]; limit?: number } = {};
+    select: (fields: Record<string, unknown>) => {
+      const call: { fields?: Record<string, unknown>; where?: unknown; orderBy?: unknown[]; limit?: number } = { fields };
       dbSelects.push(call);
       const chain = {
         from() { return chain; },
@@ -340,6 +340,8 @@ describe('rows the sweep must leave cannot hide the rows behind them (Codex on #
     const order = (dbSelects[0].orderBy ?? []).map((o) => dialect.sqlToQuery(o as any).sql);
     expect(order).toEqual(['"call_logs"."created_at" asc', '"call_logs"."id" asc']);
     expect(dbSelects[0].limit).toBe(200);
+    // the key the next cursor is built from is Postgres's own text, not a Date
+    expect(dialect.sqlToQuery(dbSelects[0].fields!.createdAtKey as any).sql).toBe('"call_logs"."created_at"::text');
 
     await productionSweepDeps.findStaleRows(NOW, 200, null);
     expect(dialect.sqlToQuery(dbSelects[1].where as any).sql).not.toContain('"call_logs"."id")');
