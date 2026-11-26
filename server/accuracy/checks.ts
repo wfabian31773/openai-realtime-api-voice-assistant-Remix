@@ -66,9 +66,13 @@ SELECT count(*)::int AS n FROM call_logs
  WHERE created_at >= now() - make_interval(days => $1::int)
    AND (runtime_outcome = 'provider_failure' OR status = 'failed')`;
 
-/** Everything the calls of the Pacific day cost: the voice AI and Twilio. */
-export const TRUTH_SPEND_PACIFIC_TODAY_SQL = `
-SELECT coalesce(sum(coalesce(openai_cost_cents, 0) + coalesce(twilio_cost_cents, 0)), 0)::bigint AS cents
+/**
+ * The voice-AI cost of the Pacific day's calls: openai_cost_cents, the column
+ * that holds xAI spend on the runtime. The budget counts this alone (Twilio is
+ * not part of it), so this is the truth the budget must match.
+ */
+export const TRUTH_VOICE_AI_PACIFIC_TODAY_SQL = `
+SELECT coalesce(sum(coalesce(openai_cost_cents, 0)), 0)::bigint AS cents
   FROM call_logs WHERE ${PACIFIC_DAY_OF_CREATED} = ${PACIFIC_TODAY}`;
 
 async function one(q: Queryable, sql: string, params: unknown[] = [], col = 'n'): Promise<number | null> {
@@ -153,11 +157,11 @@ export function buildChecks(): AccuracyCheck<AccuracyDeps>[] {
     {
       id: 'cost.budget.spend-today',
       screen: 'Cost Dashboard',
-      widget: 'Daily Budget — today’s spend',
-      claim: 'What today’s calls (Pacific day) have cost so far: voice AI plus Twilio.',
+      widget: 'Daily voice-AI budget — today’s spend',
+      claim: 'The voice-AI (xAI) cost of today’s calls so far, Pacific day.',
       truthSource:
-        'The sum of openai_cost_cents (the voice-AI cost column, which holds xAI spend on the runtime) and twilio_cost_cents ' +
-        'over call_logs rows of today’s Pacific date.',
+        'The sum of openai_cost_cents (the voice-AI cost column, which holds xAI spend on the runtime) over call_logs rows ' +
+        'of today’s Pacific date. (It read the UTC day until 2026-11-26.)',
       unit: 'dollars',
       // Calls landing between the two reads move it by a few cents.
       tolerance: { abs: 1, rel: 0.01 },
@@ -166,7 +170,7 @@ export function buildChecks(): AccuracyCheck<AccuracyDeps>[] {
         return { value: Number(s.todaySpendCents) / 100 };
       },
       async truthValue(d) {
-        const cents = await one(d.hub, TRUTH_SPEND_PACIFIC_TODAY_SQL, [], 'cents');
+        const cents = await one(d.hub, TRUTH_VOICE_AI_PACIFIC_TODAY_SQL, [], 'cents');
         return { value: cents === null ? null : cents / 100 };
       },
     },

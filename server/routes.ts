@@ -2626,6 +2626,12 @@ export async function registerRoutes(app: Express): Promise<Server> {
       const opsHubCostByModel: Record<string, number> = {};
       let totalReconciledCents = 0;
       let realtimeCostDollars = 0;
+      // Every non-realtime OpenAI model on the account (grading, the ticket
+      // readers, anything else billed to the org). It was shown only in the
+      // per-model list, while the summary's "other" read total minus realtime,
+      // which is 0 because actualCostCents IS the realtime figure: the card
+      // said "Other $0.00" beside "other $999.88" (2026-11-26).
+      let otherCostCents = 0;
       
       for (const day of dailyCosts) {
         const actualCostDollars = (day.actualCostCents || 0) / 100;
@@ -2640,6 +2646,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
             (opsHubCostByModel['gpt-realtime'] || 0) + (day.realtimeCostCents / 100);
         }
         if (day.otherCostCents) {
+          otherCostCents += day.otherCostCents;
           opsHubCostByModel['other'] = 
             (opsHubCostByModel['other'] || 0) + (day.otherCostCents / 100);
         }
@@ -2659,6 +2666,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
       
       res.json({
         totalCostDollars: totalReconciledCents / 100,
+        otherCostDollars: otherCostCents / 100,
+        accountTotalDollars: (totalReconciledCents + otherCostCents) / 100,
         realtimeCostDollars,
         opsHubCostByDate,
         opsHubCostByModel,

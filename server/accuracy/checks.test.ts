@@ -13,7 +13,7 @@ import {
   TRUTH_CALLS_LAST_DAYS_SQL,
   TRUTH_CALLS_PACIFIC_TODAY_SQL,
   TRUTH_DROPPED_LAST_DAYS_SQL,
-  TRUTH_SPEND_PACIFIC_TODAY_SQL,
+  TRUTH_VOICE_AI_PACIFIC_TODAY_SQL,
   type AccuracyDeps,
   type ScreenReaders,
 } from './checks';
@@ -23,7 +23,7 @@ const TRUTH: Record<string, Record<string, number>> = {
   [TRUTH_CALLS_LAST_DAYS_SQL]: { n: 4010 },
   [TRUTH_CALLS_LAST_24H_SQL]: { n: 662 },
   [TRUTH_DROPPED_LAST_DAYS_SQL]: { n: 539 },
-  [TRUTH_SPEND_PACIFIC_TODAY_SQL]: { cents: 22330 },
+  [TRUTH_VOICE_AI_PACIFIC_TODAY_SQL]: { cents: 21296 },
 };
 
 function deps(screens: Partial<ScreenReaders>, truth = TRUTH): AccuracyDeps & { sent: string[] } {
@@ -41,7 +41,7 @@ function deps(screens: Partial<ScreenReaders>, truth = TRUTH): AccuracyDeps & { 
     screens: {
       todayOverview: async () => ({ opsHub: [{ callsToday: 400 }, { callsToday: 238 }] }),
       scorecards: async () => [{ calls: 4009, droppedCalls: 539 }],
-      budgetStatus: async () => ({ todaySpendCents: 22330 }),
+      budgetStatus: async () => ({ todaySpendCents: 21296 }),
       operationsMonitor: async () => ({ calls: { total: 662 } }),
       ...screens,
     },
@@ -93,9 +93,9 @@ describe('each check catches the defect it was written for', () => {
     expect((await result('observatory.overview.calls-today', deps({ todayOverview: async () => ({ opsHub: [{ callsToday: 465 }] }) }))).status).toBe('fail');
   });
 
-  it('Budget: the UTC-day, voice-only figure ($229.40) against the Pacific-day total ($223.30)', async () => {
+  it('Budget: the UTC day ($229.40) against the Pacific day ($212.96), measured 2026-11-26', async () => {
     const r = await result('cost.budget.spend-today', deps({ budgetStatus: async () => ({ todaySpendCents: 22940 }) }));
-    expect(r).toMatchObject({ status: 'fail', screenValue: 229.4, truthValue: 223.3 });
+    expect(r).toMatchObject({ status: 'fail', screenValue: 229.4, truthValue: 212.96 });
   });
 
   it('a screen that throws is unknown with the reason', async () => {
@@ -109,7 +109,7 @@ describe('the truth statements', () => {
   it('count the Pacific day from created_at read as UTC', () => {
     expect(PACIFIC_DAY_OF_CREATED).toBe(`((created_at AT TIME ZONE 'UTC') AT TIME ZONE 'America/Los_Angeles')::date`);
     expect(TRUTH_CALLS_PACIFIC_TODAY_SQL).toContain(PACIFIC_DAY_OF_CREATED);
-    expect(TRUTH_SPEND_PACIFIC_TODAY_SQL).toContain(PACIFIC_DAY_OF_CREATED);
+    expect(TRUTH_VOICE_AI_PACIFIC_TODAY_SQL).toContain(PACIFIC_DAY_OF_CREATED);
   });
 
   it('count a dropped call by the runtime outcome, not the never-written Twilio error column', () => {
@@ -117,9 +117,9 @@ describe('the truth statements', () => {
     expect(TRUTH_DROPPED_LAST_DAYS_SQL).not.toContain('twilio_error_code');
   });
 
-  it('count spend as voice AI plus Twilio', () => {
-    expect(TRUTH_SPEND_PACIFIC_TODAY_SQL).toContain('openai_cost_cents');
-    expect(TRUTH_SPEND_PACIFIC_TODAY_SQL).toContain('twilio_cost_cents');
+  it('count the budget as voice AI only, which is what the budget sums', () => {
+    expect(TRUTH_VOICE_AI_PACIFIC_TODAY_SQL).toContain('openai_cost_cents');
+    expect(TRUTH_VOICE_AI_PACIFIC_TODAY_SQL).not.toContain('twilio_cost_cents');
   });
 
   it('select no patient data', () => {

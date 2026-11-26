@@ -24,6 +24,10 @@ import { BudgetWidget } from '@/components/BudgetWidget'
 import { ReconciliationRunHistory } from '@/components/ReconciliationRunHistory'
 
 interface OpenAIUsage {
+  /** Realtime plus every other model: everything OpenAI billed in the range. */
+  accountTotalDollars?: number
+  /** Every model that is not a realtime voice model. */
+  otherCostDollars?: number
   totalCostDollars: number
   costByModel: Record<string, number>
   costByDate: Record<string, number>
@@ -232,7 +236,12 @@ export function CostDashboardPage() {
       <div className="flex items-center justify-between">
         <div>
           <h1 className="text-3xl font-bold text-foreground">Cost & Quality Dashboard</h1>
-          <p className="text-muted-foreground">Track call costs and patient satisfaction metrics</p>
+          <p className="text-muted-foreground">What the phone calls cost and how they were graded</p>
+          <p className="mt-1 max-w-3xl text-xs text-muted-foreground">
+            A call costs its Twilio phone charge plus its voice AI. Every line has run on xAI Grok since October 2026, so the voice-AI
+            figures here are xAI spend (the database column is still named after OpenAI, the provider it replaced). The OpenAI card further
+            down is the OpenAI account itself, which the calls no longer use.
+          </p>
         </div>
         <div className="flex gap-3">
           <select 
@@ -262,7 +271,7 @@ export function CostDashboardPage() {
       </div>
 
       {/* KPI Cards */}
-      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-5">
+      <div className="grid gap-4 md:grid-cols-2 lg:grid-cols-4">
         <Card>
           <CardHeader className="flex flex-row items-center justify-between pb-2">
             <CardTitle className="text-sm font-medium text-muted-foreground">Total Cost</CardTitle>
@@ -274,7 +283,7 @@ export function CostDashboardPage() {
             </div>
             <div className="mt-1 flex gap-2 text-xs text-muted-foreground">
               <span className="text-primary">Twilio: {formatCurrency(costAnalytics?.summary.totalTwilioCents || 0)}</span>
-              <span className="text-violet-600 dark:text-violet-400">OpenAI: {formatCurrency(costAnalytics?.summary.totalOpenAICents || 0)}</span>
+              <span className="text-violet-600 dark:text-violet-400">Voice AI (xAI): {formatCurrency(costAnalytics?.summary.totalOpenAICents || 0)}</span>
             </div>
           </CardContent>
         </Card>
@@ -344,24 +353,6 @@ export function CostDashboardPage() {
           </CardContent>
         </Card>
 
-        <Card>
-          <CardHeader className="flex flex-row items-center justify-between pb-2">
-            <CardTitle className="text-sm font-medium text-muted-foreground">Cache Hit Ratio</CardTitle>
-            <Cpu className="h-5 w-5 text-indigo-500" />
-          </CardHeader>
-          <CardContent>
-            <div className="text-3xl font-bold text-foreground">
-              {costAnalytics?.tokenUsage?.cacheHitRatio != null
-                ? `${costAnalytics.tokenUsage.cacheHitRatio}%`
-                : '-'}
-            </div>
-            <p className="text-xs text-muted-foreground">
-              {costAnalytics?.tokenUsage?.totalInputCachedTokens
-                ? `${(costAnalytics.tokenUsage.totalInputCachedTokens / 1000).toFixed(0)}K cached tokens`
-                : 'Cached tokens get 90% discount'}
-            </p>
-          </CardContent>
-        </Card>
       </div>
 
       {/* Budget Tracker */}
@@ -411,7 +402,7 @@ export function CostDashboardPage() {
                   </div>
                 </div>
                 <div className="flex items-center justify-between">
-                  <span className="text-sm text-muted-foreground">OpenAI Costs</span>
+                  <span className="text-sm text-muted-foreground">Voice AI costs</span>
                   <div className="flex items-center gap-2">
                     <div className="h-2 w-24 rounded-full bg-muted">
                       <div 
@@ -522,10 +513,11 @@ export function CostDashboardPage() {
           <div>
             <CardTitle className="flex items-center gap-2">
               <Cpu className="h-5 w-5 text-violet-600 dark:text-violet-400" />
-              Operations Hub OpenAI Usage
+              OpenAI account spend (not the phone calls)
             </CardTitle>
             <p className="text-sm text-muted-foreground mt-1">
-              Real-time voice agent costs (realtime, audio, whisper, transcription)
+              What OpenAI billed, from OpenAI's own usage records, one row per UTC day. The calls run on xAI, so this is the models the
+              system still uses there (call grading and the readers that check tickets) and anything else billed to the same OpenAI account.
             </p>
           </div>
           <button
@@ -547,16 +539,18 @@ export function CostDashboardPage() {
               {/* Total Cost Summary */}
               <div className="space-y-4">
                 <div className="flex items-baseline justify-between">
-                  <span className="text-sm text-muted-foreground">Ops Hub OpenAI Cost</span>
+                  <span className="text-sm text-muted-foreground">Everything OpenAI billed</span>
                   <span className="text-3xl font-bold text-violet-600 dark:text-violet-400">
-                    ${openaiUsage.realtimeCostDollars.toFixed(2)}
+                    ${(openaiUsage.accountTotalDollars ?? openaiUsage.totalCostDollars).toFixed(2)}
                   </span>
                 </div>
                 <div className="flex items-baseline justify-between">
-                  <span className="text-sm text-muted-foreground">Other OpenAI Usage</span>
-                  <span className="text-lg text-muted-foreground">
-                    ${(openaiUsage.totalCostDollars - openaiUsage.realtimeCostDollars).toFixed(2)}
-                  </span>
+                  <span className="text-sm text-muted-foreground">Realtime voice models (the retired pipeline)</span>
+                  <span className="text-lg text-muted-foreground">${openaiUsage.realtimeCostDollars.toFixed(2)}</span>
+                </div>
+                <div className="flex items-baseline justify-between">
+                  <span className="text-sm text-muted-foreground">Every other OpenAI model</span>
+                  <span className="text-lg text-muted-foreground">${(openaiUsage.otherCostDollars ?? 0).toFixed(2)}</span>
                 </div>
                 <div className="text-xs text-muted-foreground">
                   {openaiUsage.dateRange.startDate} to {openaiUsage.dateRange.endDate}
@@ -565,7 +559,7 @@ export function CostDashboardPage() {
 
               {/* Cost by Model - Only Ops Hub Models */}
               <div>
-                <h4 className="text-sm font-medium text-foreground mb-3">Voice Agent Models</h4>
+                <h4 className="text-sm font-medium text-foreground mb-3">By model group</h4>
                 <div className="space-y-2 max-h-48 overflow-y-auto">
                   {Object.entries(openaiUsage.opsHubCostByModel || {})
                     .sort(([, a], [, b]) => b - a)
@@ -871,7 +865,7 @@ export function CostDashboardPage() {
                 </div>
                 <div className="flex items-center gap-1">
                   <div className="h-3 w-3 rounded bg-purple-500" />
-                  <span>OpenAI</span>
+                  <span>Voice AI (xAI)</span>
                 </div>
               </div>
             </div>

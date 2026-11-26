@@ -81,7 +81,7 @@ export function DailyCostCharts({
           <CardHeader className="pb-2">
             <div className="flex items-center justify-between">
               <div>
-                <p className="text-sm font-medium text-muted-foreground">OpenAI Spend</p>
+                <p className="text-sm font-medium text-muted-foreground">Voice AI (xAI) spend</p>
                 <p className="text-3xl font-bold text-violet-600 dark:text-violet-400">
                   {formatCurrency(totalOpenAICents)}
                 </p>
@@ -112,7 +112,7 @@ export function DailyCostCharts({
                     tickFormatter={(v: number) => `$${(v / 100).toFixed(0)}`}
                     width={40}
                   />
-                  <Tooltip content={<CustomTooltip costType="OpenAI" />} />
+                  <Tooltip content={<CustomTooltip costType="Voice AI (xAI)" />} />
                   <Bar dataKey="openai" radius={[4, 4, 0, 0]}>
                     {chartData.map((entry, index) => (
                       <Cell
@@ -238,7 +238,7 @@ export function DailyCostCharts({
             </div>
             <div className="mt-2 flex items-center justify-between text-xs text-muted-foreground">
               <div className="flex items-center gap-2">
-                <span className="text-violet-500">OpenAI: {Math.round((totalOpenAICents / (totalCents || 1)) * 100)}%</span>
+                <span className="text-violet-500">Voice AI (xAI): {Math.round((totalOpenAICents / (totalCents || 1)) * 100)}%</span>
                 <span className="text-primary">Twilio: {Math.round((totalTwilioCents / (totalCents || 1)) * 100)}%</span>
               </div>
             </div>

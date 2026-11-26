@@ -29,7 +29,7 @@ export function BudgetWidget() {
     return (
       <Card>
         <CardHeader className="pb-2">
-          <CardTitle className="text-sm font-medium text-muted-foreground">Daily Budget</CardTitle>
+          <CardTitle className="text-sm font-medium text-muted-foreground">Daily voice-AI budget</CardTitle>
         </CardHeader>
         <CardContent>
           <div className="flex justify-center py-4">
@@ -43,7 +43,6 @@ export function BudgetWidget() {
   const spendDollars = budget.todaySpendCents / 100
   const budgetDollars = budget.dailyBudgetCents / 100
   const remainingDollars = budget.remainingCents / 100
-  const projectedDollars = budget.projectedDailyCents / 100
   const ratePerHour = budget.spendRateCentsPerHour / 100
   const percentCapped = Math.min(budget.percentUsed * 100, 100)
 
@@ -68,7 +67,7 @@ export function BudgetWidget() {
   return (
     <Card>
       <CardHeader className="flex flex-row items-center justify-between pb-2">
-        <CardTitle className="text-sm font-medium text-muted-foreground">Daily Budget</CardTitle>
+        <CardTitle className="text-sm font-medium text-muted-foreground">Daily voice-AI budget</CardTitle>
         <StatusIcon className={`h-5 w-5 ${iconColor}`} />
       </CardHeader>
       <CardContent className="space-y-3">
@@ -89,9 +88,10 @@ export function BudgetWidget() {
         {/* Metrics Grid */}
         <div className="grid grid-cols-2 gap-3 pt-1">
           <div>
-            <p className="text-xs text-muted-foreground">Remaining</p>
+            <p className="text-xs text-muted-foreground">{budget.isOverBudget ? 'Over by' : 'Remaining'}</p>
             <p className={`text-sm font-medium ${budget.isOverBudget ? 'text-red-500' : 'text-foreground'}`}>
-              {budget.isOverBudget ? '-' : ''}${remainingDollars.toFixed(2)}
+              {/* remainingCents floors at 0, so over budget it would read "-$0.00" */}
+              ${(budget.isOverBudget ? spendDollars - budgetDollars : remainingDollars).toFixed(2)}
             </p>
           </div>
           <div>
@@ -100,21 +100,13 @@ export function BudgetWidget() {
               ${ratePerHour.toFixed(2)}/hr
             </p>
           </div>
-          <div className="col-span-2">
-            <p className="text-xs text-muted-foreground">Projected Daily Total</p>
-            <p className={`text-sm font-medium ${projectedDollars > budgetDollars ? 'text-red-500' : 'text-emerald-500'}`}>
-              ${projectedDollars.toFixed(2)}
-              {projectedDollars > budgetDollars && (
-                <span className="text-xs ml-1">(over budget)</span>
-              )}
-            </p>
-          </div>
         </div>
 
         {/* Status text */}
         {budget.isOverBudget && (
           <p className="text-xs text-red-500 font-medium">
-            Outbound calls paused until tomorrow
+            Over the daily budget. Only the old outbound scheduler checks this budget; NPX outreach and every inbound line keep
+            running.
           </p>
         )}
         {budget.isWarning && !budget.isOverBudget && (
@@ -123,7 +115,8 @@ export function BudgetWidget() {
           </p>
         )}
         <p className="text-xs text-muted-foreground">
-          {budget.hoursElapsedToday}h elapsed today (Pacific)
+          The voice-AI (xAI Grok) cost of today's calls, Pacific day, {budget.hoursElapsedToday}h in. Twilio phone charges are not included.
+          Spend rate is today's average per hour so far.
         </p>
       </CardContent>
     </Card>

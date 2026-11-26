@@ -54,8 +54,10 @@ import {
 } from "../shared/schema";
 import { db } from "./db";
 import { eq, asc, desc, and, or, count, gte, lte, lt, inArray, isNull, isNotNull, ilike, sql } from "drizzle-orm";
+import { PACIFIC_DAY_BOUNDS_SQL } from "./pacificDay";
 import { randomUUID } from "node:crypto";
 import { stampBuildIdentity, oldCoreBuildIdentity } from "../src/runtime/buildIdentity";
+
 
 export interface IStorage {
   // User operations (required for Replit Auth)
@@ -1210,17 +1212,17 @@ export class DatabaseStorage implements IStorage {
   }
 
   async getEstimatedOpenaiCostForDate(date: string): Promise<number> {
-    const startOfDay = new Date(date + 'T00:00:00Z');
-    const endOfDay = new Date(date + 'T23:59:59.999Z');
-    
+    // `date` is a PACIFIC date (the budget guard passes today in Pacific time).
+    // It used to be read as a UTC day (date + 'T00:00:00Z'), which runs from
+    // 4 PM Pacific the day before to 4 PM Pacific: on 2026-11-26 the budget
+    // read $229.40 against $212.96 for the Pacific day. The bounds are now the
+    // Pacific day's midnights, converted to the UTC wall time created_at holds,
+    // so the created_at index is still used.
     const result = await db
       .select({ totalCents: sql`COALESCE(SUM(openai_cost_cents), 0)` })
       .from(callLogs)
-      .where(and(
-        gte(callLogs.createdAt, startOfDay),
-        lte(callLogs.createdAt, endOfDay)
-      ));
-    
+      .where(sql`${PACIFIC_DAY_BOUNDS_SQL(date)}`);
+
     return Number(result[0]?.totalCents) || 0;
   }
 
