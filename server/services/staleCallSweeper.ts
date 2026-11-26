@@ -140,8 +140,12 @@ export const productionSweepDeps: SweepDeps = {
           // idx_call_logs_open_status_created, which holds only open rows.
           inArray(callLogs.status, [...LIVE_CALL_STATUSES]),
           // Age as the Live Calls board reads it: the start time, else the
-          // creation time (Codex on #529, rounds 1 and 2).
-          sql`coalesce(${callLogs.startTime}, ${callLogs.createdAt}) < ${cutoff}`,
+          // creation time (Codex on #529, rounds 1 and 2). The cutoff is sent
+          // as UTC text and cast, as the column's own encoder would send it:
+          // a bare Date goes out in the process's local time with an offset,
+          // which Postgres drops when it compares to a timestamp column, so a
+          // process not on UTC would read rows hours off (Codex, round 4).
+          sql`coalesce(${callLogs.startTime}, ${callLogs.createdAt}) < ${cutoff.toISOString()}::timestamp`,
           after
             ? sql`(${callLogs.createdAt}, ${callLogs.id}) > (${after.createdAtKey}::timestamp, ${after.id}::varchar)`
             : undefined,

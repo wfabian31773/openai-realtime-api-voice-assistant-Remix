@@ -341,11 +341,11 @@ describe('rows the sweep must leave cannot hide the rows behind them (Codex on #
     await productionSweepDeps.findStaleRows(NOW, 200, { createdAtKey: '2026-11-26 17:00:00.123456', id: 'row-9' });
     const q = dialect.sqlToQuery(dbSelects[0].where as any);
     expect(q.sql).toBe(
-      '("call_logs"."status" in ($1, $2, $3) and coalesce("call_logs"."start_time", "call_logs"."created_at") < $4 ' +
+      '("call_logs"."status" in ($1, $2, $3) and coalesce("call_logs"."start_time", "call_logs"."created_at") < $4::timestamp ' +
       'and ("call_logs"."created_at", "call_logs"."id") > ($5::timestamp, $6::varchar))',
     );
-    // the cursor travels as the database's own text, microseconds and all
-    expect(q.params).toEqual([...LIVE_CALL_STATUSES, NOW, '2026-11-26 17:00:00.123456', 'row-9']);
+    // the cutoff travels as UTC text, and the cursor as the database's own text, microseconds and all
+    expect(q.params).toEqual([...LIVE_CALL_STATUSES, '2026-11-26T18:00:00.000Z', '2026-11-26 17:00:00.123456', 'row-9']);
     const order = (dbSelects[0].orderBy ?? []).map((o) => dialect.sqlToQuery(o as any).sql);
     expect(order).toEqual(['"call_logs"."created_at" asc', '"call_logs"."id" asc']);
     expect(dbSelects[0].limit).toBe(200);
@@ -454,5 +454,28 @@ describe('the automatic sweep runs one at a time (Codex on #529, round 3)', () =
       selectGate = null;
       vi.useRealTimers();
     }
+  });
+});
+
+describe('the cutoff is UTC whatever the process timezone (Codex on #529, round 4)', () => {
+  it('a process on Pacific time sends the same cutoff as one on UTC', async () => {
+    const before = process.env.TZ;
+    const dialect = new PgDialect();
+    const sent: unknown[] = [];
+    try {
+      for (const tz of ['UTC', 'America/Los_Angeles']) {
+        process.env.TZ = tz;
+        dbSelects.length = 0;
+        await productionSweepDeps.findStaleRows(NOW, 200, null);
+        sent.push(dialect.sqlToQuery(dbSelects[0].where as any).params[3]);
+      }
+    } finally {
+      if (before === undefined) delete process.env.TZ; else process.env.TZ = before;
+    }
+    expect(sent).toEqual(['2026-11-26T18:00:00.000Z', '2026-11-26T18:00:00.000Z']);
+    // A bare Date here is what node-postgres would send as local time with an
+    // offset, which Postgres drops against a timestamp column (checked on the Hub:
+    // '2026-11-26T10:00:00.000-08:00'::timestamp reads 10:00, not 18:00).
+    expect(sent.every((v) => typeof v === 'string')).toBe(true);
   });
 });
