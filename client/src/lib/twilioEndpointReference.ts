@@ -36,11 +36,20 @@ export const OPERATOR_INBOUND_PATH = '/api/voice/operator-line/inbound'
 
 export const OPERATOR_INBOUND_URL = `https://${PUBLISHED_HOST}${OPERATOR_INBOUND_PATH}`
 
-/** The operator line's Voice fallback URL and its messaging URL: the two other
- * paths on that number that reach the voice runtime (server/index.ts lists
- * these, the inbound path, and the runtime's own callback paths). */
-export const OPERATOR_FALLBACK_PATH = '/api/voice/operator-line/fallback'
-export const OPERATOR_SMS_PATH = '/api/voice/operator-line/sms'
+/**
+ * Every /api/voice path the voice runtime answers, each with where it is set.
+ * This is server/index.ts's passthrough list, entry for entry (a test checks
+ * the two match), so the card cannot leave one out. Any other /api/voice/...
+ * URL reaches the retired pipeline behind the proxy.
+ */
+export const OPERATOR_RUNTIME_PATHS: ReadonlyArray<{ path: string; role: string }> = [
+  { path: OPERATOR_INBOUND_PATH, role: "the operator number's Voice URL" },
+  { path: '/api/voice/operator-line/fallback', role: "the operator number's Voice fallback URL, if set" },
+  { path: '/api/voice/operator-line/sms', role: "the operator number's messaging URL" },
+  { path: `${OPERATOR_INBOUND_PATH}/status`, role: 'set by the runtime on each call; never set on a number' },
+  { path: `${OPERATOR_INBOUND_PATH}/after`, role: 'set by the runtime on each call; never set on a number' },
+  { path: '/api/voice/operator-line/voicemail', role: "set by the runtime on the operator line's voicemail; never set on a number" },
+]
 
 export const WHERE_TO_REPOINT =
   "This page does not change a number. Repoint a number in the Twilio console; moving a live line is Wayne's decision."

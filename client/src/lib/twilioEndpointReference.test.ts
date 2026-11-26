@@ -2,9 +2,8 @@ import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
 import { describe, expect, it } from 'vitest'
 import {
-  OPERATOR_FALLBACK_PATH,
   OPERATOR_INBOUND_PATH,
-  OPERATOR_SMS_PATH,
+  OPERATOR_RUNTIME_PATHS,
   OPERATOR_INBOUND_URL,
   RUNTIME_URL_SHAPE,
   WHERE_TO_REPOINT,
@@ -28,15 +27,21 @@ describe('the endpoint reference says only what the running code serves', () => 
     // It is not the only /api/voice path the runtime answers (Codex on #535):
     // the operator line's own callback paths pass too.
     expect(index).toContain(`'${OPERATOR_INBOUND_PATH}/status'`)
-    // The card names the fallback and messaging paths, so they must be on the list.
-    expect(index).toContain(`'${OPERATOR_FALLBACK_PATH}'`)
-    expect(index).toContain(`'${OPERATOR_SMS_PATH}'`)
-    // And every /api/voice path the runtime answers is the operator line's own
-    // (the card says so).
+    // The card lists every /api/voice path the runtime answers, so its list
+    // must be server/index.ts's passthrough list exactly (Codex on #537, twice).
     const list = index.slice(index.indexOf("app.use('/api/voice'"), index.indexOf('].includes(req.originalUrl'))
     const listed = [...list.matchAll(/'(\/api\/voice\/[^']*)'/g)].map((m) => m[1])
     expect(listed.length).toBeGreaterThanOrEqual(6)
-    for (const path of listed) expect(path.startsWith('/api/voice/operator-line/')).toBe(true)
+    expect([...OPERATOR_RUNTIME_PATHS.map((p) => p.path)].sort()).toEqual([...listed].sort())
+    expect(new Set(OPERATOR_RUNTIME_PATHS.map((p) => p.path)).size).toBe(OPERATOR_RUNTIME_PATHS.length)
+    // The three the runtime sets itself are the ones its own webhook writes into TwiML.
+    const hook = readFileSync(join(__dirname, '../../../src/runtime/operatorInboundWebhook.ts'), 'utf8')
+    expect(hook).toContain('`${OPERATOR_INBOUND_PATH}/after`, `${OPERATOR_INBOUND_PATH}/status`')
+    expect(hook).toContain('<Record action="${OPERATOR_VOICEMAIL_PATH}"')
+    for (const { path, role } of OPERATOR_RUNTIME_PATHS) {
+      const setOnTheNumber = !/never set on a number/.test(role)
+      expect(setOnTheNumber).toBe(!/\/(status|after|voicemail)$/.test(path))
+    }
     expect(OPERATOR_INBOUND_URL).toBe('https://<published host>/api/voice/operator-line/inbound')
     expect(OPERATOR_INBOUND_URL.endsWith('/')).toBe(false)
   })
@@ -187,14 +192,14 @@ describe('the Twilio page card (source pin)', () => {
   })
 
   it('does not call the operator inbound path the only /api/voice path the runtime answers', () => {
-    expect(card).not.toMatch(/only \/api\/voice path/)
+    // The singular claim; the card now lists all of them, plural.
+    expect(card).not.toMatch(/only \/api\/voice path(?!s)/)
     expect(card).toContain("operator line's inbound Voice URL is exactly this path")
-    // Its fallback reaches the runtime too (Codex on #537), so the card names it
-    // rather than saying any other /api/voice Voice URL reaches the old pipeline.
+    // Its fallback and callbacks reach the runtime too (Codex on #537), so the
+    // card lists every one rather than saying the rest reach the old pipeline.
     expect(card).not.toContain('Any other inbound /api/voice')
-    expect(card).toContain('{OPERATOR_FALLBACK_PATH}')
-    expect(card).toContain('{OPERATOR_SMS_PATH}')
-    expect(card).toContain("Only the operator line's own listed paths under /api/voice reach")
+    expect(card).toContain('OPERATOR_RUNTIME_PATHS.map(({ path, role })')
+    expect(card).toContain('These are the only /api/voice paths the voice runtime answers')
   })
 
   it('says when the build cannot answer calls, before listing any lane', () => {
