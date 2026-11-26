@@ -19,9 +19,21 @@ import type { Express, RequestHandler } from 'express';
 // A recording stand-in for the Hub's drizzle handle: the production close is
 // read back as SQL, and nothing reaches a database.
 const dbCalls: { set?: Record<string, unknown>; where?: unknown }[] = [];
+const dbSelects: { where?: unknown; orderBy?: unknown[]; limit?: number }[] = [];
 let returningRows: { id: string }[] = [{ id: 'row-1' }];
 vi.mock('./db', () => ({
   db: {
+    select: () => {
+      const call: { where?: unknown; orderBy?: unknown[]; limit?: number } = {};
+      dbSelects.push(call);
+      const chain = {
+        from() { return chain; },
+        where(w: unknown) { call.where = w; return chain; },
+        orderBy(...o: unknown[]) { call.orderBy = o; return chain; },
+        limit: async (n: number) => { call.limit = n; return []; },
+      };
+      return chain;
+    },
     update: () => {
       const call: { set?: Record<string, unknown>; where?: unknown } = {};
       dbCalls.push(call);
@@ -63,18 +75,30 @@ function fakeTwilio(calls: Record<string, () => Promise<any>>) {
   return { client, update, fetched };
 }
 
-function fakeDeps(rows: { id: string; callSid: string | null; ageMinutes: number }[], twilio: ReturnType<typeof fakeTwilio> | null, opts: { closeReturns?: boolean } = {}) {
+type FakeRow = { id: string; callSid: string | null; ageMinutes: number; startedMinutesAgo?: number };
+
+/** Reads the way the production query does: by start time (else creation), oldest first, a page after the cursor. */
+function fakeDeps(rows: FakeRow[], twilio: ReturnType<typeof fakeTwilio> | null, opts: { closeReturns?: boolean } = {}) {
   const closed: { id: string; patch: any }[] = [];
   const cutoffs: Date[] = [];
+  const pages: string[][] = [];
+  const at = (minutes: number) => new Date(NOW.getTime() - minutes * 60000);
   return {
     closed,
     cutoffs,
+    pages,
     deps: {
-      async findStaleRows(cutoff: Date) {
+      async findStaleRows(cutoff: Date, limit: number, after: { createdAt: Date; id: string } | null) {
         cutoffs.push(cutoff);
-        return rows
-          .map((r) => ({ id: r.id, callSid: r.callSid, status: 'in_progress', createdAt: new Date(NOW.getTime() - r.ageMinutes * 60000) }))
-          .filter((r) => r.createdAt < cutoff);
+        const page = rows
+          .map((r) => ({ id: r.id, callSid: r.callSid, status: 'in_progress', createdAt: at(r.ageMinutes), startTime: at(r.startedMinutesAgo ?? r.ageMinutes) }))
+          .filter((r) => r.createdAt < cutoff && r.startTime < cutoff)
+          .sort((a, b) => a.createdAt.getTime() - b.createdAt.getTime() || a.id.localeCompare(b.id))
+          .filter((r) => !after || r.createdAt > after.createdAt || (r.createdAt.getTime() === after.createdAt.getTime() && r.id > after.id))
+          .slice(0, limit)
+          .map(({ startTime: _s, ...r }) => r);
+        pages.push(page.map((r) => r.id));
+        return page;
       },
       async closeRow(id: string, patch: any) { closed.push({ id, patch }); return opts.closeReturns ?? true; },
       async twilioClient() { return twilio ? twilio.client : null; },
@@ -105,7 +129,7 @@ function boot(sweep: Sweep) {
   return { press };
 }
 
-beforeEach(() => { dbCalls.length = 0; returningRows = [{ id: 'row-1' }]; vi.spyOn(console, 'info').mockImplementation(() => {}); vi.spyOn(console, 'error').mockImplementation(() => {}); vi.spyOn(console, 'warn').mockImplementation(() => {}); });
+beforeEach(() => { dbCalls.length = 0; dbSelects.length = 0; returningRows = [{ id: 'row-1' }]; vi.spyOn(console, 'info').mockImplementation(() => {}); vi.spyOn(console, 'error').mockImplementation(() => {}); vi.spyOn(console, 'warn').mockImplementation(() => {}); });
 
 describe('who may press it', () => {
   it('a non-admin gets 403 and nothing is swept', async () => {
@@ -147,6 +171,15 @@ describe('the age line', () => {
     expect(f.cutoffs[0].toISOString()).toBe(new Date(NOW.getTime() - 15 * 60000).toISOString());
     expect(s.examined).toBe(0);
     expect(t.fetched).toEqual([]);
+  });
+
+  it('the line is read off the call\'s start time, as the board reads it (Codex on #529)', async () => {
+    const t = fakeTwilio({ [SID(20)]: async () => ({ status: 'completed', duration: '30' }) });
+    // created 20 minutes ago, but the call began 10 minutes ago: not 15 minutes old yet
+    const f = fakeDeps([{ id: 'late-start', callSid: SID(20), ageMinutes: 20, startedMinutesAgo: 10 }], t);
+    const s = await sweepStaleCalls(MANUAL_CLEANUP_OPTIONS, f.deps);
+    expect(s.examined).toBe(0);
+    expect(f.closed).toEqual([]);
   });
 
   it('the board shades a row as stale at the same line the button uses', () => {
@@ -254,6 +287,55 @@ describe('a row Twilio cannot account for is left by the button', () => {
     await sweepStaleCalls({}, f.deps);
     expect(f.closed).toEqual([{ id: 'nf', patch: expect.objectContaining({ status: 'failed', duration: null, callDisposition: STALE_SWEEP_DISPOSITION }) }]);
     expect(t.update).not.toHaveBeenCalled();
+  });
+});
+
+describe('rows the sweep must leave cannot hide the rows behind them (Codex on #529)', () => {
+  it('a page of live calls is passed over and the ended call behind it is closed', async () => {
+    const t = fakeTwilio({
+      [SID(21)]: async () => ({ status: 'in-progress' }),
+      [SID(22)]: async () => ({ status: 'in-progress' }),
+      [SID(23)]: async () => ({ status: 'completed', duration: '90' }),
+    });
+    const f = fakeDeps([
+      { id: 'a-live', callSid: SID(21), ageMinutes: 50 },
+      { id: 'b-live', callSid: SID(22), ageMinutes: 45 },
+      { id: 'c-ended', callSid: SID(23), ageMinutes: 20 },
+    ], t);
+    const s = await sweepStaleCalls({ ...MANUAL_CLEANUP_OPTIONS, limit: 2 }, f.deps);
+    expect(f.pages).toEqual([['a-live', 'b-live'], ['c-ended']]);
+    expect(f.closed.map((c) => c.id)).toEqual(['c-ended']);
+    expect(s.examined).toBe(3);
+    expect(s.stillLiveAtTwilio).toBe(2);
+    expect(t.update).not.toHaveBeenCalled();
+  });
+
+  it('one run reads at most the page cap, and five pages by default', async () => {
+    const t = fakeTwilio({ [SID(24)]: async () => ({ status: 'completed' }), [SID(25)]: async () => ({ status: 'completed' }), [SID(26)]: async () => ({ status: 'completed' }) });
+    const f = fakeDeps([24, 25, 26].map((n) => ({ id: `r${n}`, callSid: SID(n), ageMinutes: 60 - n })), t);
+    await sweepStaleCalls({ ...MANUAL_CLEANUP_OPTIONS, limit: 1, maxPages: 2 }, f.deps);
+    expect(f.pages.length).toBe(2);
+    expect(f.closed.length).toBe(2);
+
+    const g = fakeDeps(Array.from({ length: 7 }, (_, i) => ({ id: `p${i}`, callSid: null, ageMinutes: 20 + i })), fakeTwilio({}));
+    await sweepStaleCalls({ ...MANUAL_CLEANUP_OPTIONS, limit: 1 }, g.deps);
+    expect(g.pages.length).toBe(5);
+  });
+
+  it('the production read is oldest first, after the cursor, on the start time, inside the open-row index', async () => {
+    const dialect = new PgDialect();
+    await productionSweepDeps.findStaleRows(NOW, 200, { createdAt: new Date('2026-11-26T17:00:00.000Z'), id: 'row-9' });
+    const q = dialect.sqlToQuery(dbSelects[0].where as any);
+    expect(q.sql).toContain('"call_logs"."status" in ($1, $2, $3)');
+    expect(q.sql).toContain('"call_logs"."created_at" < $4');
+    expect(q.sql).toContain('coalesce("call_logs"."start_time", "call_logs"."created_at") < $5');
+    expect(q.sql).toContain('("call_logs"."created_at" > $6 or ("call_logs"."created_at" = $7 and "call_logs"."id" > $8))');
+    const order = (dbSelects[0].orderBy ?? []).map((o) => dialect.sqlToQuery(o as any).sql);
+    expect(order).toEqual(['"call_logs"."created_at" asc', '"call_logs"."id" asc']);
+    expect(dbSelects[0].limit).toBe(200);
+
+    await productionSweepDeps.findStaleRows(NOW, 200, null);
+    expect(dialect.sqlToQuery(dbSelects[1].where as any).sql).not.toContain('"call_logs"."id" >');
   });
 });
 

@@ -17,7 +17,7 @@
  * of them. Nothing here can hang up a call: the Twilio client this file is
  * typed against has no write method.
  */
-import { inArray, lt, and, eq } from 'drizzle-orm';
+import { inArray, lt, gt, and, eq, or, asc, sql } from 'drizzle-orm';
 import { db } from '../db';
 import { callLogs } from '../../shared/schema';
 import {
@@ -33,6 +33,13 @@ import {
 
 const SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 const SWEEP_BATCH_LIMIT = 200;
+/**
+ * Pages per run. Rows are read oldest first, page after page, so rows the
+ * sweep must leave (live at Twilio, unverifiable on a manual run) cannot hide
+ * the rows behind them (Codex on #529). 5 pages bounds one run at 1,000 Twilio
+ * lookups; 0 rows were open on 2026-11-26 and 0 were reaped in the 90 days before.
+ */
+const SWEEP_MAX_PAGES = 5;
 
 /** The statuses a row can be stuck in. A close lands only while the row still reads one of them. */
 export const LIVE_CALL_STATUSES = ['in_progress', 'ringing', 'initiated'] as const;
@@ -53,9 +60,19 @@ export interface StaleDbRow {
 
 export type ClosePatch = Extract<SweepAction, { type: 'close' }>['patch'];
 
+/** Where the next page starts: after this row, in (created_at, id) order. */
+export interface StaleCursor {
+  createdAt: Date;
+  id: string;
+}
+
 export interface SweepDeps {
-  /** Rows in a live status created before `cutoff`. */
-  findStaleRows(cutoff: Date, limit: number): Promise<StaleDbRow[]>;
+  /**
+   * Rows in a live status whose call began before `cutoff` (its start time,
+   * or its creation time when it has none, as the Live Calls board reads it),
+   * oldest first by (created_at, id), after `after` when given.
+   */
+  findStaleRows(cutoff: Date, limit: number, after: StaleCursor | null): Promise<StaleDbRow[]>;
   /** Close one row; true only when the row was still in a live status. */
   closeRow(id: string, patch: ClosePatch): Promise<boolean>;
   /** null when Twilio credentials are not available. */
@@ -68,7 +85,10 @@ export interface SweepOptions {
   minAgeMs?: number;
   /** See DecideOptions. Default true (the automatic sweep). */
   closeUnverified?: boolean;
+  /** Rows per page. Default 200. */
   limit?: number;
+  /** Pages per run. Default 5. */
+  maxPages?: number;
 }
 
 export async function lookupTwilio(
@@ -98,7 +118,7 @@ export async function lookupTwilio(
 }
 
 export const productionSweepDeps: SweepDeps = {
-  async findStaleRows(cutoff, limit) {
+  async findStaleRows(cutoff, limit, after) {
     return db
       .select({
         id: callLogs.id,
@@ -110,9 +130,19 @@ export const productionSweepDeps: SweepDeps = {
       .where(
         and(
           inArray(callLogs.status, [...LIVE_CALL_STATUSES]),
+          // created_at keeps the partial index idx_call_logs_open_status_created
+          // in play; the start time is what the board reads (Codex on #529).
           lt(callLogs.createdAt, cutoff),
+          sql`coalesce(${callLogs.startTime}, ${callLogs.createdAt}) < ${cutoff}`,
+          after
+            ? or(
+                gt(callLogs.createdAt, after.createdAt),
+                and(eq(callLogs.createdAt, after.createdAt), gt(callLogs.id, after.id)),
+              )
+            : undefined,
         ),
       )
+      .orderBy(asc(callLogs.createdAt), asc(callLogs.id))
       .limit(limit);
   },
   async closeRow(id, patch) {
@@ -165,13 +195,35 @@ export async function sweepStaleCalls(
 
   const now = deps.now();
   const cutoff = new Date(now.getTime() - minAgeMs);
-  const staleRows = await deps.findStaleRows(cutoff, options.limit ?? SWEEP_BATCH_LIMIT);
+  const limit = options.limit ?? SWEEP_BATCH_LIMIT;
+  const maxPages = options.maxPages ?? SWEEP_MAX_PAGES;
 
-  summary.examined = staleRows.length;
-  if (staleRows.length === 0) return summary;
+  let twilioClient: TwilioCallReader | null | undefined;
+  let after: StaleCursor | null = null;
+  for (let page = 0; page < maxPages; page++) {
+    const staleRows = await deps.findStaleRows(cutoff, limit, after);
+    summary.examined += staleRows.length;
+    if (staleRows.length === 0) break;
+    if (twilioClient === undefined) twilioClient = await deps.twilioClient();
+    await sweepPage(staleRows, twilioClient, now, minAgeMs, closeUnverified, deps, summary);
+    const last = staleRows[staleRows.length - 1];
+    if (staleRows.length < limit || !last.createdAt) break;
+    after = { createdAt: last.createdAt, id: last.id };
+  }
 
-  const twilioClient = await deps.twilioClient();
+  if (summary.examined > 0) console.info(summarizeSweepLine(summary));
+  return summary;
+}
 
+async function sweepPage(
+  staleRows: StaleDbRow[],
+  twilioClient: TwilioCallReader | null,
+  now: Date,
+  minAgeMs: number,
+  closeUnverified: boolean,
+  deps: SweepDeps,
+  summary: SweepSummary,
+): Promise<void> {
   for (const row of staleRows) {
     const lookup = await lookupTwilio(twilioClient, row.callSid);
     const action = decideSweep(
@@ -212,9 +264,6 @@ export async function sweepStaleCalls(
       console.warn(`[StaleCallSweeper] lookup failed for ${row.id}: ${action.message} — will retry next sweep`);
     }
   }
-
-  console.info(summarizeSweepLine(summary));
-  return summary;
 }
 
 /** Boot + interval. Never throws — a sweep failure logs and waits for the next tick. */
