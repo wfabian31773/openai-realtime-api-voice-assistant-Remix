@@ -2272,7 +2272,10 @@ import { callEnvironment } from "./callRecord";
  * department 1 or 2 now stores `refusalFallback.routingExit`, and only the
  * worker's replay (never a send whose caller sees the answer) uses it, when
  * the refusal names that department's routing field: the same payload with
- * `routingAskExhausted: true` and a staff line, on the same key, once.
+ * `routingAskExhausted: true` and a staff line, on the same key, once. A row
+ * held before this build stored no exit, and takes it when it was written
+ * before this process started and is not a later addition
+ * (heldBeforeRoutingExit; review of #533).
  * Above main's v277 (#532, `5183de9`), which it contains along with v276
  * (#526). (v277 while #533 was open; renumbered when #532 took v277.)
  * No migration.
