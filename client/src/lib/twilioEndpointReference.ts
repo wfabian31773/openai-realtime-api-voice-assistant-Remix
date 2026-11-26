@@ -36,6 +36,12 @@ export const OPERATOR_INBOUND_PATH = '/api/voice/operator-line/inbound'
 
 export const OPERATOR_INBOUND_URL = `https://${PUBLISHED_HOST}${OPERATOR_INBOUND_PATH}`
 
+/** The operator line's Voice fallback URL and its messaging URL: the two other
+ * paths on that number that reach the voice runtime (server/index.ts lists
+ * these, the inbound path, and the runtime's own callback paths). */
+export const OPERATOR_FALLBACK_PATH = '/api/voice/operator-line/fallback'
+export const OPERATOR_SMS_PATH = '/api/voice/operator-line/sms'
+
 export const WHERE_TO_REPOINT =
   "This page does not change a number. Repoint a number in the Twilio console; moving a live line is Wayne's decision."
 

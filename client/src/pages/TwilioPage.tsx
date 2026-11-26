@@ -26,7 +26,9 @@ import { RefreshCw, Phone, Link2, Settings, Check, AlertCircle, Info } from 'luc
 import type { Agent } from '@/types'
 import { formatPhoneNumber } from '@/lib/phoneFormat'
 import {
+  OPERATOR_FALLBACK_PATH,
   OPERATOR_INBOUND_URL,
+  OPERATOR_SMS_PATH,
   RUNTIME_URL_SHAPE,
   WHERE_TO_REPOINT,
   isWorkspaceHost,
@@ -322,7 +324,9 @@ export function TwilioPage() {
               </div>
               <p className="text-xs text-muted-foreground mt-2">
                 The operator line's inbound Voice URL is exactly this path, with no trailing slash.
-                Any other inbound /api/voice/... Voice URL reaches the retired pipeline.
+                Its fallback URL, if set, is {OPERATOR_FALLBACK_PATH}, and its messaging URL is{' '}
+                {OPERATOR_SMS_PATH}. Only the operator line's own listed paths under /api/voice reach
+                the voice runtime; any other /api/voice/... URL reaches the retired pipeline.
               </p>
             </div>
           </div>
