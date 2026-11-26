@@ -233,15 +233,22 @@ export function mountAccuracyCheck(app: Express, deps: AccuracyMountDeps) {
     minRefreshMs: 60_000,
     timeoutMs: 20_000,
     concurrency: 3,
-    onReport: async (report) => {
-      const newly = await storeReport(deps.hub(), report);
-      const { pass, fail, unknown } = report.counts;
-      console.log(
-        `[ACCURACY] ${report.results.length} checks: ${pass} pass, ${fail} fail, ${unknown} unknown` +
-          (newly.length ? `; newly failing: ${newly.join(', ')}` : ''),
-      );
-    },
   });
+
+  /**
+   * Only the hourly run, under the lease, writes history. A page load or
+   * "Check now" runs the checks and shows them but stores nothing: the cache
+   * and the refresh throttle are per process, so requests reaching two
+   * replicas would otherwise both write the same run (Codex review of #525).
+   */
+  const persist = async (report: AccuracyReport) => {
+    const newly = await storeReport(deps.hub(), report);
+    const { pass, fail, unknown } = report.counts;
+    console.log(
+      `[ACCURACY] ${report.results.length} checks: ${pass} pass, ${fail} fail, ${unknown} unknown` +
+        (newly.length ? `; newly failing: ${newly.join(', ')}` : ''),
+    );
+  };
 
   app.get(ACCURACY_API, deps.authenticate, async (req, res) => {
     res.setHeader('Cache-Control', 'no-store');
@@ -264,7 +271,7 @@ export function mountAccuracyCheck(app: Express, deps: AccuracyMountDeps) {
       }
       const lock = deps.runLock ?? leaseRunLock();
       const tick = async () => {
-        await runUnderLock(lock, () => runner.report(true));
+        await runUnderLock(lock, async () => persist(await runner.report(true)));
       };
       console.log('[ACCURACY] hourly run on: every screen number read twice, results in accuracy_check_results');
       const first = setTimeout(() => void tick(), 2 * 60_000);

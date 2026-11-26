@@ -45,17 +45,27 @@ const NOT_A_NAME =
   "(?:this|that|there|thank|thanks|how|it|its|it's|i|i'm|im|we|my|welcome|and|again|everyone|all|yes|you|am|is|can|so|okay|ok|good|esta|este|habla|soy|gracias|buenos|buenas|como|cómo)";
 
 /**
- * A greeting that addresses the person: "Hello, Maria." / "Hi maria lopez,".
- * Any case: a transcriber or a model can write a name in lower case (Codex
- * review of #525), so one to three words between the greeting and the next
- * punctuation are masked unless the first is an ordinary word above.
+ * A greeting that addresses the person: "Hello, Maria." / "Hi maria lopez,"
+ * / "Hello, Maria how can I help you?". Any case, and everything from the
+ * first word to the next punctuation is masked unless that word is an
+ * ordinary one above (Codex review of #525). Masking "how can I help you"
+ * with the name costs nothing.
  */
 const ADDRESSES_A_PERSON = new RegExp(
   "\\b(hello|hi|hey|hola|good (?:morning|afternoon|evening)|buenos días|buenas tardes)(,?\\s+)(?!\\[name\\])" +
     `(?!${NOT_A_NAME}(?![\\p{L}'’]))` +
-    `(${TITLE}[\\p{L}'’-]+(?:\\s+[\\p{L}'’-]+){0,2})(?=\\s*[?.!,;]|\\s*$)`,
+    `${TITLE}\\p{L}[^?.!,;\\n]{0,80}`,
   'giu',
 );
+
+/**
+ * The structural guard: an opening is shown only when at least this many
+ * calls share it after masking. A greeting is said to many callers; a line
+ * that still carries a name the patterns above missed belongs to one caller,
+ * so it is held back whatever its wording. The patterns decide how much of
+ * the panel survives; this decides that no one caller's line is sent.
+ */
+export const MIN_OPENING_REPEATS = 3;
 
 /** The opening line with any person's name replaced by [name]. */
 export function maskOpening(text: string): string {
@@ -72,8 +82,9 @@ export interface OpeningRow {
 
 /**
  * Masks each opening, truncates it to `width` AFTER masking (so a name cut in
- * half by the truncation is still masked), and re-counts identical masked
- * openings. Returns at most `perAgent` openings per agent, most common first.
+ * half by the truncation is still masked), re-counts identical masked
+ * openings, and drops any that fewer than MIN_OPENING_REPEATS calls share.
+ * Returns at most `perAgent` openings per agent, most common first.
  */
 export function aggregateOpenings(
   rows: OpeningRow[],
@@ -92,6 +103,7 @@ export function aggregateOpenings(
   const out = new Map<string, Array<{ opening: string; n: number }>>();
   for (const [slug, byText] of counts) {
     const sorted = [...byText.entries()]
+      .filter(([, n]) => n >= MIN_OPENING_REPEATS)
       .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
       .slice(0, perAgent)
       .map(([opening, n]) => ({ opening, n }));

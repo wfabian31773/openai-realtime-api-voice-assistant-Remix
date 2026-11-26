@@ -4,7 +4,7 @@
  * NPX outreach first lines in 7 days named a patient).
  */
 import { describe, expect, it } from 'vitest';
-import { aggregateOpenings, maskOpening } from './openingMask';
+import { MIN_OPENING_REPEATS, aggregateOpenings, maskOpening } from './openingMask';
 
 describe('maskOpening', () => {
   it('masks the name the named greeting asks for, on every lane', () => {
@@ -40,6 +40,11 @@ describe('maskOpening', () => {
     }
   });
 
+  it('masks a name followed by no punctuation (Codex review of #525)', () => {
+    expect(maskOpening('Hello, Testa how can I help you today?')).toBe('Hello, [name]?');
+    expect(maskOpening('Hi testa lake this is Azul Vision.')).toBe('Hi [name].');
+  });
+
   it('leaves a greeting with no name in it alone', () => {
     for (const line of [
       'Hello, this is an automated assistant calling for Azul Vision. This call is recorded.',
@@ -72,8 +77,25 @@ describe('aggregateOpenings', () => {
   });
 
   it('truncates after masking, so no part of a name survives the cut', () => {
-    const map = aggregateOpenings([{ agent_slug: 'optical', opening: `${'x'.repeat(100)} Am I speaking with Testalake?`, n: 1 }], 125);
+    const map = aggregateOpenings([{ agent_slug: 'optical', opening: `${'x'.repeat(100)} Am I speaking with Testalake?`, n: 3 }], 125);
     expect(map.get('optical')?.[0].opening).not.toMatch(/Testa/);
+  });
+
+  it('never sends an opening only one or two calls share, whatever it says', () => {
+    // A line the patterns miss still belongs to one caller; the repeat floor holds it back.
+    const map = aggregateOpenings([
+      { agent_slug: 'npx-outreach', opening: 'Thank you for calling, Testa, we have news about your visit.', n: 1 },
+      { agent_slug: 'npx-outreach', opening: 'Thank you for calling, Lakey, we have news about your visit.', n: 2 },
+      { agent_slug: 'npx-outreach', opening: 'Hello, this is an automated assistant calling for Azul Vision.', n: MIN_OPENING_REPEATS },
+    ]);
+    expect(map.get('npx-outreach')).toEqual([{ opening: 'Hello, this is an automated assistant calling for Azul Vision.', n: MIN_OPENING_REPEATS }]);
+    expect(JSON.stringify([...map.values()])).not.toMatch(/Testa|Lakey/);
+  });
+
+  it('counts a greeting once it has been said to enough callers', () => {
+    const map = aggregateOpenings([{ agent_slug: 'tech', opening: 'Thank you for calling Azul Vision. How can I help you?', n: 2 },
+      { agent_slug: 'tech', opening: 'Thank you for calling Azul Vision. How can I help you?', n: 1 }]);
+    expect(map.get('tech')).toEqual([{ opening: 'Thank you for calling Azul Vision. How can I help you?', n: 3 }]);
   });
 
   it('keeps at most six openings per agent, most common first', () => {
