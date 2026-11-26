@@ -18,7 +18,6 @@ describe('classifyVoiceUrl', () => {
     [`${PUBLISHED}/voice/records`, 'records'],
     [`${PUBLISHED}/voice/no-ivr`, 'no-ivr'],
     [`${PUBLISHED}/voice/npx-outreach`, 'npx-outreach'],
-    [`${PUBLISHED}/voice/outbound/si-assistant`, 'si-assistant'],
     [`${WORKSPACE}/voice/tech`, 'tech'],
     [`${PUBLISHED}/Voice/Optical/`, 'optical'],
     [`${PUBLISHED}/voice/pcp?x=1`, 'pcp'],
@@ -37,7 +36,16 @@ describe('classifyVoiceUrl', () => {
     expect(classifyVoiceUrl(url).kind).toBe('retired');
   });
 
-  it.each([STUDIO, 'https://another-app.replit.app/api/incoming', `${PUBLISHED}/`, 'not a url'])(
+  it.each([
+    STUDIO,
+    'https://another-app.replit.app/api/incoming',
+    `${PUBLISHED}/`,
+    'not a url',
+    // Not a working runtime line: no route takes a new call there.
+    `${PUBLISHED}/voice/records/typo`,
+    `${PUBLISHED}/voice/outbound/si-assistant`,
+    `${PUBLISHED}/voice/health`,
+  ])(
     '%s answers calls somewhere else',
     (url) => {
       expect(classifyVoiceUrl(url).kind).toBe('other');
@@ -143,6 +151,10 @@ describe('webhookWriteRefusal: an explicit URL on a runtime number', () => {
 
   it('allows a runtime number to move to another runtime URL', () => {
     expect(webhookWriteRefusal('+1', { ok: true, url: `${PUBLISHED}/voice/surgery` }, `${PUBLISHED}/voice/records`)).toBeNull();
+  });
+
+  it('lets an admin repair a broken /voice/ URL that no route answers', () => {
+    expect(webhookWriteRefusal('+1', { ok: true, url: `${PUBLISHED}/voice/records/typo` }, STUDIO)).toBeNull();
   });
 
   it('does not stand in the way of a number that is not on the runtime', () => {

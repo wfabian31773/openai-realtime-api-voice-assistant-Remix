@@ -34,8 +34,8 @@
 
 /** What a Voice URL is answered by. */
 export type VoiceUrlKind =
-  /** The Grok voice runtime: `/voice/<slug>`, `/voice/outbound/<slug>`, or
-   * the operator line's inbound webhook. */
+  /** The Grok voice runtime: exactly `/voice/<slug>`, or the operator
+   * line's inbound webhook. */
   | 'runtime'
   /** The retired SIP core, behind the `/api/voice` proxy. */
   | 'retired'
@@ -66,6 +66,30 @@ function pathOf(url: string): string | null {
   }
 }
 
+/** Single-segment `/voice/<x>` paths the runtime mounts that are not a
+ * number's webhook: `GET /voice/health`, the outbound dialler's prefix, the
+ * media stream. */
+const NOT_A_LANE = new Set(['health', 'outbound', 'stream']);
+
+/**
+ * The lane a number's Voice URL reaches on the runtime, or null. Only
+ * `POST /voice/:slug` (one segment) and the operator line's inbound webhook
+ * take a new call; `/voice/<slug>/after`, the outbound dialler's callbacks
+ * and anything longer are continuations or 404s. Codex on #528: a loose
+ * match let a runtime number be moved to `/voice/records/incoming` (P1), and
+ * read a broken `/voice/records/typo` as a working line an admin could not
+ * repair (P2).
+ *
+ * The slug is not checked against the registered lanes: that list lives in
+ * the agent config, which this module must not import. A mistyped lane name
+ * reaches the runtime's own fail-closed line for an unknown lane.
+ */
+function runtimeLaneOf(path: string): string | null {
+  if (RUNTIME_PATHS_UNDER_API_VOICE.has(path)) return 'operator-line';
+  const lane = /^\/voice\/([a-z0-9][a-z0-9-]*)$/.exec(path);
+  return lane && !NOT_A_LANE.has(lane[1]) ? lane[1] : null;
+}
+
 /** Classify a Voice URL by its path. The host is deliberately not read: a
  * number pointed at the runtime on a workspace host is still a runtime line,
  * and moving it to the old core is still moving it to the retired pipeline. */
@@ -74,37 +98,15 @@ export function classifyVoiceUrl(url: string | null | undefined): VoiceUrlClass 
   if (!trimmed) return { kind: 'none' };
   const path = pathOf(trimmed);
   if (path === null) return { kind: 'other' };
-  if (RUNTIME_PATHS_UNDER_API_VOICE.has(path)) {
-    return { kind: 'runtime', lane: 'operator-line' };
-  }
-  const runtime = /^\/voice\/(?:outbound\/)?([^/]+)/.exec(path);
-  if (runtime) return { kind: 'runtime', lane: runtime[1] };
+  const lane = runtimeLaneOf(path);
+  if (lane) return { kind: 'runtime', lane };
   if (path === '/api/voice' || path.startsWith('/api/voice/')) return { kind: 'retired' };
   return { kind: 'other' };
 }
 
-/** Single-segment `/voice/<x>` paths the runtime mounts that are not a
- * number's webhook: `GET /voice/health`, the outbound dialler's prefix, the
- * media stream. */
-const NOT_A_LANE = new Set(['health', 'outbound', 'stream']);
-
-/**
- * Is this URL something a number's Voice URL can be pointed at on the
- * runtime? Only `POST /voice/:slug` (one segment) and the operator line's
- * inbound webhook take a new call. `/voice/<slug>/after`, the outbound
- * dialler's callbacks and anything longer are continuations or 404s
- * (Codex P1 on #528: `/voice/records/incoming` read as a runtime URL).
- *
- * The slug is not checked against the registered lanes: that list lives in
- * the agent config, which this module must not import. A mistyped lane name
- * reaches the runtime's own fail-closed line for an unknown lane.
- */
+/** Can a number's Voice URL be pointed at this, and reach a runtime lane? */
 export function isRuntimeNumberWebhook(url: string): boolean {
-  const path = pathOf(url.trim());
-  if (path === null) return false;
-  if (RUNTIME_PATHS_UNDER_API_VOICE.has(path)) return true;
-  const lane = /^\/voice\/([a-z0-9][a-z0-9-]*)$/.exec(path);
-  return lane !== null && !NOT_A_LANE.has(lane[1]);
+  return classifyVoiceUrl(url).kind === 'runtime';
 }
 
 /** Why nothing was changed. */
