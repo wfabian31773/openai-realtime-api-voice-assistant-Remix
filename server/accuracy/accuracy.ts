@@ -117,13 +117,16 @@ export const PURGE_SQL = `DELETE FROM accuracy_check_results WHERE ran_at < now(
 /**
  * For each check, when its current run of failures began: the earliest
  * failing run after its latest passing run. An unknown run neither breaks
- * nor starts a streak.
+ * nor starts a streak. Only runs at or before the shown report count ($2):
+ * another server may store a newer run while this one serves a cached
+ * report, and "failing since" must never be later than the time shown
+ * (Codex review of #525).
  */
 export const FAILING_SINCE_SQL = `
 WITH last_pass AS (
   SELECT check_id, max(ran_at) AS t
     FROM accuracy_check_results
-   WHERE status = 'pass' AND check_id = ANY($1::text[])
+   WHERE status = 'pass' AND check_id = ANY($1::text[]) AND ran_at <= $2::timestamptz
    GROUP BY check_id
 )
 SELECT r.check_id, min(r.ran_at) AS since
@@ -131,6 +134,7 @@ SELECT r.check_id, min(r.ran_at) AS since
   LEFT JOIN last_pass p ON p.check_id = r.check_id
  WHERE r.status = 'fail'
    AND r.check_id = ANY($1::text[])
+   AND r.ran_at <= $2::timestamptz
    AND (p.t IS NULL OR r.ran_at > p.t)
  GROUP BY r.check_id`;
 
@@ -211,7 +215,7 @@ export async function withHistory(q: Queryable, report: AccuracyReport): Promise
   if (failing.length) {
     try {
       await ensureTable(q);
-      const res = await q.query(FAILING_SINCE_SQL, [failing]);
+      const res = await q.query(FAILING_SINCE_SQL, [failing, report.ranAt]);
       since = new Map(
         res.rows.map((r) => [String(r.check_id), new Date(r.since as string | Date).toISOString()]),
       );
