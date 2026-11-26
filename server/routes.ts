@@ -24,6 +24,7 @@ import { opsHubAgentScorecards, todayOverview } from './observatory/queries';
 import { mountOperationsMonitor, readOperations } from './observatory/operations';
 import { urgentCondition, urgentFields, urgentWindow } from './urgentCalls';
 import { withRuntimeCounts } from './campaignCounts';
+import { isPhoneLineRefusal } from '../src/services/phoneLineGuard';
 
 // Hybrid authentication middleware - supports both Replit Auth and custom auth
 const isAuthenticated = (req: Request, res: Response, next: NextFunction) => {
@@ -704,12 +705,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
         { updateTwilio }
       );
       
-      res.json({ 
-        success: true, 
+      res.json({
+        success: true,
         message: updateTwilio ? 'Webhook updated in Twilio' : 'Webhook URL saved (not synced to Twilio)',
-        endpoint 
+        endpoint
       });
     } catch (error) {
+      if (isPhoneLineRefusal(error)) {
+        return res.status(error.status).json(error.body());
+      }
       console.error("Error updating phone endpoint webhook:", error);
       res.status(500).json({ 
         success: false,
@@ -719,34 +723,34 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Configure phone for agent (assign + update webhook)
+  // Configure phone for agent — REFUSED, see src/services/phoneLineGuard.ts.
+  // It wrote /api/voice/<slug>/incoming, which neither pipeline serves, so on
+  // a live line it could only break every call. It now reads the number's
+  // Voice URL from Twilio, changes nothing, and answers 409 saying what the
+  // number is pointed at. Repointing a number is Wayne's (standing
+  // instruction 11) and is done in the Twilio console.
   app.post('/api/phone-endpoints/:id/configure-for-agent', isAuthenticated, requireRole('admin'), async (req, res) => {
     try {
       const { twilioPhoneManagementService } = await import('../src/services/twilioPhoneManagementService');
       const { agentId, agentSlug } = req.body;
-      
+
       if (!agentId || !agentSlug) {
         return res.status(400).json({ success: false, message: 'agentId and agentSlug are required' });
       }
-      
-      const domain = process.env.DOMAIN;
-      if (!domain) {
-        return res.status(500).json({ success: false, message: 'DOMAIN environment variable not configured' });
-      }
-      
-      const endpoint = await twilioPhoneManagementService.configurePhoneForAgent(
+
+      await twilioPhoneManagementService.configurePhoneForAgent(
         req.params.id,
         agentId,
         agentSlug,
-        domain
+        process.env.DOMAIN,
       );
-      
-      res.json({ 
-        success: true, 
-        message: `Phone configured for agent "${agentSlug}"`,
-        endpoint 
-      });
     } catch (error) {
+      if (isPhoneLineRefusal(error)) {
+        return res.status(error.status).json(error.body());
+      }
+      if (error instanceof Error && error.message === 'Phone endpoint not found') {
+        return res.status(404).json({ success: false, changed: false, message: error.message });
+      }
       console.error("Error configuring phone for agent:", error);
       res.status(500).json({ 
         success: false,

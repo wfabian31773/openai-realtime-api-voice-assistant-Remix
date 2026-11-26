@@ -4,6 +4,11 @@ import { db } from '../../server/db';
 import { phoneEndpoints } from '../../shared/schema';
 import { eq } from 'drizzle-orm';
 import type { PhoneEndpoint, InsertPhoneEndpoint } from '../../shared/schema';
+import {
+  configureForAgentRefusal,
+  webhookWriteRefusal,
+  type LiveVoiceUrl,
+} from './phoneLineGuard';
 
 interface TwilioPhoneNumber {
   sid: string;
@@ -168,6 +173,21 @@ class TwilioPhoneManagementService {
     }
 
     if (options?.updateTwilio) {
+      // A number answered by the voice runtime may only be pointed at another
+      // runtime URL from here (src/services/phoneLineGuard.ts). The stored
+      // voiceWebhookUrl is not trusted for this: the Hub's copy was nine
+      // months stale on 2026-11-26, so the number is read from Twilio.
+      const refusal = webhookWriteRefusal(
+        endpoint.phoneNumber,
+        await this.readLiveVoiceUrl(endpoint.twilioSid),
+        webhookUrl,
+      );
+      if (refusal) {
+        console.warn(
+          `[TWILIO PHONE MGMT] ✗ REFUSED a webhook write on ${endpoint.phoneNumber}: ${refusal.reason}`,
+        );
+        throw refusal;
+      }
       // Never point a live number at a development host. Publishing recomputes
       // callback URLs, and a dev URL written onto a production number sends every
       // inbound call to a workspace that no longer answers — with the number looking
@@ -213,19 +233,49 @@ class TwilioPhoneManagementService {
     return `${baseUrl}/incoming`;
   }
 
+  /** The number's Voice URL as Twilio has it now. A failed read is
+   * reported, never guessed, so a caller can refuse rather than assume. */
+  async readLiveVoiceUrl(twilioSid: string): Promise<LiveVoiceUrl> {
+    try {
+      const client = await getTwilioClient();
+      const number = await client.incomingPhoneNumbers(twilioSid).fetch();
+      return { ok: true, url: number.voiceUrl || null };
+    } catch (error) {
+      console.error(
+        '[TWILIO PHONE MGMT] Could not read a number\'s Voice URL from Twilio:',
+        error instanceof Error ? error.message : error,
+      );
+      return { ok: false };
+    }
+  }
+
+  /**
+   * "Configure for agent" on the Twilio page. It used to write
+   * buildWebhookUrl()'s `/api/voice/<slug>/incoming` onto the number, a path
+   * neither pipeline serves, so on any live line it could only break every
+   * call. It now changes nothing, in Twilio or in our table, and always
+   * throws a PhoneLineRefusal saying what the number is pointed at now (read
+   * from Twilio). See src/services/phoneLineGuard.ts.
+   */
   async configurePhoneForAgent(
     endpointId: string,
-    agentId: string,
+    _agentId: string,
     agentSlug: string,
-    domain: string
-  ): Promise<PhoneEndpoint> {
-    const webhookUrl = this.buildWebhookUrl(domain, agentSlug);
-    
-    await this.assignAgentToPhoneEndpoint(endpointId, agentId);
-    
-    return this.updatePhoneEndpointWebhook(endpointId, webhookUrl, {
-      updateTwilio: true,
-    });
+    domain: string | undefined,
+  ): Promise<never> {
+    const endpoint = await this.getPhoneEndpoint(endpointId);
+    if (!endpoint) {
+      throw new Error('Phone endpoint not found');
+    }
+    const refusal = configureForAgentRefusal(
+      endpoint.phoneNumber,
+      await this.readLiveVoiceUrl(endpoint.twilioSid),
+      domain ? this.buildWebhookUrl(domain, agentSlug) : null,
+    );
+    console.warn(
+      `[TWILIO PHONE MGMT] ✗ REFUSED configure-for-agent on ${endpoint.phoneNumber}: ${refusal.reason} — nothing changed`,
+    );
+    throw refusal;
   }
 }
 
