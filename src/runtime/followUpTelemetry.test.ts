@@ -111,9 +111,10 @@ describe("the follow-up summary", () => {
       mediaGapHangup: false,
       // v183: a boolean, gained deliberately.
       filedSilenceHangup: false,
-      // v275: two counts, gained deliberately.
+      // v275: three counts, gained deliberately.
       skippedAfterGoodbye: 0,
       providerMarkupCuts: 0,
+      providerMarkupAfterAudio: 0,
       outcome: "dead_air",
     });
   });

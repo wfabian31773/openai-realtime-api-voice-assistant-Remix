@@ -61,6 +61,7 @@ export function followUpEvent(
     | "mediaGapHangup"
     | "filedSilenceHangup"
     | "providerMarkupCuts"
+    | "providerMarkupAfterAudio"
   >,
 ): FollowUpEvent | null {
   const f = record.followUps;
@@ -131,6 +132,8 @@ export function followUpEvent(
       // utterances cut where provider markup began.
       skippedAfterGoodbye: f?.skippedAfterGoodbye ?? 0,
       providerMarkupCuts: record.providerMarkupCuts ?? 0,
+      // ...and of those, markup found only after its audio had been sent.
+      providerMarkupAfterAudio: record.providerMarkupAfterAudio ?? 0,
       outcome: record.outcome,
     },
   };

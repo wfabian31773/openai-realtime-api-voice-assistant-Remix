@@ -609,6 +609,50 @@ describe("FIX 2: provider markup is not played or recorded", () => {
     await h.end();
     expect(h.agentLines().slice(-1)[0]).toBe(`AGENT: ${GOODBYE}`);
     expect(h.records[0].providerMarkupCuts).toBe(1);
+    // Its audio had already been sent: counted as markup found after audio.
+    expect(h.records[0].providerMarkupAfterAudio).toBe(1);
+    expect(followUpEvent(h.records[0])?.data).toMatchObject({ providerMarkupCuts: 1, providerMarkupAfterAudio: 1 });
+  });
+
+  it("REVIEW SHAPE: a markup-only completed line whose audio played leaves a count and a true log line", async () => {
+    // github-actions on 60474108: the stream carried no tag, the audio went
+    // out, and the completed transcript was only markup. Nothing is stored as
+    // the line, so the count and the log are the trace, and the log must not
+    // say the audio was not played.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const h = harness();
+    h.caller("Okay.");
+    await h.respond({ deltas: ["Mm."], done: "<silence />" });
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" } as never);
+    await h.flush();
+    expect(h.agentLines()).toEqual([]);
+    expect(h.records[0].providerMarkupCuts).toBe(1);
+    expect(h.records[0].providerMarkupAfterAudio).toBe(1);
+    const said = warn.mock.calls.map((c) => String(c[0])).filter((m) => m.includes("provider markup"));
+    expect(said).toHaveLength(1);
+    expect(said[0]).toContain("its audio was already sent");
+    expect(said[0]).not.toContain("not played");
+    warn.mockRestore();
+  });
+
+  it("markup only in the completed transcript, with no audio sent, is not counted as found after audio", async () => {
+    const h = harness();
+    h.caller("Okay.");
+    await h.respond({ deltas: ["Mm."], done: "<silence />", noAudio: true });
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" } as never);
+    await h.flush();
+    expect(h.records[0].providerMarkupCuts).toBe(1);
+    expect(h.records[0].providerMarkupAfterAudio).toBe(0);
+  });
+
+  it("markup caught on the stream is never counted as found after audio", async () => {
+    const h = harness();
+    await h.say("Is there anything else I can help you with?");
+    h.caller("No, thank you.");
+    await h.respond({ deltas: [`${GOODBYE} `, "<turn_end>"], done: `${GOODBYE} <turn_end>` });
+    await h.end();
+    expect(h.records[0].providerMarkupCuts).toBe(1);
+    expect(h.records[0].providerMarkupAfterAudio).toBe(0);
   });
 
   it("audio that arrives before the tag's transcript is sent; audio after it is not", async () => {

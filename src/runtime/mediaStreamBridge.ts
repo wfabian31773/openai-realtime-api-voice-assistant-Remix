@@ -747,6 +747,10 @@ export interface VoiceCallRecord {
   /** v275: agent utterances cut where provider markup began (`<…>` in the
    * agent's transcript): the rest is not played and not recorded. */
   providerMarkupCuts?: number;
+  /** v275: of those, the utterances whose markup showed up only in the wire's
+   * completed transcript, after their audio had already been sent: the
+   * caller may have heard what the stored line leaves out (review of #524). */
+  providerMarkupAfterAudio?: number;
   teardownReason?: "goodbye_grace" | "media_gap";
 }
 
@@ -2225,7 +2229,10 @@ export class VoiceCallBridge {
     // were never played (review of #524).
     const mutedOnStream = done.muted;
     const wire = transcript ?? done.text;
-    if (providerMarkupIndex(wire) >= 0) this.muteForMarkup(done);
+    // Markup that only the completed transcript carries came after this
+    // utterance's audio was sent: nothing can be recalled, so the count and
+    // the log say so instead of claiming it was not played.
+    if (providerMarkupIndex(wire) >= 0) this.muteForMarkup(done, done.bytes > 0);
     const text = (mutedOnStream ? done.text : withoutProviderMarkup(wire)).trim();
     const markName = `utt-${done.seq}`;
     // v275: what this response said, for a goodbye a tool answer follows
@@ -2659,6 +2666,8 @@ export class VoiceCallBridge {
   private responseSpeech: { epoch: number; text: string; mark: string } | null = null;
   /** v275: see VoiceCallRecord.providerMarkupCuts. */
   private providerMarkupCuts = 0;
+  /** v275: see VoiceCallRecord.providerMarkupAfterAudio. */
+  private providerMarkupAfterAudio = 0;
   /** v165 — logging only: what became of the latest follow-up request. */
   /** Follow-up requests not yet answered by a created response, FIFO (the
    * session queues them the same way), as request timestamps. */
@@ -2914,11 +2923,22 @@ export class VoiceCallBridge {
   }
 
   /** v275: stop an utterance at the provider's markup — see
-   * handleAgentTranscriptDelta. One count and one line per utterance. */
-  private muteForMarkup(utterance: { muted: boolean }): void {
+   * handleAgentTranscriptDelta. One count and one line per utterance.
+   * `afterAudio`: the markup was found only once the utterance's audio had
+   * already gone to Twilio (the wire's completed transcript), so it is kept
+   * out of the stored line but may have been heard. */
+  private muteForMarkup(utterance: { muted: boolean }, afterAudio = false): void {
     if (utterance.muted) return;
     utterance.muted = true;
     this.providerMarkupCuts += 1;
+    if (afterAudio) {
+      this.providerMarkupAfterAudio += 1;
+      console.warn(
+        `[bridge] provider markup in the agent's completed line on ${this.deps.context.callSid} — ` +
+          `its audio was already sent; the line is recorded without it`,
+      );
+      return;
+    }
     console.warn(
       `[bridge] provider markup in the agent's line on ${this.deps.context.callSid} — ` +
         `the rest of the utterance is not played or recorded`,
@@ -3689,6 +3709,7 @@ export class VoiceCallBridge {
         mediaGapHangup: this.mediaGapHangup,
         filedSilenceHangup: this.filedSilenceHangup,
         providerMarkupCuts: this.providerMarkupCuts,
+        providerMarkupAfterAudio: this.providerMarkupAfterAudio,
         ...(reason ? { teardownReason: reason } : {}),
         followUps: {
           ...this.followUps,
