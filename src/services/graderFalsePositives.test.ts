@@ -660,14 +660,14 @@ describe('an emergency put into the queue is not a handled emergency', () => {
   it('passes when a person accepted the transfer', () => {
     const r = check(run({ transcript: emergency, agentSlug: 'no-ivr', ticketNumber: null, transferredToHuman: true, runtimeOutcome: 'transferred' } as never), 'emergency_handling');
     expect(r.pass).toBe(true);
-    expect(r.score).toBe(1);
+    expect(r.reason).toMatch(/correctly transferred to human/);
   });
 
   it('still credits a queue transfer that also directed the caller to 911', () => {
     const directed = emergency + '\nAGENT: If this is an emergency please hang up and call nine one one.';
     const r = check(run({ transcript: directed, agentSlug: 'pcp', ticketNumber: null, transferredToHuman: false, runtimeOutcome: 'transferred' } as never), 'emergency_handling');
     expect(r.pass).toBe(true);
-    expect(r.score).toBe(0.8);
+    expect(r.reason).toMatch(/directed to 911\/ER\/on-call but did not transfer/);
   });
 });
 
