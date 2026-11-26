@@ -71,6 +71,14 @@ export function ScheduleTab() {
   })
   const [overlap, setOverlap] = React.useState<string | null>(null)
   const [cancel, setCancel] = React.useState<OverrideView | null>(null)
+  // Every hook stays above the early returns below. These three sat after them,
+  // so the first render (still loading) called 16 hooks and the next one 19:
+  // React threw "Rendered more hooks than during the previous render" and the
+  // whole app showed the error screen when the Schedule tab was opened.
+  const [coverSaving, setCoverSaving] = React.useState(false)
+  const [extendSaving, setExtendSaving] = React.useState(false)
+  const coverRef = React.useRef(cover)
+  coverRef.current = cover
 
   if (q.isLoading) return <p className="text-muted-foreground">Loading…</p>
   if (q.error) return <Banner tone="error">{apiError(q.error)}</Banner>
@@ -88,11 +96,6 @@ export function ScheduleTab() {
     }
     if (acceptExtendPreview(extendWeeksRef.current, preview)) setExtendPreview(preview)
   }
-
-  const [coverSaving, setCoverSaving] = React.useState(false)
-  const [extendSaving, setExtendSaving] = React.useState(false)
-  const coverRef = React.useRef(cover)
-  coverRef.current = cover
 
   const changeCover = (patch: Partial<CoverDraft>) => {
     const { cover: next, clearWarning } = editCover(cover, patch)

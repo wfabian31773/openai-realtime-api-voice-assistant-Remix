@@ -3,6 +3,8 @@ import { useEffect, useState } from 'react'
 import apiClient from '@/lib/apiClient'
 import { describePipeline } from '@/lib/pipelineSplit'
 import { briefCorrectionNotice, briefNeighbours } from '@/lib/briefDayPicker'
+import { LIVE_WINDOW_MINUTES, liveCalls } from '@/lib/liveCalls'
+import { AccuracyTab } from '@/components/observatory/AccuracyTab'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Button } from '@/components/ui/button'
 import {
@@ -46,7 +48,8 @@ interface OpsHubScorecard {
   avgQualityScore: number | null
   longCalls: number
   avgInterruptions: number | null
-  telephonyErrors: number
+  /** Dropped by the voice provider, or never connected. */
+  droppedCalls: number
   outcomes: Record<string, number>
   avgDurationSec: number | null
 }
@@ -95,7 +98,6 @@ interface AgentOpenings {
   callsSampled: number
   greetingAdherence: number | null
   topOpenings: Array<{ opening: string; n: number }>
-  sampleOpeningSequences: Array<{ callLogId: string; turns: string[] }>
 }
 interface OpeningsResponse {
   windowDays: number
@@ -252,15 +254,6 @@ interface LiveOpsCall {
   transcript: string | null
 }
 
-interface CarrierActiveCall {
-  conferenceSid: string
-  conferenceName: string
-  callSid: string | null
-  status: string
-  dateCreated: string
-  participantCount: number
-}
-
 interface GraderCheckStat {
   grader: string
   total: number
@@ -372,9 +365,9 @@ function opsHubDiagnosis(s: OpsHubScorecard): { tone: Tone; notes: string[] } {
     bump('amber')
     notes.push(`Average quality ${s.avgQualityScore.toFixed(2)}/5 — below the 3.0 line.`)
   }
-  if (s.telephonyErrors > 0 && s.telephonyErrors / s.calls > 0.05) {
+  if (s.calls > 0 && s.droppedCalls / s.calls > 0.05) {
     bump('amber')
-    notes.push(`${s.telephonyErrors} calls with Twilio error codes (${pct(s.telephonyErrors / s.calls)}).`)
+    notes.push(`${s.droppedCalls} calls dropped by the voice provider or never connected (${pct(s.droppedCalls / s.calls)}).`)
   }
   if (s.longCalls > 0 && s.longCalls / s.calls > 0.1) {
     bump('amber')
@@ -467,13 +460,14 @@ function StatusDot({ tone }: { tone: Tone }) {
 // 2026-08-07). Overview answers "is anything red"; every red opens into
 // the tab that explains WHY.
 
-type ObsTab = 'overview' | 'brief' | 'replays' | 'health' | 'guards' | 'director' | 'telemetry' | 'openings' | 'funnel' | 'syncs' | 'changes'
+type ObsTab = 'overview' | 'brief' | 'replays' | 'health' | 'accuracy' | 'guards' | 'director' | 'telemetry' | 'openings' | 'funnel' | 'syncs' | 'changes'
 
 const TABS: Array<{ key: ObsTab; label: string }> = [
   { key: 'overview', label: 'Overview' },
   { key: 'brief', label: 'Daily Brief' },
   { key: 'replays', label: 'New Core Replays' },
   { key: 'health', label: 'Health' },
+  { key: 'accuracy', label: 'Accuracy' },
   { key: 'guards', label: 'Guards & Failures' },
   { key: 'director', label: 'Director' },
   { key: 'telemetry', label: 'Telemetry & Tools' },
@@ -646,6 +640,7 @@ export default function ObservatoryPage() {
       {tab === 'telemetry' && <TelemetryTab days={windowDays} />}
       {tab === 'openings' && <OpeningsTab />}
       {tab === 'funnel' && <FunnelTab />}
+      {tab === 'accuracy' && <AccuracyTab />}
       {tab === 'syncs' && <SyncsTab />}
       {tab === 'changes' && <ChangesTab />}
     </div>
@@ -693,8 +688,10 @@ function HealthTab({
                   <span>{s.avgQualityScore != null ? `${s.avgQualityScore.toFixed(2)}/5` : '—'}</span>
                   <span className="text-muted-foreground">45+ turn calls</span>
                   <span>{s.longCalls}</span>
-                  <span className="text-muted-foreground">Telephony errors</span>
-                  <span>{s.telephonyErrors}</span>
+                  <span className="text-muted-foreground" title="Dropped by the voice provider, or never connected">
+                    Dropped calls
+                  </span>
+                  <span>{s.droppedCalls}</span>
                 </div>
                 {Object.keys(s.outcomes).length > 0 && (
                   <p className="text-xs text-muted-foreground">
@@ -755,7 +752,7 @@ function HealthTab({
                       <span className="text-muted-foreground">Avg latency</span>
                       <span>{s.avgResponseLatencyMs != null ? `${s.avgResponseLatencyMs}ms` : '—'}</span>
                       <span className="text-muted-foreground">Review score</span>
-                      <span>{s.reviewsAvgScore != null ? `${s.reviewsAvgScore}/5` : '—'}</span>
+                      <span>{s.reviewsAvgScore != null ? `${s.reviewsAvgScore}/10` : '—'}</span>
                     </div>
                   )}
                   {!s.error && Object.keys(s.directorHandoffReasons).length > 0 && (
@@ -1230,9 +1227,11 @@ function OpeningsTab() {
                     {a.agentName}
                   </span>
                   <span className="text-sm font-normal">
-                    {a.callsSampled
-                      ? `${pct(a.greetingAdherence)} adherent · ${a.callsSampled} calls`
-                      : 'no calls sampled'}
+                    {!a.callsSampled
+                      ? 'no calls sampled'
+                      : a.greetingAdherence === null
+                        ? `no configured greeting to compare · ${a.callsSampled} calls`
+                        : `${pct(a.greetingAdherence)} adherent · ${a.callsSampled} calls`}
                   </span>
                 </CardTitle>
               </CardHeader>
@@ -1664,23 +1663,17 @@ function CommandCenterTab({
 }) {
   const live = useQuery<{ data: LiveOpsCall[] }>({
     queryKey: ['obs-live-ops'],
-    // startDate ceiling: a row still "live" after 30 min is stale bookkeeping,
-    // not a call — p99.9 call duration is ~26 min and the coordinator
-    // force-terminates at 25. Keeps zombie rows (e.g. the 52-hour ones from
-    // the 2026-08-24 DB restart) off the board even before the sweeper runs.
+    // Rows still open and started inside the live window (liveCalls.ts). Runtime
+    // calls stream through Media Streams and have no Twilio conference, so the
+    // old carrier-conference check hid every one of them.
     queryFn: async () =>
       (
         await apiClient.get(
           `/call-logs?status=in_progress,ringing,initiated&limit=50&startDate=${new Date(
-            Date.now() - 30 * 60 * 1000,
+            Date.now() - LIVE_WINDOW_MINUTES * 60 * 1000,
           ).toISOString()}`,
         )
       ).data,
-    refetchInterval: 3000,
-  })
-  const carrierLive = useQuery<{ success: boolean; calls: CarrierActiveCall[] }>({
-    queryKey: ['obs-carrier-live'],
-    queryFn: async () => (await apiClient.get('/monitoring/active-calls')).data,
     refetchInterval: 3000,
   })
   const today = useQuery<TodayOverview>({
@@ -1704,21 +1697,7 @@ function CommandCenterTab({
     },
   })
 
-  // "Live" must be confirmed by the carrier. A database row can miss its
-  // completion callback and remain in_progress indefinitely; that produced
-  // false 90-minute calls in Observatory on 2026-08-24.
-  const carrierLiveSids = new Set(
-    (carrierLive.data?.calls ?? [])
-      .filter((call) => call.participantCount > 0 && call.callSid)
-      .map((call) => call.callSid),
-  )
-  const activeOps = carrierLive.data
-    ? (live.data?.data ?? []).filter(
-        (c) =>
-          ['in_progress', 'ringing', 'initiated'].includes(c.status) &&
-          Boolean(c.callSid && carrierLiveSids.has(c.callSid)),
-      )
-    : []
+  const activeOps = liveCalls(live.data?.data ?? [])
   const sage = today.data?.sage
   const sageOk = sage && !sage.error
   const totalLive = activeOps.length + (sageOk ? sage.activeNow : 0)
@@ -1731,12 +1710,9 @@ function CommandCenterTab({
           <span className={`h-3 w-3 rounded-full ${totalLive ? 'animate-pulse bg-red-500' : 'bg-gray-400'}`} />
           Live now — {totalLive} call{totalLive === 1 ? '' : 's'}
         </h2>
-        {(live.isError || carrierLive.isError) && (
+        {live.isError && (
           <p className="text-sm text-red-600">
-            Live feed failed:{' '}
-            {(carrierLive.error as any)?.response?.data?.error ??
-              (live.error as any)?.response?.data?.error ??
-              String(carrierLive.error ?? live.error)}
+            Live feed failed: {(live.error as any)?.response?.data?.error ?? String(live.error)}
           </p>
         )}
         <div className="space-y-2">
@@ -1771,7 +1747,7 @@ function CommandCenterTab({
                 </div>
               </div>
             ))}
-          {!totalLive && !live.isLoading && !carrierLive.isLoading && (
+          {!totalLive && !live.isLoading && !live.isError && (
             <p className="rounded-lg border border-dashed p-4 text-sm text-muted-foreground">
               No calls in progress. This section lights up the moment any line rings — every agent, with live
               transcript and a listen-in button.

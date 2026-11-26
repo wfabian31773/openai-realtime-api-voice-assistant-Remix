@@ -52,6 +52,13 @@ export interface DeterministicGraderInput {
   callLogId: string;
   transcript: string;
   transferredToHuman: boolean;
+  /**
+   * How the runtime says the call ended (call_logs.runtime_outcome). Read by
+   * handedOver(): a PCP blind transfer into the call-centre queue ends
+   * `transferred` while transferredToHuman stays false by design (v20: nothing
+   * proves a person answered).
+   */
+  runtimeOutcome?: string | null;
   ticketNumber: string | null;
   agentSlug: string | null;
   toolTimeline?: unknown;
@@ -66,6 +73,24 @@ export interface DeterministicGraderInput {
   transcriptWindowSeconds: number | null;
   durationMismatchRatio: number | null;
   durationMismatchFlag: boolean | null;
+}
+
+/**
+ * WAS THE CALL HANDED OVER? 2026-11-26.
+ *
+ * Every check that asks this read `transferredToHuman`, which v20 keeps false
+ * on a PCP blind transfer into the call-centre queue (it claims a person
+ * answered, and nothing proves one did). So a caller who asked for a person
+ * and was put into the queue was graded "the call ended with NO transfer and
+ * NO ticket": 27 of the 43 PCP human_request_deflection criticals in the 7
+ * days to 2026-11-26 had runtime_outcome 'transferred' and a COMPLETED
+ * transfer. Since v87 an accepted queue choice files no ticket, so the ticket
+ * checks failed them too. The runtime's own outcome says the caller was
+ * handed over, warm or blind; a ring-out that leaves the caller on the line
+ * does not end 'transferred'.
+ */
+export function handedOver(input: Pick<DeterministicGraderInput, 'transferredToHuman' | 'runtimeOutcome'>): boolean {
+  return Boolean(input.transferredToHuman) || input.runtimeOutcome === 'transferred';
 }
 
 const HANDOFF_KEYWORDS = [
@@ -118,7 +143,7 @@ function gradeHandoffExpectedVsActual(input: DeterministicGraderInput): GraderRe
   const scanText = callerText || input.transcript.toLowerCase();
 
   const handoffRequested = HANDOFF_KEYWORDS.some(kw => scanText.includes(kw));
-  const handoffOccurred = input.transferredToHuman;
+  const handoffOccurred = handedOver(input);
 
   if (handoffRequested && !canTransfer(input.agentSlug)) {
     if (input.ticketNumber || handoffOccurred) {
@@ -612,16 +637,16 @@ function gradeHumanRequestDeflection(input: DeterministicGraderInput): GraderRes
     };
   }
 
-  const resolved = input.transferredToHuman || Boolean(input.ticketNumber);
+  const resolved = handedOver(input) || Boolean(input.ticketNumber);
   return {
     grader: 'human_request_deflection',
     pass: resolved,
     score: resolved ? 0.8 : 0.0,
     ...(resolved ? {} : { severity: 'critical' as const }),
     reason: resolved
-      ? `Caller asked for a human ${requests}×; call produced ${input.transferredToHuman ? 'a transfer' : 'a ticket'}`
+      ? `Caller asked for a human ${requests}×; call produced ${handedOver(input) ? 'a transfer' : 'a ticket'}`
       : `Caller asked for a human ${requests}× and the call ended with NO transfer and NO ticket — the deflection loop`,
-    metadata: { humanRequests: requests, threshold, transferred: input.transferredToHuman, ticket: input.ticketNumber },
+    metadata: { humanRequests: requests, threshold, transferred: handedOver(input), ticket: input.ticketNumber },
   };
 }
 
@@ -681,7 +706,7 @@ function gradeTicketRequiredVsCreated(input: DeterministicGraderInput): GraderRe
     };
   }
 
-  if (input.transferredToHuman) {
+  if (handedOver(input)) {
     return {
       grader: 'ticket_required_vs_created',
       pass: true,
@@ -1082,6 +1107,10 @@ function gradeEmergencyHandling(input: DeterministicGraderInput): GraderResult {
     };
   }
 
+  // A confirmed person only. handedOver() also counts a blind transfer into the
+  // PCP call-centre queue, where nothing proves anyone answered; an emergency
+  // put there with no 911 / ER / on-call direction is not handled (Codex
+  // review of #525). transferredToHuman is set only when a person accepted.
   if (input.transferredToHuman) {
     return {
       grader: 'emergency_handling',
@@ -1227,7 +1256,7 @@ function gradeProviderMustEscalate(input: DeterministicGraderInput): GraderResul
     };
   }
 
-  if (input.transferredToHuman) {
+  if (handedOver(input)) {
     return {
       grader: 'provider_must_escalate',
       pass: true,
@@ -1255,7 +1284,7 @@ function gradeActionableRequestNeedsTicket(input: DeterministicGraderInput): Gra
   const lines = input.transcript.split('\n');
   const callerLines = lines.filter(l => /^(caller|patient|user):/i.test(l.trim())).join(' ').toLowerCase();
 
-  if (input.transferredToHuman) {
+  if (handedOver(input)) {
     return {
       grader: 'actionable_request_needs_ticket',
       pass: true,
@@ -1451,6 +1480,37 @@ function gradeCallbackFieldsCompleteness(input: DeterministicGraderInput): Grade
       pass: true,
       score: 0.7,
       reason: `Most callback fields collected (${collectedFields.join(', ')}), missing: ${missingFields.join(', ')}`,
+      metadata: { collectedFields, missingFields, completeness },
+    };
+  }
+
+  /**
+   * TWO FIELDS SHORT IN THE TRANSCRIPT IS A WARNING, NOT A CRITICAL.
+   * 2026-11-26.
+   *
+   * This check only runs when a ticket was filed, and it reads the TRANSCRIPT
+   * for fields the TICKET carries. Measured over the 7 days to 2026-11-26: it
+   * graded 180 calls critical, 58% of the fleet's 312 critical calls and the
+   * largest share of the Observatory's red "critical fails" rate; every one of
+   * the 180 had a ticket, and in the Support Center 177 of the 179 found
+   * carried a callback phone and all 179 a description (172 a name). The
+   * stated harm, "patient may not receive callback", was false on all but 2.
+   * The cause is the source, not the agents: the runtime fills caller ID onto
+   * the ticket and the name from the record, so the transcript need not say
+   * them (2026-09-09 made the same finding one branch up).
+   *
+   * Two of three missing stays a failure, at warning severity, so it is still
+   * counted and still listed. All three missing (the transcript shows no name,
+   * no number and no reason) stays CRITICAL: graderFalsePositives.test.ts
+   * keeps that over-correction guard.
+   */
+  if (missingFields.length < CALLBACK_REQUIRED_FIELDS.length) {
+    return {
+      grader: 'callback_fields_completeness',
+      pass: false,
+      score: completeness,
+      severity: 'warning',
+      reason: `Ticket filed; the transcript does not show: ${missingFields.join(', ')}. Check the ticket: it usually carries caller ID and the record's name.`,
       metadata: { collectedFields, missingFields, completeness },
     };
   }
@@ -1892,7 +1952,14 @@ Respond with a JSON object only, no other text:
   // transcript, which also repairs the rows graded against a partial one
   // (9 of 9 "missing reason" verdicts on 09-09 contradict the transcript now
   // stored).
-  static readonly CURRENT_GRADER_VERSION = 11;
+  // v12 (2026-11-26): callback_fields_completeness two fields short in the
+  // transcript is a warning (180 of 312 critical calls in 7 days; 177 of 179
+  // of their tickets carried a phone). And a call the runtime handed over
+  // (runtime_outcome 'transferred', e.g. a PCP blind transfer to the queue)
+  // counts as handed over: 27 of 43 PCP human_request_deflection criticals in
+  // 7 days were transferred calls. The sweep re-scores newest first, so the
+  // last week reads right within about a day.
+  static readonly CURRENT_GRADER_VERSION = 12;
 
   /** Re-run the deterministic graders on calls graded under an older
    *  grader version. Deterministic-only — the LLM analysis is not re-run,
@@ -1937,6 +2004,7 @@ Respond with a JSON object only, no other text:
         callLogId,
         transcript: callLog.transcript || '',
         transferredToHuman: callLog.transferredToHuman || false,
+        runtimeOutcome: callLog.runtimeOutcome ?? null,
         ticketNumber: callLog.ticketNumber || null,
         agentSlug: callLog.agentUsed || null,
         toolTimeline: callLog.toolTimeline,

@@ -308,6 +308,27 @@ describe('callback_fields_completeness — the 2026-09-09 audit', () => {
     expect(r.pass).toBe(true);
   });
 
+  /**
+   * 2026-11-26: two fields short in the transcript is a warning. Measured over
+   * 7 days, 180 calls graded critical this way and 177 of the 179 tickets found
+   * carried a callback phone (all 179 a description): the transcript is the
+   * wrong place to look for what the ticket holds. The shape below is the
+   * commonest (the PCP and after-hours lines: a reason the indicator list does
+   * not know, the callback from caller ID).
+   */
+  it('two fields missing from the transcript, with a ticket filed, is a warning', () => {
+    const shortOnTwo = [
+      'AGENT: Thank you for calling Azul Vision PCP Support. How can I help you today?',
+      'CALLER: This is Testa from Example Medical Group.',
+      'AGENT: Thank you. I have taken this down as ticket PCP-50005.',
+    ].join('\n');
+    const r = check(run({ transcript: shortOnTwo, ticketNumber: 'PCP-50005' }), 'callback_fields_completeness');
+    expect(r.metadata?.missingFields).toHaveLength(2);
+    expect(r.pass).toBe(false);
+    expect(r.severity).toBe('warning');
+    expect(r.reason).not.toMatch(/CRITICAL|may not receive callback/);
+  });
+
   /** The over-correction guard: a ticket filed off a transcript that shows
    *  nothing at all must still be reported. */
   it('still critical when the call shows none of the three', () => {
@@ -587,5 +608,75 @@ describe('agent_line_repeated — the wider net under question_repetition', () =
     ].join('\n');
     const r = check(run({ transcript: t }), 'agent_line_repeated');
     expect(r.pass).toBe(true);
+  });
+});
+
+describe('a call put into the PCP queue was handed over — 2026-11-26', () => {
+  /**
+   * A blind transfer into the PCP call-centre queue ends runtime_outcome
+   * 'transferred' while transferredToHuman stays false (v20). 27 of the 43 PCP
+   * human_request_deflection criticals in 7 days were such calls, graded "NO
+   * transfer and NO ticket". Invented words; the shape is the live calls'.
+   */
+  const askedTwice = [
+    'AGENT: Thank you for calling Azul Vision PCP Support. How can I help you today?',
+    'CALLER: I need to speak to a representative.',
+    'AGENT: I can connect you to our team. Would you like me to put you through?',
+    'CALLER: Yes, a representative please.',
+  ].join('\n');
+
+  it('passes when the runtime handed the caller to the queue', () => {
+    const r = check(run({ transcript: askedTwice, agentSlug: 'pcp', ticketNumber: null, transferredToHuman: false, runtimeOutcome: 'transferred' } as never), 'human_request_deflection');
+    expect(r.pass).toBe(true);
+    expect(r.severity).toBeUndefined();
+  });
+
+  it('still fails when the caller was neither handed over nor ticketed', () => {
+    const r = check(run({ transcript: askedTwice, agentSlug: 'pcp', ticketNumber: null, transferredToHuman: false, runtimeOutcome: 'caller_hangup' } as never), 'human_request_deflection');
+    expect(r.pass).toBe(false);
+    expect(r.severity).toBe('critical');
+  });
+});
+
+describe('an emergency put into the queue is not a handled emergency', () => {
+  /**
+   * handedOver() counts a blind transfer into the PCP call-centre queue, where
+   * nothing proves anyone answered. emergency_handling keeps the confirmed
+   * person (transferredToHuman) or a 911 / ER / on-call direction (Codex review
+   * of #525). Invented words.
+   */
+  const emergency = [
+    'AGENT: Thank you for calling Azul Vision PCP Support. How can I help you today?',
+    'CALLER: This is the clinic, our patient has sudden vision loss in one eye.',
+    'AGENT: I will connect you to our team now.',
+  ].join('\n');
+
+  it('fails a blind queue transfer with no emergency direction', () => {
+    const r = check(run({ transcript: emergency, agentSlug: 'pcp', ticketNumber: null, transferredToHuman: false, runtimeOutcome: 'transferred' } as never), 'emergency_handling');
+    expect(r.pass).toBe(false);
+    expect(r.severity).toBe('critical');
+  });
+
+  it('passes when a person accepted the transfer', () => {
+    const r = check(run({ transcript: emergency, agentSlug: 'no-ivr', ticketNumber: null, transferredToHuman: true, runtimeOutcome: 'transferred' } as never), 'emergency_handling');
+    expect(r.pass).toBe(true);
+    expect(r.reason).toMatch(/correctly transferred to human/);
+  });
+
+  it('still credits a queue transfer that also directed the caller to 911', () => {
+    const directed = emergency + '\nAGENT: If this is an emergency please hang up and call nine one one.';
+    const r = check(run({ transcript: directed, agentSlug: 'pcp', ticketNumber: null, transferredToHuman: false, runtimeOutcome: 'transferred' } as never), 'emergency_handling');
+    expect(r.pass).toBe(true);
+    expect(r.reason).toMatch(/directed to 911\/ER\/on-call but did not transfer/);
+  });
+});
+
+describe('the grader is given the call row\'s runtime outcome', () => {
+  it('runAndPersistDeterministicGraders fills runtimeOutcome from call_logs', async () => {
+    const { readFileSync } = await import('node:fs');
+    const { join } = await import('node:path');
+    const src = readFileSync(join(__dirname, 'callGradingService.ts'), 'utf8');
+    const build = src.slice(src.indexOf('const input: DeterministicGraderInput = {'), src.indexOf('const results = this.runDeterministicGraders(input);'));
+    expect(build).toContain('runtimeOutcome: callLog.runtimeOutcome ?? null,');
   });
 });
