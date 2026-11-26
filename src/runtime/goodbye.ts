@@ -23,12 +23,15 @@ const THANKS = "thanks|thank you|thank you very much|thanks so much|muchas graci
 // "that's all" form contains FAREWELL's "thats all", so the farewell test in
 // `isAgentSignOff` reads the line with this phrase taken out (Codex P2, #429).
 const MY_END = "(?:thats|that is) (?:everything|all) (?:on|from) my end";
+const AGENT_POLITE = `${POLITE}|youre welcome|you are welcome|de nada|con gusto|thank you for calling(?: azul vision)?|gracias por llamar|glad i could help|${MY_END}`;
 // v275: "Great, have a good day!" is the after-hours line's own closing (699
 // agent lines in the 30 days to 2026-11-26, the most common sign-off of all),
 // and "great" was a word the matcher did not know, so the line never closed a
 // call. "Sounds good", "good" and "perfect" open the same kind of line. Agent
-// side only: a farewell is still required beside them.
-const AGENT_POLITE = `${POLITE}|youre welcome|you are welcome|de nada|con gusto|thank you for calling(?: azul vision)?|gracias por llamar|glad i could help|great|perfect|good|sounds good|${MY_END}`;
+// side only, and only as an OPENER: a farewell is still required beside them,
+// so they are read by `isAgentSignOff` and never as a whole reply to a
+// caller's goodbye (review of #524).
+const AGENT_OPENER = "great|perfect|good|sounds good";
 const DONE = "no|thats it|that is it|nothing else|nada mas|thanks|thank you|thank you very much|thanks so much|gracias|muchas gracias";
 
 const MAX_WORDS = 24;
@@ -90,7 +93,7 @@ export function callerConclusion(text: string, previousAgentText: string): Calle
 export function isAgentSignOff(text: string): boolean {
   const bare = withoutVocative(text);
   const withoutMyEnd = normalize(bare).replace(new RegExp(`(?:^| )${MY_END}(?= |$)`, "g"), " ");
-  return onlyPhrases(bare, `${FAREWELL}|${AGENT_POLITE}`) &&
+  return onlyPhrases(bare, `${FAREWELL}|${AGENT_POLITE}|${AGENT_OPENER}`) &&
     new RegExp(`(?:^| )(?:${FAREWELL})(?: |$)`).test(withoutMyEnd);
 }
 

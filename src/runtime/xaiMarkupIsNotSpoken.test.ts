@@ -229,6 +229,39 @@ describe("FIX 1, CORPUS: a goodbye and record_answered_question in one response 
   });
 });
 
+describe("FIX 1, review of #524", () => {
+  it("a bookkeeping answer that settles before the goodbye is heard does not keep the follow-up", async () => {
+    // P2 on 35cba36: the tool answered while the caller was still owed a reply
+    // (no agent words heard yet), and that latched a follow-up the goodbye
+    // then made needless.
+    const [, q, closing] = LEAD[0];
+    const h = harness();
+    await answeredThenClosing(h, q, closing);
+    const before = h.session.requestResponse.mock.calls.length;
+    h.begin();
+    h.handlers().onToolCall("call-early", ANSWERED, { follow_up_owed: false });
+    await h.flush();
+    h.handlers().onAgentTranscriptDelta(GOODBYE);
+    h.handlers().onAudioDelta(AUDIO);
+    h.handlers().onAudioDone(GOODBYE);
+    await h.finish();
+    h.echo();
+    expect(h.session.requestResponse.mock.calls.length).toBe(before);
+    await h.end();
+    expect(h.outcomes).toEqual(["agent_ended"]);
+    expect(h.records[0].goodbyeGraceHangup).toBe(true);
+  });
+
+  it("a caller still owed a reply when the response ends still gets the follow-up", async () => {
+    const [, q, closing] = LEAD[0];
+    const h = harness();
+    await answeredThenClosing(h, q, closing);
+    const before = h.session.requestResponse.mock.calls.length;
+    await h.respond({ tools: [[ANSWERED, { follow_up_owed: false }]] });
+    expect(h.session.requestResponse.mock.calls.length).toBe(before + 1);
+  });
+});
+
 describe("FIX 1, controls: the follow-up is still asked for", () => {
   it("when the tool answer has something for the caller (a filing)", async () => {
     const [, q, closing] = LEAD[0];
@@ -514,6 +547,26 @@ describe("FIX 2: provider markup is not played or recorded", () => {
     h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" } as never);
     await h.flush();
     expect(h.agentLines().slice(-1)[0]).toBe("AGENT: Let me check.");
+  });
+
+  it("a completed transcript that drops the tag but keeps the words after it does not bring back what was muted", async () => {
+    // P2 on 35cba36: the wire's transcript overrode the cut already made on
+    // the streamed text, so the muted words reached the line and the goodbye
+    // check.
+    const [, q, closing] = LEAD[0];
+    const h = harness();
+    await answeredThenClosing(h, q, closing);
+    const before = h.session.requestResponse.mock.calls.length;
+    await h.respond({
+      deltas: [`${GOODBYE} `, "<silence />", " Is there anything else?"],
+      done: `${GOODBYE} Is there anything else?`,
+      tools: [[ANSWERED, { follow_up_owed: false }]],
+    });
+    expect(h.session.requestResponse.mock.calls.length).toBe(before);
+    await h.end();
+    expect(h.agentLines().slice(-1)[0]).toBe(`AGENT: ${GOODBYE}`);
+    expect(h.records[0].goodbyeGraceHangup).toBe(true);
+    expect(h.records[0].providerMarkupCuts).toBe(1);
   });
 
   it("an ordinary line is untouched", async () => {

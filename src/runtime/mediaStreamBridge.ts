@@ -2201,9 +2201,13 @@ export class VoiceCallBridge {
     // deltas: it is the authoritative text and it arrives whole.
     // v275: and never with provider markup in it — the text before the
     // first tag is the line.
+    // An utterance already muted on its streamed text keeps that cut: the
+    // wire's transcript can drop the tag and keep the words after it, which
+    // were never played (review of #524).
+    const mutedOnStream = done.muted;
     const wire = transcript ?? done.text;
     if (providerMarkupIndex(wire) >= 0) this.muteForMarkup(done);
-    const text = withoutProviderMarkup(wire).trim();
+    const text = (mutedOnStream ? done.text : withoutProviderMarkup(wire)).trim();
     const markName = `utt-${done.seq}`;
     // v275: what this response said, for a goodbye a tool answer follows
     // (see `goodbyeThatEndsTheTurn`). Audio, not text, as ever.
@@ -2691,14 +2695,18 @@ export class VoiceCallBridge {
   /** One tool answered. Records what is owed; the request itself fires
    * only when the LAST outstanding tool has settled AND the carrying
    * response has finished delivering. */
-  private toolCallSettled(owesFollowUp: boolean, leavesAnAnswer = owesFollowUp): void {
+  private toolCallSettled(owesFollowUp: boolean, leavesAnAnswer = owesFollowUp, answerHasWords = leavesAnAnswer): void {
     this.pendingToolCalls = Math.max(0, this.pendingToolCalls - 1);
     if (owesFollowUp) {
       this.followUpOwed = true;
       this.followUps.owed += 1;
-      // v275: an answer with something in it for the caller, or a caller
-      // still owed a reply, keeps the follow-up whatever was said before it.
-      if (leavesAnAnswer) this.owedAnswerHasWords = true;
+      // v275: an answer with something in it for the caller keeps the
+      // follow-up whatever was said before it. Only the answer's own content:
+      // whether the caller is still owed a reply is read when the follow-up
+      // is decided (`goodbyeThatEndsTheTurn`), because a bookkeeping answer
+      // can settle before the goodbye in its response is heard, and that
+      // goodbye is the reply (review of #524).
+      if (answerHasWords) this.owedAnswerHasWords = true;
     }
     // The model owes the caller words for this answer (v56) — unless the
     // tool said there is nothing in it to say (v217). An earlier sibling's
@@ -3210,7 +3218,8 @@ export class VoiceCallBridge {
       // Remembered so a caller who speaks AFTER this answer, before the agent
       // has said anything, gets v56's hold back (see onCallerTranscript).
       this.toolAnswerSeq = this.agentLineSeq;
-      this.toolCallSettled(true, !declaresNothingToSay(output) || this.callerAwaitsAReply());
+      const nothingToSay = declaresNothingToSay(output);
+      this.toolCallSettled(true, !nothingToSay || this.callerAwaitsAReply(), !nothingToSay);
       } finally {
         // Whichever way this dispatch ended, an end-call waiting on it may
         // now decide — after `toolCallSettled` above, so the guard it runs
