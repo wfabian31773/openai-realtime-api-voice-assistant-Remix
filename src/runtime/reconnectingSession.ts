@@ -343,8 +343,11 @@ export class ReconnectingSession implements BridgeSession {
   private epochBase = 0;
   private closing = false;
   private configuredAtMs: number | null = null;
-  /** When the session in use was configured: the first, or the latest reconnect. */
-  private liveConfiguredAtMs: number | null = null;
+  /**
+   * When the replacement in use was configured (v274); null while the first
+   * session is in use, whose drop never counts as a quick redrop.
+   */
+  private replacementConfiguredAtMs: number | null = null;
   private reconnects = 0;
   private readonly events: ReconnectEvent[] = [];
   /** A socket error held for the close behind it (TRANSPORT_ERROR_HOLD_MS). */
@@ -489,7 +492,6 @@ export class ReconnectingSession implements BridgeSession {
         if (this.closing) return;
         if (generation === 1 && this.generation === 1) {
           this.configuredAtMs = this.now();
-          this.liveConfiguredAtMs = this.configuredAtMs;
           this.deps.onFirstConfigured?.();
           h.onConfigured();
           return;
@@ -589,8 +591,10 @@ export class ReconnectingSession implements BridgeSession {
     }
     // A reconnected session that could not last half a minute: the path is
     // not holding, so the call ends here rather than pausing again (v274).
-    const livedMs = this.liveConfiguredAtMs === null ? null : this.now() - this.liveConfiguredAtMs;
-    if (this.reconnects > 0 && this.quickRedropMs > 0 && livedMs !== null && livedMs < this.quickRedropMs) {
+    // quickRedropMs 0 turns this off, since nothing lives under 0 ms.
+    const livedMs =
+      this.replacementConfiguredAtMs === null ? null : this.now() - this.replacementConfiguredAtMs;
+    if (livedMs !== null && livedMs < this.quickRedropMs) {
       this.log(
         `[RECONNECT] ${this.deps.slug} ${this.deps.callSid}: the reconnected session dropped ${livedMs} ms ` +
           `after it was configured (under ${this.quickRedropMs} ms); ending the call`,
@@ -679,7 +683,7 @@ export class ReconnectingSession implements BridgeSession {
     this.epochBase += this.live.getResponseEpoch();
     this.live = pending.session;
     this.liveTransport = pending.transport;
-    this.liveConfiguredAtMs = this.now();
+    this.replacementConfiguredAtMs = this.now();
     this.pending = null;
     this.gap = null;
     this.responseActive = false;
