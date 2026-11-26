@@ -2297,8 +2297,21 @@ import { callEnvironment } from "./callRecord";
  * (#532, `5183de9`). (v277, then v278, while #533 was open; renumbered when
  * #532 took v277 and #531 took v278 on main.) No migration.
  */
+/*
+ * v280 (2026-11-26): on the floor's retry, only an explicit null is no
+ * request. Operator, 2026-11-26, "Only null retracts": a second answer that
+ * names no topic, reads as nothing asked, is the placeholder or fails a
+ * content check again is the reader unsure (unavailable), so a named caller
+ * files with FLOOR_REQUEST_NOT_CONFIRMED_NOTE and the stand-in files nothing.
+ * Before, the first three filed nothing for a real request and the last filed
+ * as confirmed with no note. Pushed to #532's branch 17 minutes after #532
+ * merged, so it ships here. Written as v279; renumbered when #533 took v279
+ * on main.
+ * Above v279 (#533, `26f69e74`), which it contains along with v278 (#531,
+ * `5e411d95`). No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v279-a-held-request-takes-the-routing-exit-20261126";
+  "voice-runtime-v280-only-a-null-retracts-on-the-retry-20261126";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
