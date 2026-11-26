@@ -212,7 +212,10 @@ describe("the day table reaches the Observatory", () => {
     const routes = read("server/routes.ts");
     const at = routes.indexOf("app.get('/api/analytics/grok-usage'");
     expect(at, "the route is not registered").toBeGreaterThan(0);
-    const body = routes.slice(at, at + 3000);
+    // The whole route, up to the next one registered after it (a fixed-size
+    // window stopped short once the route gained its per-day call counts).
+    const next = routes.indexOf("app.", at + 1);
+    const body = routes.slice(at, next > at ? next : undefined);
     expect(body).toMatch(/FROM daily_grok_costs/);
     expect(body).toMatch(/tableExists = false/);
     // An UNKNOWN day (round 14) reaches the page as null — Number(null) is 0,
