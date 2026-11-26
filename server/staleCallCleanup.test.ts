@@ -21,6 +21,8 @@ import type { Express, RequestHandler } from 'express';
 const dbCalls: { set?: Record<string, unknown>; where?: unknown }[] = [];
 const dbSelects: { fields?: Record<string, unknown>; where?: unknown; orderBy?: unknown[]; limit?: number }[] = [];
 let returningRows: { id: string }[] = [{ id: 'row-1' }];
+// When set, the production read waits on it, so a test can hold a sweep in flight.
+let selectGate: Promise<void> | null = null;
 vi.mock('./db', () => ({
   db: {
     select: (fields: Record<string, unknown>) => {
@@ -30,7 +32,7 @@ vi.mock('./db', () => ({
         from() { return chain; },
         where(w: unknown) { call.where = w; return chain; },
         orderBy(...o: unknown[]) { call.orderBy = o; return chain; },
-        limit: async (n: number) => { call.limit = n; return []; },
+        limit: async (n: number) => { call.limit = n; if (selectGate) await selectGate; return []; },
       };
       return chain;
     },
@@ -49,7 +51,14 @@ vi.mock('./db', () => ({
 }));
 
 const { mountStaleCallCleanup, cleanupMessage, MANUAL_CLEANUP_OPTIONS, STALE_CLEANUP_PATH } = await import('./staleCallCleanup');
-const { sweepStaleCalls, productionSweepDeps, LIVE_CALL_STATUSES } = await import('./services/staleCallSweeper');
+const {
+  sweepStaleCalls,
+  productionSweepDeps,
+  LIVE_CALL_STATUSES,
+  oneSweepAtATime,
+  startStaleCallSweeper,
+  stopStaleCallSweeper,
+} = await import('./services/staleCallSweeper');
 const { MANUAL_CLEANUP_MIN_AGE_MS, STALE_CALL_CEILING_MS, STALE_SWEEP_DISPOSITION } = await import('./services/staleCallSweep.logic');
 const { requireAuth, requireRole } = await import('./auth');
 const { DEFAULT_MAX_CALL_MS } = await import('../src/runtime/mediaStreamBridge');
@@ -396,5 +405,54 @@ describe('wiring', () => {
   it('the cleanup message reports every number the sweep produced', () => {
     expect(cleanupMessage({ examined: 5, closedFromTwilioTruth: 2, closedUnresolvable: 0, stillLiveAtTwilio: 1, errors: 1, leftUnverified: 1, alreadyClosed: 0 }))
       .toBe('Closed 2 rows whose call Twilio says has ended. 1 call is still live at Twilio and was not touched. 1 row Twilio could not confirm was left open for the automatic sweep at 30 minutes. 1 Twilio lookup failed; nothing was changed for it.');
+  });
+});
+
+describe('the automatic sweep runs one at a time (Codex on #529, round 3)', () => {
+  it('a tick that finds a sweep still running does not start another', async () => {
+    let release!: () => void;
+    const sweep = vi.fn(() => new Promise<void>((r) => { release = r; }));
+    const run = oneSweepAtATime(sweep);
+    const first = run();
+    await run();
+    await run();
+    expect(sweep).toHaveBeenCalledTimes(1);
+    release();
+    await first;
+    const second = run();
+    expect(sweep).toHaveBeenCalledTimes(2);
+    release();
+    await second;
+  });
+
+  it('a sweep that fails frees the next tick and does not throw', async () => {
+    const sweep = vi.fn(async () => { throw new Error('db down'); });
+    const run = oneSweepAtATime(sweep);
+    await expect(run()).resolves.toBeUndefined();
+    await expect(run()).resolves.toBeUndefined();
+    expect(sweep).toHaveBeenCalledTimes(2);
+  });
+
+  it('the production timer skips a tick while its sweep is still reading', async () => {
+    vi.useFakeTimers();
+    let release!: () => void;
+    selectGate = new Promise<void>((r) => { release = r; });
+    dbSelects.length = 0;
+    try {
+      startStaleCallSweeper();
+      expect(dbSelects).toHaveLength(1); // the boot sweep, held on its first read
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+      expect(dbSelects).toHaveLength(1); // two ticks skipped
+      release();
+      selectGate = null;
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(5 * 60 * 1000);
+      expect(dbSelects).toHaveLength(2); // the next tick runs
+    } finally {
+      stopStaleCallSweeper();
+      selectGate = null;
+      vi.useRealTimers();
+    }
   });
 });

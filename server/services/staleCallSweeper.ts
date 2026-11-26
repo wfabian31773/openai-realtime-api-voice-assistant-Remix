@@ -271,16 +271,38 @@ async function sweepPage(
   }
 }
 
+/**
+ * One automatic sweep at a time. Five pages are up to 1,000 Twilio lookups,
+ * which at a few hundred milliseconds each can outlast the five-minute
+ * interval, and a second sweep started beside the first would look up the
+ * same rows again (Codex on #529, round 3). A tick that finds a sweep still
+ * running is skipped and logged; the next tick runs. Never throws.
+ */
+export function oneSweepAtATime(sweep: () => Promise<unknown>): () => Promise<void> {
+  let inFlight = false;
+  return async () => {
+    if (inFlight) {
+      console.info('[StaleCallSweeper] the previous sweep is still running — this tick skipped');
+      return;
+    }
+    inFlight = true;
+    try {
+      await sweep();
+    } catch (err) {
+      console.error('[StaleCallSweeper] sweep failed:', err instanceof Error ? err.message : err);
+    } finally {
+      inFlight = false;
+    }
+  };
+}
+
 /** Boot + interval. Never throws — a sweep failure logs and waits for the next tick. */
 export function startStaleCallSweeper(): void {
   if (sweeperInterval) return;
   console.info(STALE_SWEEPER_MARKER);
-  const run = () =>
-    sweepStaleCalls().catch((err) =>
-      console.error('[StaleCallSweeper] sweep failed:', err instanceof Error ? err.message : err),
-    );
-  run(); // boot sweep — clears anything left behind by an outage while we were down
-  sweeperInterval = setInterval(run, SWEEP_INTERVAL_MS);
+  const run = oneSweepAtATime(() => sweepStaleCalls());
+  void run(); // boot sweep — clears anything left behind by an outage while we were down
+  sweeperInterval = setInterval(() => void run(), SWEEP_INTERVAL_MS);
 }
 
 export function stopStaleCallSweeper(): void {
