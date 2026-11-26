@@ -7,6 +7,7 @@
  */
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
+  clampEnvMs,
   connectRetries,
   connectWithFirstEventRetry,
   createStallRateWindow,
@@ -55,6 +56,19 @@ describe("the env knobs clamp rather than trust a typo", () => {
     expect(DEFAULT_FIRST_EVENT_TIMEOUT_MS).toBe(2_500);
     expect(DEFAULT_WS_HANDSHAKE_TIMEOUT_MS).toBe(5_000);
     expect(DEFAULT_CONNECT_RETRIES).toBe(2);
+  });
+
+  it("reads a blank variable as unset, and an explicit 0 as zero (Codex P2 on #522)", () => {
+    for (const blank of ["", "   ", "\t"]) {
+      expect(clampEnvMs(blank, 5, 1, 10)).toBe(5);
+      expect(clampEnvMs(blank, 30_000, 0, 120_000)).toBe(30_000);
+      expect(connectRetries({ RUNTIME_CONNECT_RETRIES: blank })).toBe(DEFAULT_CONNECT_RETRIES);
+      expect(firstEventTimeoutMs({ RUNTIME_FIRST_EVENT_TIMEOUT_MS: blank })).toBe(DEFAULT_FIRST_EVENT_TIMEOUT_MS);
+    }
+    expect(clampEnvMs(undefined, 5, 1, 10)).toBe(5);
+    expect(clampEnvMs("0", 30_000, 0, 120_000)).toBe(0);
+    expect(clampEnvMs(" 0 ", 30_000, 0, 120_000)).toBe(0);
+    expect(connectRetries({ RUNTIME_CONNECT_RETRIES: "0" })).toBe(0);
   });
 
   it("clamps the first-event window to 1000–10000", () => {

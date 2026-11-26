@@ -3279,6 +3279,88 @@ describe("the mid-call reconnect (v263)", () => {
     await h.close();
   });
 
+  /** Drop the first session, configure the replacement, and hand it back. */
+  async function dropOnce(h: Harness, grok: (typeof h.transports)[number]) {
+    grok.emitClose();
+    await waitFor(() => h.transports.length === 2, "the reconnect to open a second transport");
+    const next = h.transports[1];
+    await waitFor(() => next.ofType("session.update").length > 0, "the new session's setup");
+    next.emit({ type: "session.updated" } as GrokServerEvent);
+    await settle(4);
+    return next;
+  }
+
+  it("v274: a replacement that drops moments after it was configured ends the call, with a redropped row", async () => {
+    const h = await harness({ env: RECONNECT_ENV });
+    const { grok } = await startedCall(h, "CA-redrop1");
+    const next = await dropOnce(h, grok);
+    next.emitClose();
+    await waitFor(() => h.persisted.some((r) => r.callSid === "CA-redrop1"), "the call to persist");
+    expect(h.persisted.find((r) => r.callSid === "CA-redrop1")?.outcome).toBe("provider_failure");
+    expect(h.transports).toHaveLength(2);
+    await waitFor(() => h.reconnectRows.some((r) => r.callSid === "CA-redrop1"), "the reconnect row");
+    const events = h.reconnectRows.find((r) => r.callSid === "CA-redrop1")!.events as Array<Record<string, unknown>>;
+    expect(events.map((e) => e.result)).toEqual(["reconnected", "redropped"]);
+    await h.close();
+  });
+
+  it("v274: RUNTIME_RECONNECT_REDROP_MS=0 turns the check off", async () => {
+    const off = await harness({ env: { ...RECONNECT_ENV, RUNTIME_RECONNECT_REDROP_MS: "0" } });
+    const a = await startedCall(off, "CA-redrop2");
+    const second = await dropOnce(off, a.grok);
+    second.emitClose();
+    await waitFor(() => off.transports.length === 3, "a second reconnect");
+    expect(off.persisted.some((r) => r.callSid === "CA-redrop2")).toBe(false);
+    off.transports[2].emit({ type: "session.updated" } as GrokServerEvent);
+    await settle(4);
+    a.ws.close();
+    await waitFor(() => off.persisted.some((r) => r.callSid === "CA-redrop2"), "the call to persist");
+    expect(off.persisted.find((r) => r.callSid === "CA-redrop2")?.outcome).toBe("caller_hangup");
+    await waitFor(() => off.reconnectRows.some((r) => r.callSid === "CA-redrop2"), "the reconnect row");
+    const events = off.reconnectRows.find((r) => r.callSid === "CA-redrop2")!.events as Array<Record<string, unknown>>;
+    expect(events.map((e) => e.result)).toEqual(["reconnected", "reconnected"]);
+    await off.close();
+  });
+
+  it("v274: RUNTIME_RECONNECT_MAX reaches the wrapper", async () => {
+    const one = await harness({ env: { ...RECONNECT_ENV, RUNTIME_RECONNECT_REDROP_MS: "0", RUNTIME_RECONNECT_MAX: "1" } });
+    const b = await startedCall(one, "CA-redrop3");
+    const replacement = await dropOnce(one, b.grok);
+    replacement.emitClose();
+    await waitFor(() => one.persisted.some((r) => r.callSid === "CA-redrop3"), "the call to persist");
+    expect(one.persisted.find((r) => r.callSid === "CA-redrop3")?.outcome).toBe("provider_failure");
+    await waitFor(() => one.reconnectRows.some((r) => r.callSid === "CA-redrop3"), "the reconnect row");
+    const events = one.reconnectRows.find((r) => r.callSid === "CA-redrop3")!.events as Array<Record<string, unknown>>;
+    expect(events.map((e) => e.result)).toEqual(["reconnected", "limit"]);
+    await one.close();
+  });
+
+  it("v274: blank reconnect levers keep the defaults, not one reconnect and no redrop check (Codex P2 on #522)", async () => {
+    // A blank REDROP_MS must not turn the check off: the quick second drop
+    // still ends the call as redropped.
+    const blankRedrop = await harness({ env: { ...RECONNECT_ENV, RUNTIME_RECONNECT_REDROP_MS: "" } });
+    const a = await startedCall(blankRedrop, "CA-redrop4");
+    (await dropOnce(blankRedrop, a.grok)).emitClose();
+    await waitFor(() => blankRedrop.reconnectRows.some((r) => r.callSid === "CA-redrop4"), "the reconnect row");
+    const aEvents = blankRedrop.reconnectRows.find((r) => r.callSid === "CA-redrop4")!.events as Array<Record<string, unknown>>;
+    expect(aEvents.map((e) => e.result)).toEqual(["reconnected", "redropped"]);
+    await blankRedrop.close();
+
+    // A blank MAX must not cap the call at one reconnect: the second drop
+    // (redrop check off) reconnects again.
+    const blankMax = await harness({ env: { ...RECONNECT_ENV, RUNTIME_RECONNECT_REDROP_MS: "0", RUNTIME_RECONNECT_MAX: " " } });
+    const b = await startedCall(blankMax, "CA-redrop5");
+    (await dropOnce(blankMax, b.grok)).emitClose();
+    await waitFor(() => blankMax.transports.length === 3, "a second reconnect");
+    blankMax.transports[2].emit({ type: "session.updated" } as GrokServerEvent);
+    await settle(4);
+    b.ws.close();
+    await waitFor(() => blankMax.reconnectRows.some((r) => r.callSid === "CA-redrop5"), "the reconnect row");
+    const bEvents = blankMax.reconnectRows.find((r) => r.callSid === "CA-redrop5")!.events as Array<Record<string, unknown>>;
+    expect(bEvents.map((e) => e.result)).toEqual(["reconnected", "reconnected"]);
+    await blankMax.close();
+  });
+
   it("is off unless the switch is set: the drop ends the call as before", async () => {
     const h = await harness();
     const { grok } = await startedCall(h, "CA-reconnect3");

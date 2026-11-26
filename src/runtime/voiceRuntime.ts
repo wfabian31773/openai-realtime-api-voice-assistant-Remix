@@ -293,6 +293,8 @@ import {
   ReconnectingSession,
   reconnectEnabledFor,
   DEFAULT_RECONNECT_BUDGET_MS,
+  DEFAULT_MAX_RECONNECTS,
+  DEFAULT_QUICK_REDROP_MS,
 } from "./reconnectingSession";
 import type { ProviderCloseDiagnostics } from "./grokSession";
 import { CallerAudioMeter, type CallerAudioCounts } from "./callerAudioEnergy";
@@ -1953,6 +1955,21 @@ export function mountVoiceRuntime(
                   DEFAULT_RECONNECT_BUDGET_MS,
                   1_000,
                   20_000,
+                ),
+                // v274: up to five reconnects, and a reconnected session
+                // that drops inside 30 s ends the call. MAX=2 and
+                // REDROP_MS=0 put back v263's rule without a deploy.
+                maxReconnects: clampEnvMs(
+                  env.RUNTIME_RECONNECT_MAX,
+                  DEFAULT_MAX_RECONNECTS,
+                  1,
+                  10,
+                ),
+                quickRedropMs: clampEnvMs(
+                  env.RUNTIME_RECONNECT_REDROP_MS,
+                  DEFAULT_QUICK_REDROP_MS,
+                  0,
+                  120_000,
                 ),
                 connect: async () => {
                   const again: { transport?: RuntimeTransport } = {};

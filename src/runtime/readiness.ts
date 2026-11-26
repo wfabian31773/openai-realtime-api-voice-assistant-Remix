@@ -2224,9 +2224,23 @@ import { callEnvironment } from "./callRecord";
  * seconds are xAI's running total per session, kept as the latest value and
  * summed across reconnects, never summed per response (Codex P1 on #522).
  * Above main's v272 (#521, `a73ee40f`). No migration.
+ *
+ * v274 — A RECONNECT STOPS ON A QUICK REDROP, NOT AT TWO (2026-11-26). The
+ * v263 wrapper ended a call on its third drop. Since RUNTIME_RECONNECT went
+ * on for every lane (2026-11-25 15:33 UTC to 23:52 UTC): 96 reconnect rows,
+ * 91 first drops reconnected, 2 second drops reconnected, and the 2 calls
+ * dropped a third time (CA02af11938b79ac7acd98d70222744c08,
+ * CA21d08f0c1011d94bccdc32ff26185700) were ended at the limit although each
+ * replacement had lived 94 to 102 s; no reconnected session dropped again
+ * inside 30 s. Now a call reconnects up to five times
+ * (DEFAULT_MAX_RECONNECTS, RUNTIME_RECONNECT_MAX), and a reconnected session
+ * that drops sooner than 30 s after it was configured ends the call as
+ * `redropped` (DEFAULT_QUICK_REDROP_MS, RUNTIME_RECONNECT_REDROP_MS, 0 off);
+ * the first session's drop never counts. MAX=2 and REDROP_MS=0 put back
+ * v263's rule. Above main's v273 (#522, `f89bc66d`). No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v273-what-xai-reports-is-kept-20261125";
+  "voice-runtime-v274-a-reconnect-stops-on-a-quick-redrop-20261126";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

@@ -5,7 +5,7 @@
  * The bridge's side is a set of recording handlers: what the wrapper hands
  * the bridge is the whole contract, because the bridge does not change.
  */
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ReconnectingSession,
   REPLAY_LEAD_FRAMES,
@@ -13,6 +13,8 @@ import {
   STALE_CALLER_TURN_MS,
   TRANSPORT_ERROR_HOLD_MS,
   DEFAULT_RECONNECT_BUDGET_MS,
+  DEFAULT_MAX_RECONNECTS,
+  DEFAULT_QUICK_REDROP_MS,
   reconnectEnabledFor,
   resumeBlock,
   historyMessages,
@@ -344,8 +346,33 @@ describe("a drop on a configured call reconnects", () => {
     expect(update.session.instructions).toContain("## The line dropped and you are back");
   });
 
-  it("reconnects a second time and stops at the limit", async () => {
-    const h = harness({ maxReconnects: 2 });
+  it("reconnects five times when each session lasts, and stops at the limit (v274)", async () => {
+    const h = harness();
+    h.configureFirst();
+    let t = h.first;
+    for (let i = 0; i < DEFAULT_MAX_RECONNECTS; i += 1) {
+      h.advance(31_000);
+      t = await h.dropAndReconnect(t);
+    }
+    expect(h.named("onClosed")).toHaveLength(0);
+    h.advance(31_000);
+    t.drop();
+    await settle();
+    expect(h.state.connectCalls).toBe(5);
+    expect(h.named("onClosed")).toHaveLength(1);
+    expect(h.events.map((e) => e.result)).toEqual([
+      "reconnected",
+      "reconnected",
+      "reconnected",
+      "reconnected",
+      "reconnected",
+      "limit",
+    ]);
+    expect(h.events[5].attempt).toBe(6);
+  });
+
+  it("maxReconnects 2 with the redrop check off is v263's rule: the third drop ends the call", async () => {
+    const h = harness({ maxReconnects: 2, quickRedropMs: 0 });
     h.configureFirst();
     const t2 = await h.dropAndReconnect();
     const t3 = await h.dropAndReconnect(t2);
@@ -357,6 +384,144 @@ describe("a drop on a configured call reconnects", () => {
     expect(h.events.map((e) => e.result)).toEqual(["reconnected", "reconnected", "limit"]);
     expect(h.events[2].attempt).toBe(3);
   });
+});
+
+describe("a reconnected session that drops again quickly ends the call (v274)", () => {
+  it("is the default: up to five reconnects, half a minute", () => {
+    expect(DEFAULT_MAX_RECONNECTS).toBe(5);
+    expect(DEFAULT_QUICK_REDROP_MS).toBe(30_000);
+  });
+
+  it("a reconnected session that drops 29.999 s after it was configured ends the call as redropped", async () => {
+    const h = harness();
+    h.configureFirst();
+    const t2 = await h.dropAndReconnect();
+    h.advance(29_999);
+    t2.drop();
+    await settle();
+    expect(h.state.connectCalls).toBe(1);
+    expect(h.named("onClosed")).toHaveLength(1);
+    expect(h.events.map((e) => e.result)).toEqual(["reconnected", "redropped"]);
+    expect(h.events[1]).toMatchObject({ attempt: 2, msToConfigured: null, heldAudioFrames: 0, queuedTurns: 0 });
+    expect(h.logs.some((l) => l.includes("dropped 29999 ms after it was configured"))).toBe(true);
+  });
+
+  it("at exactly 30 s it reconnects", async () => {
+    const h = harness();
+    h.configureFirst();
+    const t2 = await h.dropAndReconnect();
+    h.advance(30_000);
+    await h.dropAndReconnect(t2);
+    expect(h.state.connectCalls).toBe(2);
+    expect(h.named("onClosed")).toHaveLength(0);
+    expect(h.events.map((e) => e.result)).toEqual(["reconnected", "reconnected"]);
+  });
+
+  it("the first session's drop always reconnects, however soon after it was configured", async () => {
+    const h = harness();
+    h.configureFirst();
+    h.advance(1);
+    await h.dropAndReconnect();
+    expect(h.named("onClosed")).toHaveLength(0);
+    expect(h.events.map((e) => e.result)).toEqual(["reconnected"]);
+  });
+
+  it("times the session in use, not the call: a call long under way still ends on a quick redrop", async () => {
+    const h = harness();
+    h.configureFirst();
+    h.advance(300_000);
+    const t2 = await h.dropAndReconnect();
+    h.advance(5_000);
+    t2.drop();
+    await settle();
+    expect(h.events.map((e) => e.result)).toEqual(["reconnected", "redropped"]);
+  });
+
+  it("times from the latest reconnect: a third session that drops quickly ends the call even after a long second one", async () => {
+    const h = harness();
+    h.configureFirst();
+    const t2 = await h.dropAndReconnect();
+    h.advance(90_000);
+    const t3 = await h.dropAndReconnect(t2);
+    h.advance(10_000);
+    t3.drop();
+    await settle();
+    expect(h.events.map((e) => e.result)).toEqual(["reconnected", "reconnected", "redropped"]);
+    expect(h.events[2].attempt).toBe(3);
+  });
+
+  it("quickRedropMs 0 turns the check off", async () => {
+    const h = harness({ quickRedropMs: 0 });
+    h.configureFirst();
+    const t2 = await h.dropAndReconnect();
+    await h.dropAndReconnect(t2);
+    expect(h.events.map((e) => e.result)).toEqual(["reconnected", "reconnected"]);
+    expect(h.named("onClosed")).toHaveLength(0);
+  });
+
+  it("quickRedropMs 0 stays off when the clock steps backwards (Codex P2 on #523)", async () => {
+    const h = harness({ quickRedropMs: 0 });
+    h.configureFirst();
+    const t2 = await h.dropAndReconnect();
+    h.advance(-60_000);
+    await h.dropAndReconnect(t2);
+    expect(h.events.map((e) => e.result)).toEqual(["reconnected", "reconnected"]);
+    expect(h.named("onClosed")).toHaveLength(0);
+  });
+
+  describe("the default clock is monotonic", () => {
+    afterEach(() => vi.restoreAllMocks());
+
+    it("a wall clock stepped backwards does not end a call that lasted (Codex P2 on #523)", async () => {
+      let mono = 0;
+      let wall = 2_000_000;
+      vi.spyOn(performance, "now").mockImplementation(() => mono);
+      vi.spyOn(Date, "now").mockImplementation(() => wall);
+      const h = harness({ now: undefined });
+      h.configureFirst();
+      const t2 = await h.dropAndReconnect();
+      // A minute passes, and the wall clock is stepped back two minutes.
+      mono += 60_000;
+      wall -= 120_000;
+      await h.dropAndReconnect(t2);
+      expect(h.events.map((e) => e.result)).toEqual(["reconnected", "reconnected"]);
+      expect(h.named("onClosed")).toHaveLength(0);
+    });
+  });
+
+  it("the limit is checked first: a drop past the fifth reconnect is limit, however soon it came", async () => {
+    const h = harness({ maxReconnects: 1 });
+    h.configureFirst();
+    const t2 = await h.dropAndReconnect();
+    h.advance(1_000);
+    t2.drop();
+    await settle();
+    expect(h.events.map((e) => e.result)).toEqual(["reconnected", "limit"]);
+  });
+
+  // The two calls of 2026-11-25 that v263 ended at its limit of two. Each
+  // replacement lived 94 to 102 s (openForMs on the provider_reconnect rows),
+  // well past the half minute, so v274 reconnects them a third time.
+  const LIMIT_CALLS_20261125 = [
+    { callSid: "CA02af11938b79ac7acd98d70222744c08", drops: [11_353, 110_071, 212_125] },
+    { callSid: "CA21d08f0c1011d94bccdc32ff26185700", drops: [116_491, 211_166, 312_752] },
+  ];
+  for (const c of LIMIT_CALLS_20261125) {
+    it(`${c.callSid}: the third drop, ended at v263's limit, reconnects`, async () => {
+      const h = harness({ callSid: c.callSid });
+      h.configureFirst();
+      let t = h.first;
+      let at = 0;
+      for (const msIntoCall of c.drops) {
+        h.advance(msIntoCall - at);
+        at = msIntoCall;
+        t = await h.dropAndReconnect(t);
+      }
+      expect(h.named("onClosed")).toHaveLength(0);
+      expect(h.events.map((e) => e.result)).toEqual(["reconnected", "reconnected", "reconnected"]);
+      expect(h.events[2].attempt).toBe(3);
+    });
+  }
 });
 
 describe("what the drop left open", () => {
@@ -946,7 +1111,8 @@ describe("the #511 review, round 3", () => {
   it("P2: a second drop replays only audio the replacement was sent, never what came before the first swap", async () => {
     const BEFORE = b64(new Array(160).fill(0x10));
     const AFTER = b64(new Array(160).fill(0x20));
-    const h = harness();
+    // About the replay, not the v274 quick-redrop rule, so that rule is off.
+    const h = harness({ quickRedropMs: 0 });
     h.configureFirst();
     for (let i = 0; i < 100; i += 1) h.s.appendAudio(BEFORE);
     const t2 = await h.dropAndReconnect();
@@ -963,7 +1129,8 @@ describe("the #511 review, round 3", () => {
   });
 
   it("P2: a turn the dropped session never closed does not stay open on the replacement", async () => {
-    const h = harness();
+    // About the open turn, not the v274 quick-redrop rule, so that rule is off.
+    const h = harness({ quickRedropMs: 0 });
     h.configureFirst();
     // The first session hears the caller start and the line drops before it
     // stops or transcribes them: that turn is replayed onto the replacement.
