@@ -713,6 +713,29 @@ describe("FIX 2: provider markup is not played or recorded", () => {
     expect(h.media.length).toBe(mediaBefore + 1);
   });
 
+  it("REVIEW SHAPE: audio sent before a line's tag is counted as possibly heard, and the log says it was sent", async () => {
+    // github-actions on d88508dd: audio that arrives before the first
+    // transcript delta reaches Twilio before the tag is seen, and the log said
+    // none of it played and the count left it out.
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    const h = harness();
+    h.caller("Okay.");
+    const mediaBefore = h.media.length;
+    await h.respond({ deltas: ["<turn_end>"], audioFirst: true });
+    h.bridge.handleTwilioFrame({ event: "stop", streamSid: "MZ-test" } as never);
+    await h.flush();
+    expect(h.media.length).toBe(mediaBefore + 1);
+    expect(h.agentLines()).toEqual([]);
+    expect(h.records[0].providerMarkupCuts).toBe(1);
+    expect(h.records[0].providerMarkupHeard).toBe(1);
+    expect(followUpEvent(h.records[0])?.data).toMatchObject({ providerMarkupCuts: 1, providerMarkupHeard: 1 });
+    const said = warn.mock.calls.map((c) => String(c[0])).filter((m) => m.includes("provider markup"));
+    expect(said).toHaveLength(1);
+    expect(said[0]).toContain("already sent, so the caller may have heard it");
+    expect(said[0]).not.toContain("none of its audio is played");
+    warn.mockRestore();
+  });
+
   describe("CODEX SHAPE: a tag split after its \"<\" holds the line's audio until the text says which", () => {
     // Codex P2 on 4457f662: a first delta of only "<" matched no tag, so the
     // audio that came before the next delta reached Twilio, and a line that

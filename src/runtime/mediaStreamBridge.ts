@@ -2983,6 +2983,14 @@ export class VoiceCallBridge {
       return;
     }
     if (utterance.audioOff) {
+      // Audio can arrive before the line's first transcript delta; that audio
+      // went to Twilio before the tag could be seen (github-actions on
+      // d88508dd), so the caller may have heard it.
+      if (utterance.bytes > 0) {
+        this.providerMarkupHeard += 1;
+        console.warn(`${on} opens the agent's line on ${callSid} — audio that arrived before the tag was already sent, so the caller may have heard it; the rest is not played and no line is recorded`);
+        return;
+      }
       console.warn(`${on} opens the agent's line on ${callSid} — none of its audio is played and no line is recorded`);
       return;
     }
