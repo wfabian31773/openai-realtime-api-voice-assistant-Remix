@@ -1030,7 +1030,9 @@ export function CampaignsPage() {
                       <TableCell>
                         {contact.firstName} {contact.lastName}
                       </TableCell>
-                      <TableCell>{contact.phoneNumber}</TableCell>
+                      <TableCell>
+                        {contact.phoneLast4 ? `ends in ${contact.phoneLast4}` : 'no phone on file'}
+                      </TableCell>
                       <TableCell>
                         <Badge
                           variant={contact.successful ? 'success' : 'default'}

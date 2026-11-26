@@ -36,19 +36,18 @@ export interface Campaign {
   updatedAt: string
 }
 
+/**
+ * One contact as GET /api/campaigns/:id/contacts answers it
+ * (server/campaignContactsView.ts). The server sends the phone's last four
+ * digits only, and never a date of birth, email or the row's custom data.
+ */
 export interface CampaignContact {
   id: string
-  campaignId: string
-  phoneNumber: string
-  firstName?: string
-  lastName?: string
-  email?: string
-  customData?: Record<string, any>
+  firstName: string | null
+  lastName: string | null
+  phoneLast4: string | null
   contacted: boolean
   successful: boolean
-  attempts: number
-  lastAttemptAt?: string
-  createdAt: string
 }
 
 export interface CallLog {
