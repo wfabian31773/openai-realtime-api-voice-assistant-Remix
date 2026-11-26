@@ -1,5 +1,5 @@
 /**
- * v276, review of #526: the production asker parses the model's JSON. Only an
+ * v277 (review of #526, round 2): the production asker parses the model's JSON. Only an
  * explicit `"request": null` is the model saying the caller asked nothing; a
  * missing or mistyped field is an answer we cannot read, so the after-hours
  * floor must take it as the reader failing and never as "no request".
