@@ -83,13 +83,21 @@ interface FunnelWeek {
   entered: number
   materialized: number
   kept: number
+  /** Of kept, how many were settled from the NextGen schedule mirror or the partner fields, not by 5Star. */
+  keptFromSchedule?: number
   cancelled: number
   noShow: number
   pendingReview: number
+  /** Past bookings nobody can settle yet: unknown, not "not kept". */
+  unsettled?: number
+  /** Open bookings whose appointment is today or later. */
+  upcoming?: number
 }
 interface FunnelResponse {
   weeks: number
   sage: FunnelWeek[]
+  /** False when the schedule mirror was needed and could not be read. */
+  mirrorRead?: boolean
 }
 interface AgentOpenings {
   agentSlug: string
@@ -1277,8 +1285,17 @@ function FunnelTab() {
     <section>
       <p className="mb-3 text-sm text-muted-foreground">
         SAGE bookings by week: booked → entered in NextGen → materialized on the schedule → kept, with losses by
-        verdict. Restored July bookings count in their original booking week.
+        verdict. Restored July bookings count in their original booking week. 5Star stopped settling past bookings
+        around 2026-10-21, so a past booking it left open is settled here from the NextGen schedule mirror when it
+        carries its NextGen appointment id, and from the partner report when it was booked at a partner clinic.
+        Bookings neither can settle are counted as Unsettled; with those, or bookings not due yet, the kept rate is a
+        floor (≥).
       </p>
+      {funnel.data && funnel.data.mirrorRead === false && (
+        <p className="mb-3 text-sm text-amber-700">
+          The NextGen schedule mirror could not be read, so bookings 5Star left open are counted as Unsettled, not kept.
+        </p>
+      )}
       {funnel.isError && (
         <p className="text-sm text-red-600">
           Funnel failed: {(funnel.error as any)?.response?.data?.error ?? String(funnel.error)}
@@ -1300,13 +1317,32 @@ function FunnelTab() {
                 <th className="px-3 py-2 text-right">Cancelled</th>
                 <th className="px-3 py-2 text-right">No-show</th>
                 <th className="px-3 py-2 text-right">In review</th>
+                <th className="px-3 py-2 text-right" title="Past bookings neither 5Star nor the schedule mirror can settle">
+                  Unsettled
+                </th>
+                <th className="px-3 py-2 text-right" title="Open bookings whose appointment is today or later">
+                  Not due yet
+                </th>
               </tr>
             </thead>
             <tbody>
               {funnel.data.sage.map((w) => {
                 const keptRate = w.booked ? w.kept / w.booked : null
+                const unsettled = w.unsettled ?? 0
+                const upcoming = w.upcoming ?? 0
+                const open = unsettled + upcoming
+                // Unsettled and upcoming bookings may yet be kept, so the rate is a
+                // floor; tone it grey rather than red for a number that is not known.
                 const rateTone: Tone =
-                  keptRate === null ? 'grey' : keptRate >= 0.6 ? 'green' : keptRate >= 0.4 ? 'amber' : 'red'
+                  keptRate === null
+                    ? 'grey'
+                    : keptRate >= 0.6
+                      ? 'green'
+                      : open > 0
+                        ? 'grey'
+                        : keptRate >= 0.4
+                          ? 'amber'
+                          : 'red'
                 return (
                   <tr key={w.weekStart} className="border-b last:border-0 hover:bg-muted/30">
                     <td className="px-3 py-1.5 font-mono text-xs">{w.weekStart}</td>
@@ -1315,16 +1351,34 @@ function FunnelTab() {
                     <td className="px-3 py-1.5 text-right font-medium">{w.booked}</td>
                     <td className="px-3 py-1.5 text-right">{w.entered}</td>
                     <td className="px-3 py-1.5 text-right">{w.materialized}</td>
-                    <td className="px-3 py-1.5 text-right font-medium">{w.kept}</td>
+                    <td
+                      className="px-3 py-1.5 text-right font-medium"
+                      title={
+                        w.keptFromSchedule
+                          ? `${w.keptFromSchedule} settled from the NextGen schedule mirror or the partner report`
+                          : undefined
+                      }
+                    >
+                      {w.kept}
+                    </td>
                     <td className="px-3 py-1.5 text-right">
-                      <span className="inline-flex items-center gap-1.5">
+                      <span
+                        className="inline-flex items-center gap-1.5"
+                        title={
+                          open > 0
+                            ? `${unsettled} past booking(s) not settled and ${upcoming} not due yet; the rate is at least this`
+                            : undefined
+                        }
+                      >
                         <StatusDot tone={rateTone} />
-                        {keptRate === null ? '—' : pct(keptRate)}
+                        {keptRate === null ? '—' : `${open > 0 ? '≥ ' : ''}${pct(keptRate)}`}
                       </span>
                     </td>
                     <td className="px-3 py-1.5 text-right">{w.cancelled}</td>
                     <td className="px-3 py-1.5 text-right">{w.noShow}</td>
                     <td className="px-3 py-1.5 text-right">{w.pendingReview}</td>
+                    <td className="px-3 py-1.5 text-right">{unsettled}</td>
+                    <td className="px-3 py-1.5 text-right">{upcoming}</td>
                   </tr>
                 )
               })}

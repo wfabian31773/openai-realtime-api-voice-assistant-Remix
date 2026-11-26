@@ -428,7 +428,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
     try {
       const weeks = Math.min(26, Math.max(1, parseInt(String(req.query.weeks ?? '12'), 10) || 12));
       const { sageFunnelWeekly } = await import('./observatory/queries');
-      res.json({ weeks, sage: await sageFunnelWeekly(weeks) });
+      const funnel = await sageFunnelWeekly(weeks);
+      res.json({ weeks, sage: funnel.weeks, mirrorRead: funnel.mirrorRead });
     } catch (error) {
       console.error('[observatory] funnel failed:', error);
       res.status(500).json({

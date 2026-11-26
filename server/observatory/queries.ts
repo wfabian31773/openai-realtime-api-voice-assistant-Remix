@@ -11,6 +11,7 @@
 import { pool } from '../db';
 import { fivestarQuery } from './fivestarDb';
 import { aggregateOpenings } from './openingMask';
+import { settleTheStuckBookings } from './funnelSettle';
 import {
   assessTicketFiling,
   readTicketFilingSnapshot,
@@ -213,13 +214,26 @@ export interface SageFunnelWeek {
   booked: number;
   entered: number;
   materialized: number;
+  /** 5Star's `completed` plus past bookings settled kept from the schedule mirror or the partner fields (funnelSettle.ts). */
   kept: number;
+  /** Of `kept`, how many were settled from the mirror or the partner fields rather than by 5Star. */
+  keptFromSchedule: number;
   cancelled: number;
   noShow: number;
   pendingReview: number;
+  /** Past bookings neither 5Star nor the mirror can settle. Not "not kept": unknown. */
+  unsettled: number;
+  /** Open bookings whose appointment is today or later: not due yet. */
+  upcoming: number;
 }
 
-export async function sageFunnelWeekly(weeks = 12): Promise<SageFunnelWeek[]> {
+export interface SageFunnel {
+  weeks: SageFunnelWeek[];
+  /** False when the schedule mirror was needed and could not be read. */
+  mirrorRead: boolean;
+}
+
+export async function sageFunnelWeekly(weeks = 12): Promise<SageFunnel> {
   const { rows } = await fivestarQuery<any>(
     `
     WITH weeks AS (
@@ -259,26 +273,43 @@ export async function sageFunnelWeekly(weeks = 12): Promise<SageFunnelWeek[]> {
         AND date_trunc('week', ib.created_at)::date = w.wk)::int AS no_show,
       (SELECT COUNT(*) FROM internal_bookings ib WHERE ib.booked_by_name LIKE 'AI Voice Agent%'
         AND ib.status::text = 'pending_orphan_review'
-        AND date_trunc('week', ib.created_at)::date = w.wk)::int AS pending_review
+        AND date_trunc('week', ib.created_at)::date = w.wk)::int AS pending_review,
+      (SELECT COUNT(*) FROM internal_bookings ib WHERE ib.booked_by_name LIKE 'AI Voice Agent%'
+        AND ib.status::text NOT IN ('completed','no_show','cancelled','pending_orphan_review')
+        AND ib.slot_date >= (now() AT TIME ZONE 'America/Los_Angeles')::date
+        AND date_trunc('week', ib.created_at)::date = w.wk)::int AS upcoming
     FROM weeks w
     ORDER BY w.wk
     `,
     [weeks],
   );
-  return rows.map((r: any) => ({
-    weekStart: r.week_start,
-    reachedCalls: r.reached_calls,
-    reachedSmsDelivered: r.reached_sms,
-    engagedCalls: r.engaged_calls,
-    smsClicks: r.sms_clicks,
-    booked: r.booked,
-    entered: r.entered,
-    materialized: r.materialized,
-    kept: r.kept,
-    cancelled: r.cancelled,
-    noShow: r.no_show,
-    pendingReview: r.pending_review,
-  }));
+  const settled = await settleTheStuckBookings(weeks, {
+    fivestar: fivestarQuery,
+    console: isConsoleConfigured() ? consoleQuery : null,
+  });
+  return {
+    mirrorRead: settled.mirrorRead,
+    weeks: rows.map((r: any) => {
+      const s = settled.byWeek.get(r.week_start) ?? { kept: 0, noShow: 0, cancelled: 0, unsettled: 0 };
+      return {
+        weekStart: r.week_start,
+        reachedCalls: r.reached_calls,
+        reachedSmsDelivered: r.reached_sms,
+        engagedCalls: r.engaged_calls,
+        smsClicks: r.sms_clicks,
+        booked: r.booked,
+        entered: r.entered,
+        materialized: r.materialized,
+        kept: r.kept + s.kept,
+        keptFromSchedule: s.kept,
+        cancelled: r.cancelled + s.cancelled,
+        noShow: r.no_show + s.noShow,
+        pendingReview: r.pending_review,
+        unsettled: s.unsettled,
+        upcoming: r.upcoming,
+      };
+    }),
+  };
 }
 
 // ────────────────────────────────────────────────────────────────────────
