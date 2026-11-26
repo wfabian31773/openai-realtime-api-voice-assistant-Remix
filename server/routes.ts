@@ -21,6 +21,7 @@ import { mountOnCallAdmin, storePerPool } from './onCallAdmin';
 import { createPgOnCallAdminStore, type OnCallAdminStore } from './onCallAdmin/store';
 import { pool } from './db';
 import { mountAccuracyCheck } from './accuracy/accuracy';
+import { mountStaleCallCleanup } from './staleCallCleanup';
 import { opsHubAgentScorecards, todayOverview } from './observatory/queries';
 import { mountOperationsMonitor, readOperations } from './observatory/operations';
 import { urgentCondition, urgentFields, urgentWindow } from './urgentCalls';
@@ -1873,101 +1874,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Cleanup stale calls (calls stuck in 'in_progress', 'ringing', or 'initiated' for > 5 minutes)
-  // Verifies actual status with Twilio before marking as completed
-  app.post('/api/call-logs/cleanup-stale', isAuthenticated, async (req, res) => {
-    try {
-      const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
-      const twilioClient = await getTwilioClient();
-      
-      // Include 'initiated' status to catch orphaned calls that never connected
-      const staleCalls = await storage.getCallLogs({
-        status: 'in_progress,ringing,initiated',
-        endDate: fiveMinutesAgo,
-        limit: 100,
-      });
-      
-      let cleanedCount = 0;
-      let verifiedCount = 0;
-      const results: { id: string; callSid: string | null; twilioStatus: string | null; action: string }[] = [];
-      
-      for (const call of staleCalls.data) {
-        const callTime = call.startTime || call.createdAt;
-        if (callTime && new Date(callTime) < fiveMinutesAgo) {
-          let twilioStatus: string | null = null;
-          let actualDuration: number | null = null;
-          let finalStatus: 'completed' | 'busy' | 'no_answer' | 'failed' = 'completed';
-          
-          // If we have a callSid, verify with Twilio
-          if (call.callSid) {
-            try {
-              const twilioCall = await twilioClient.calls(call.callSid).fetch();
-              twilioStatus = twilioCall.status;
-              actualDuration = twilioCall.duration ? parseInt(twilioCall.duration) : null;
-              verifiedCount++;
-              
-              // Map Twilio status to our status
-              if (twilioStatus === 'in-progress' || twilioStatus === 'ringing' || twilioStatus === 'queued') {
-                // Call is still active in Twilio - but check if it's been running too long
-                const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
-                const callStartTime = call.startTime || call.createdAt;
-                if (callStartTime && new Date(callStartTime) < tenMinutesAgo) {
-                  // Call has been running >10 minutes - FORCE terminate it
-                  console.log(`[CLEANUP] Force terminating long-running call ${call.callSid} (>10 min)`);
-                  try {
-                    await twilioClient.calls(call.callSid).update({ status: 'completed' });
-                    actualDuration = Math.floor((Date.now() - new Date(callStartTime).getTime()) / 1000);
-                    results.push({ id: call.id, callSid: call.callSid, twilioStatus, action: 'FORCE terminated (>10 min)' });
-                    // Continue to update DB below
-                  } catch (forceError: any) {
-                    console.error(`[CLEANUP] Failed to force terminate ${call.callSid}:`, forceError.message);
-                    results.push({ id: call.id, callSid: call.callSid, twilioStatus, action: `force terminate failed: ${forceError.message}` });
-                    continue;
-                  }
-                } else {
-                  // Call is legitimately active (<10 min), skip cleanup
-                  results.push({ id: call.id, callSid: call.callSid, twilioStatus, action: 'skipped (still active <10 min)' });
-                  continue;
-                }
-              } else if (twilioStatus === 'busy') {
-                finalStatus = 'busy';
-              } else if (twilioStatus === 'no-answer') {
-                finalStatus = 'no_answer';
-              } else if (twilioStatus === 'failed' || twilioStatus === 'canceled') {
-                finalStatus = 'failed';
-              }
-            } catch (twilioError: any) {
-              // Call not found in Twilio (may have been deleted/archived), mark as completed
-              console.log(`[CLEANUP] Twilio call ${call.callSid} not found, marking as completed`);
-            }
-          }
-          
-          const duration = actualDuration ?? (call.endTime 
-            ? Math.floor((new Date(call.endTime).getTime() - new Date(callTime).getTime()) / 1000)
-            : Math.floor((fiveMinutesAgo.getTime() - new Date(callTime).getTime()) / 1000));
-          
-          await storage.updateCallLog(call.id, {
-            status: finalStatus,
-            endTime: call.endTime || fiveMinutesAgo,
-            duration: Math.max(0, duration),
-          });
-          cleanedCount++;
-          results.push({ id: call.id, callSid: call.callSid, twilioStatus, action: `marked ${finalStatus}` });
-        }
-      }
-      
-      console.log(`[CLEANUP] Cleaned ${cleanedCount} stale calls (${verifiedCount} verified with Twilio)`);
-      res.json({ 
-        message: `Cleaned up ${cleanedCount} stale call(s) (${verifiedCount} verified with Twilio)`,
-        cleaned: cleanedCount,
-        verified: verifiedCount,
-        details: results,
-      });
-    } catch (error) {
-      console.error("Error cleaning up stale calls:", error);
-      res.status(500).json({ message: "Failed to cleanup stale calls" });
-    }
-  });
+  // The Live Calls "Cleanup Stale" button (staleCallCleanup.ts): admin only,
+  // rows open longer than 15 minutes, closed only when Twilio says the call
+  // has ended. It never hangs up a call.
+  mountStaleCallCleanup(app, { authenticate: isAuthenticated, admin: requireRole('admin') });
 
   // Recalculate call durations and costs from Twilio for accurate data (admin only)
   app.post('/api/call-logs/recalculate-durations', isAuthenticated, requireRole('admin', 'manager'), async (req, res) => {
