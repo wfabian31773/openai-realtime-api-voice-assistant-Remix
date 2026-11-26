@@ -27,9 +27,12 @@
  * a preview and a confirmation, is a separate decision left to him.
  *
  * `updatePhoneEndpointWebhook` (the admin-only update-webhook route, which
- * writes a URL the caller gives) keeps working, but it may move a number
- * answered by the runtime only to another runtime number webhook
- * (`/voice/<lane>`, or the operator line's inbound path).
+ * writes a URL the caller gives, and which no page calls) keeps working for
+ * a number the runtime does not answer, and refuses any Twilio write on one
+ * it does. The first version allowed a move to another `/voice/<lane>` URL;
+ * three Codex rounds on #528 each found a destination that check let
+ * through (a suffix, another host, a mistyped lane), so the dashboard no
+ * longer repoints a runtime number at all.
  */
 
 /** What a Voice URL is answered by. */
@@ -58,9 +61,10 @@ const RUNTIME_PATHS_UNDER_API_VOICE = new Set([
 
 function pathOf(url: string): string | null {
   try {
-    // Express matches routes case-insensitively and ignores a trailing
-    // slash, so the classification does too.
-    return new URL(url).pathname.toLowerCase().replace(/\/+$/, '') || '/';
+    // Express matches routes case-insensitively and accepts ONE optional
+    // trailing slash (`/voice/records/` routes, `/voice/records//` does not;
+    // checked on Express 5), so the classification does the same.
+    return new URL(url).pathname.toLowerCase().replace(/\/$/, '') || '/';
   } catch {
     return null;
   }
@@ -80,9 +84,10 @@ const NOT_A_LANE = new Set(['health', 'outbound', 'stream']);
  * read a broken `/voice/records/typo` as a working line an admin could not
  * repair (P2).
  *
- * The slug is not checked against the registered lanes: that list lives in
- * the agent config, which this module must not import. A mistyped lane name
- * reaches the runtime's own fail-closed line for an unknown lane.
+ * Used only to read what a number points at NOW, never to approve a write,
+ * so the slug is not checked against the registered lanes and the host is
+ * not read: a number on any `/voice/<slug>` is treated as a runtime line and
+ * protected.
  */
 function runtimeLaneOf(path: string): string | null {
   if (RUNTIME_PATHS_UNDER_API_VOICE.has(path)) return 'operator-line';
@@ -104,18 +109,12 @@ export function classifyVoiceUrl(url: string | null | undefined): VoiceUrlClass 
   return { kind: 'other' };
 }
 
-/** Can a number's Voice URL be pointed at this, and reach a runtime lane? */
-export function isRuntimeNumberWebhook(url: string): boolean {
-  return classifyVoiceUrl(url).kind === 'runtime';
-}
-
 /** Why nothing was changed. */
 export type PhoneLineRefusalReason =
   | 'runtime_line'
   | 'live_line'
   | 'no_voice_url'
-  | 'voice_url_unreadable'
-  | 'runtime_line_needs_runtime_url';
+  | 'voice_url_unreadable';
 
 /** A refusal the routes return as-is: nothing was written to Twilio or to
  * our own table. */
@@ -212,8 +211,8 @@ export function configureForAgentRefusal(
 
 /**
  * For a write of a URL the caller chose (update-webhook): a number answered
- * by the runtime may only be pointed at another runtime URL. Returns null
- * when the write may go ahead.
+ * by the runtime is never repointed from the dashboard, whatever the target.
+ * Returns null when the write may go ahead.
  */
 export function webhookWriteRefusal(
   phoneNumber: string,
@@ -230,11 +229,10 @@ export function webhookWriteRefusal(
   }
   const now = classifyVoiceUrl(current.url);
   if (now.kind !== 'runtime') return null;
-  if (isRuntimeNumberWebhook(target)) return null;
   return new PhoneLineRefusal(
-    'runtime_line_needs_runtime_url',
-    `${phoneNumber} is answered by the voice runtime (lane "${now.lane}", ${current.url}), and ${target} is not a runtime number webhook (https://<host>/voice/<lane>). ` +
-      `${NOT_CHANGED} ${WHERE_TO_REPOINT}`,
+    'runtime_line',
+    `${phoneNumber} is answered by the voice runtime (lane "${now.lane}", ${current.url}). ` +
+      `A number the runtime answers is not repointed from the dashboard. ${NOT_CHANGED} ${WHERE_TO_REPOINT}`,
     current.url,
     target,
   );

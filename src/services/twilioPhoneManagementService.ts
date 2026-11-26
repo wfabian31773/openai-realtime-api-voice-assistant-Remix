@@ -173,8 +173,9 @@ class TwilioPhoneManagementService {
     }
 
     if (options?.updateTwilio) {
-      // A number answered by the voice runtime may only be pointed at another
-      // runtime URL from here (src/services/phoneLineGuard.ts). The stored
+      // A number answered by the voice runtime is never repointed from here
+      // (src/services/phoneLineGuard.ts); that is done in the Twilio console,
+      // and moving a live line is Wayne's decision. The stored
       // voiceWebhookUrl is not trusted for this: the Hub's copy was nine
       // months stale on 2026-11-26, so the number is read from Twilio.
       const refusal = webhookWriteRefusal(

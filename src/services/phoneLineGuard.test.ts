@@ -1,7 +1,6 @@
 import { describe, expect, it } from 'vitest';
 import {
   classifyVoiceUrl,
-  isRuntimeNumberWebhook,
   configureForAgentRefusal,
   isPhoneLineRefusal,
   PhoneLineRefusal,
@@ -45,6 +44,9 @@ describe('classifyVoiceUrl', () => {
     `${PUBLISHED}/voice/records/typo`,
     `${PUBLISHED}/voice/outbound/si-assistant`,
     `${PUBLISHED}/voice/health`,
+    // Express 5 routes one optional trailing slash, not two.
+    `${PUBLISHED}/voice/records//`,
+    `${PUBLISHED}/voice//records`,
   ])(
     '%s answers calls somewhere else',
     (url) => {
@@ -122,39 +124,45 @@ describe('configureForAgentRefusal: the action never changes a number', () => {
   });
 });
 
-describe('webhookWriteRefusal: an explicit URL on a runtime number', () => {
-  it('refuses moving a runtime number to the old core', () => {
-    const r = webhookWriteRefusal('+1', { ok: true, url: `${PUBLISHED}/voice/records` }, `${PUBLISHED}/api/voice/records`);
-    expect(r?.reason).toBe('runtime_line_needs_runtime_url');
-    expect(r?.body().changed).toBe(false);
-  });
-
-  it('refuses moving a runtime number to a Studio flow or anywhere else', () => {
-    expect(webhookWriteRefusal('+1', { ok: true, url: `${PUBLISHED}/voice/pcp` }, STUDIO)?.reason).toBe(
-      'runtime_line_needs_runtime_url',
-    );
+describe('webhookWriteRefusal: a runtime number is never repointed from the dashboard', () => {
+  it.each([
+    // The retired pipeline, a Studio flow, anything else.
+    `${PUBLISHED}/api/voice/records`,
+    STUDIO,
+    // Paths that take no new call.
+    `${PUBLISHED}/voice/records/incoming`,
+    `${PUBLISHED}/voice/records/after`,
+    `${PUBLISHED}/voice/records//`,
+    `${PUBLISHED}/voice/outbound/si-assistant`,
+    `${PUBLISHED}/voice/health`,
+    `${PUBLISHED}/voice/`,
+    `${PUBLISHED}/api/voice/operator-line/inbound/status`,
+    // Codex on #528, round 3: a lane on another host, and a mistyped lane.
+    'https://unrelated-host.example.com/voice/records',
+    `${WORKSPACE}/voice/records`,
+    `${PUBLISHED}/voice/recrods`,
+    // Even a real lane on this deployment.
+    `${PUBLISHED}/voice/surgery`,
+    `${PUBLISHED}/voice/records`,
+  ])('refuses moving a runtime number to %s', (target) => {
+    const r = webhookWriteRefusal('+1', { ok: true, url: `${PUBLISHED}/voice/records` }, target);
+    expect(r?.reason).toBe('runtime_line');
+    expect(r?.message).toContain('"records"');
+    expect(r?.message).toContain('Twilio console');
+    expect(r?.body()).toMatchObject({ success: false, changed: false, wouldWrite: target });
   });
 
   it.each([
-    `${PUBLISHED}/voice/records/incoming`,
-    `${PUBLISHED}/voice/records/after`,
-    `${PUBLISHED}/voice/outbound/si-assistant`,
-    `${PUBLISHED}/voice/outbound`,
-    `${PUBLISHED}/voice/health`,
-    `${PUBLISHED}/voice/stream`,
-    `${PUBLISHED}/voice/`,
-    `${PUBLISHED}/api/voice/operator-line/inbound/status`,
-  ])('refuses moving a runtime number to %s, which takes no new call', (target) => {
-    const r = webhookWriteRefusal('+1', { ok: true, url: `${PUBLISHED}/voice/records` }, target);
-    expect(r?.reason).toBe('runtime_line_needs_runtime_url');
-  });
-
-  it('allows a runtime number to move to another runtime URL', () => {
-    expect(webhookWriteRefusal('+1', { ok: true, url: `${PUBLISHED}/voice/surgery` }, `${PUBLISHED}/voice/records`)).toBeNull();
+    `${WORKSPACE}/voice/tech`,
+    `${PUBLISHED}/Voice/Tech/`,
+    `${PUBLISHED}/api/voice/operator-line/inbound`,
+  ])('protects a number the runtime answers at %s', (current) => {
+    expect(webhookWriteRefusal('+1', { ok: true, url: current }, STUDIO)?.reason).toBe('runtime_line');
   });
 
   it('lets an admin repair a broken /voice/ URL that no route answers', () => {
     expect(webhookWriteRefusal('+1', { ok: true, url: `${PUBLISHED}/voice/records/typo` }, STUDIO)).toBeNull();
+    expect(webhookWriteRefusal('+1', { ok: true, url: `${PUBLISHED}/voice/records//` }, STUDIO)).toBeNull();
   });
 
   it('does not stand in the way of a number that is not on the runtime', () => {
@@ -164,28 +172,6 @@ describe('webhookWriteRefusal: an explicit URL on a runtime number', () => {
 
   it('refuses when the current URL cannot be read', () => {
     expect(webhookWriteRefusal('+1', { ok: false }, `${PUBLISHED}/voice/records`)?.reason).toBe('voice_url_unreadable');
-  });
-});
-
-describe('isRuntimeNumberWebhook: only the paths that take a new call', () => {
-  it.each([
-    `${PUBLISHED}/voice/records`,
-    `${PUBLISHED}/Voice/Records/`,
-    `${WORKSPACE}/voice/no-ivr?x=1`,
-    `${PUBLISHED}/api/voice/operator-line/inbound`,
-  ])('%s is one', (url) => {
-    expect(isRuntimeNumberWebhook(url)).toBe(true);
-  });
-
-  it.each([
-    `${PUBLISHED}/voice/records/incoming`,
-    `${PUBLISHED}/voice/health`,
-    `${PUBLISHED}/voice/outbound/x`,
-    `${PUBLISHED}/api/voice/records`,
-    STUDIO,
-    'not a url',
-  ])('%s is not', (url) => {
-    expect(isRuntimeNumberWebhook(url)).toBe(false);
   });
 });
 

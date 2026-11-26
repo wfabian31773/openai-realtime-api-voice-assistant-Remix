@@ -184,15 +184,26 @@ describe('updatePhoneEndpointWebhook (the update-webhook route) on a runtime lin
     const refusal = await refusalFrom(
       (await service()).updatePhoneEndpointWebhook('ep-5645', `https://${PUBLISHED}/api/voice/records`, { updateTwilio: true }),
     );
-    expect(refusal.reason).toBe('runtime_line_needs_runtime_url');
+    expect(refusal.reason).toBe('runtime_line');
     expect(fake.twilioUpdates).toEqual([]);
     expect(fake.dbUpdates).toEqual([]);
   });
 
-  it('lets a runtime number move to another runtime URL', async () => {
+  it('refuses even a move to another runtime lane: repoints are done in the Twilio console', async () => {
     fake.endpoint = endpoint('8277', null);
     fake.twilioVoiceUrl = `https://${PUBLISHED}/voice/surgery`;
-    await (await service()).updatePhoneEndpointWebhook('ep-8277', `https://${PUBLISHED}/voice/records`, { updateTwilio: true });
+    const refusal = await refusalFrom(
+      (await service()).updatePhoneEndpointWebhook('ep-8277', `https://${PUBLISHED}/voice/records`, { updateTwilio: true }),
+    );
+    expect(refusal.reason).toBe('runtime_line');
+    expect(fake.twilioUpdates).toEqual([]);
+    expect(fake.dbUpdates).toEqual([]);
+  });
+
+  it('a number the runtime does not answer is still written', async () => {
+    fake.endpoint = endpoint('3570', null);
+    fake.twilioVoiceUrl = 'https://webhooks.twilio.com/v1/Accounts/ACx/Flows/FWx';
+    await (await service()).updatePhoneEndpointWebhook('ep-3570', `https://${PUBLISHED}/voice/records`, { updateTwilio: true });
     expect(fake.twilioUpdates).toEqual([
       { sid: fake.endpoint.twilioSid, voiceUrl: `https://${PUBLISHED}/voice/records`, voiceMethod: 'POST' },
     ]);
