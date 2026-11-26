@@ -7,6 +7,7 @@ import { storage } from "./storage";
 import { setupAuth, isAuthenticated as isReplitAuthenticated } from "./replitAuth";
 import { authRouter, requireRole, requireManager } from "./auth";
 import { toolPayloadsForCall } from "./toolPayloadsRead";
+import { mountCampaignContactReads, campaignErrorForLog } from "./campaignContactsView";
 import { agentPromptWriteRefusal, AGENT_PROMPT_WRITE_STATUS } from "./agentPromptSurface";
 import multer from "multer";
 import { parse } from "csv-parse/sync";
@@ -20,11 +21,13 @@ import { mountOnCallAdmin, storePerPool } from './onCallAdmin';
 import { createPgOnCallAdminStore, type OnCallAdminStore } from './onCallAdmin/store';
 import { pool } from './db';
 import { mountAccuracyCheck } from './accuracy/accuracy';
+import { mountStaleCallCleanup } from './staleCallCleanup';
 import { opsHubAgentScorecards, todayOverview } from './observatory/queries';
 import { mountOperationsMonitor, readOperations } from './observatory/operations';
 import { urgentCondition, urgentFields, urgentWindow } from './urgentCalls';
 import { withRuntimeCounts } from './campaignCounts';
 import { RUNTIME_TYPE_RESERVED_REFUSAL, reservesRuntimeType, runtimeCampaignControl, runtimeCampaignEditRefusal, type RuntimeCampaignAction } from './runtimeCampaignControls';
+import { isPhoneLineRefusal } from '../src/services/phoneLineGuard';
 
 // Hybrid authentication middleware - supports both Replit Auth and custom auth
 const isAuthenticated = (req: Request, res: Response, next: NextFunction) => {
@@ -705,12 +708,15 @@ export async function registerRoutes(app: Express): Promise<Server> {
         { updateTwilio }
       );
       
-      res.json({ 
-        success: true, 
+      res.json({
+        success: true,
         message: updateTwilio ? 'Webhook updated in Twilio' : 'Webhook URL saved (not synced to Twilio)',
-        endpoint 
+        endpoint
       });
     } catch (error) {
+      if (isPhoneLineRefusal(error)) {
+        return res.status(error.status).json(error.body());
+      }
       console.error("Error updating phone endpoint webhook:", error);
       res.status(500).json({ 
         success: false,
@@ -720,34 +726,34 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Configure phone for agent (assign + update webhook)
+  // Configure phone for agent — REFUSED, see src/services/phoneLineGuard.ts.
+  // It wrote /api/voice/<slug>/incoming, which neither pipeline serves, so on
+  // a live line it could only break every call. It now reads the number's
+  // Voice URL from Twilio, changes nothing, and answers 409 saying what the
+  // number is pointed at. Repointing a number is Wayne's (standing
+  // instruction 11) and is done in the Twilio console.
   app.post('/api/phone-endpoints/:id/configure-for-agent', isAuthenticated, requireRole('admin'), async (req, res) => {
     try {
       const { twilioPhoneManagementService } = await import('../src/services/twilioPhoneManagementService');
       const { agentId, agentSlug } = req.body;
-      
+
       if (!agentId || !agentSlug) {
         return res.status(400).json({ success: false, message: 'agentId and agentSlug are required' });
       }
-      
-      const domain = process.env.DOMAIN;
-      if (!domain) {
-        return res.status(500).json({ success: false, message: 'DOMAIN environment variable not configured' });
-      }
-      
-      const endpoint = await twilioPhoneManagementService.configurePhoneForAgent(
+
+      await twilioPhoneManagementService.configurePhoneForAgent(
         req.params.id,
         agentId,
         agentSlug,
-        domain
+        process.env.DOMAIN,
       );
-      
-      res.json({ 
-        success: true, 
-        message: `Phone configured for agent "${agentSlug}"`,
-        endpoint 
-      });
     } catch (error) {
+      if (isPhoneLineRefusal(error)) {
+        return res.status(error.status).json(error.body());
+      }
+      if (error instanceof Error && error.message === 'Phone endpoint not found') {
+        return res.status(404).json({ success: false, changed: false, message: error.message });
+      }
       console.error("Error configuring phone for agent:", error);
       res.status(500).json({ 
         success: false,
@@ -977,21 +983,16 @@ export async function registerRoutes(app: Express): Promise<Server> {
         appointmentsWithDates: createdContacts.filter(c => c.appointmentDate).length,
       });
     } catch (error) {
-      console.error("Error uploading contacts:", error);
+      // Never the error itself: a failed insert's message carries every row.
+      console.error("Error uploading contacts:", campaignErrorForLog(error));
       res.status(500).json({ message: "Failed to upload contacts" });
     }
   });
 
-  // Get campaign contacts
-  app.get('/api/campaigns/:id/contacts', isAuthenticated, async (req, res) => {
-    try {
-      const contacts = await storage.getCampaignContacts(req.params.id);
-      res.json(contacts);
-    } catch (error) {
-      console.error("Error fetching campaign contacts:", error);
-      res.status(500).json({ message: "Failed to fetch campaign contacts" });
-    }
-  });
+  // A campaign's contacts and one contact's attempts, as the Campaigns screen
+  // shows them: name, phone last 4 and status, never a date of birth or the
+  // row's custom_data (server/campaignContactsView.ts).
+  mountCampaignContactReads(app, { authenticate: isAuthenticated, storage });
 
   // ==================== Schedule Query for Campaign Building ====================
   
@@ -1364,7 +1365,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
           message: "Schedule data is not available in development. Use CSV upload instead, or test in production." 
         });
       }
-      console.error("Error populating contacts from schedule:", error);
+      // Never the error itself: a failed insert's message carries every row.
+      console.error("Error populating contacts from schedule:", campaignErrorForLog(error));
       res.status(500).json({ message: "Failed to populate contacts from schedule" });
     }
   });
@@ -1675,18 +1677,6 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Get attempt history for a specific contact
-  app.get('/api/campaigns/:campaignId/contacts/:contactId/attempts', isAuthenticated, async (req, res) => {
-    try {
-      const { contactId } = req.params;
-      const attempts = await storage.getContactAttempts(contactId);
-      res.json(attempts);
-    } catch (error) {
-      console.error("[API] Error fetching contact attempts:", error);
-      res.status(500).json({ message: "Failed to fetch contact attempts" });
-    }
-  });
-
   // ==================== Call Logs Routes ====================
   
   // Helper to sanitize query params - treats 'undefined', 'null', '' as missing
@@ -1925,101 +1915,10 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Cleanup stale calls (calls stuck in 'in_progress', 'ringing', or 'initiated' for > 5 minutes)
-  // Verifies actual status with Twilio before marking as completed
-  app.post('/api/call-logs/cleanup-stale', isAuthenticated, async (req, res) => {
-    try {
-      const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000);
-      const twilioClient = await getTwilioClient();
-      
-      // Include 'initiated' status to catch orphaned calls that never connected
-      const staleCalls = await storage.getCallLogs({
-        status: 'in_progress,ringing,initiated',
-        endDate: fiveMinutesAgo,
-        limit: 100,
-      });
-      
-      let cleanedCount = 0;
-      let verifiedCount = 0;
-      const results: { id: string; callSid: string | null; twilioStatus: string | null; action: string }[] = [];
-      
-      for (const call of staleCalls.data) {
-        const callTime = call.startTime || call.createdAt;
-        if (callTime && new Date(callTime) < fiveMinutesAgo) {
-          let twilioStatus: string | null = null;
-          let actualDuration: number | null = null;
-          let finalStatus: 'completed' | 'busy' | 'no_answer' | 'failed' = 'completed';
-          
-          // If we have a callSid, verify with Twilio
-          if (call.callSid) {
-            try {
-              const twilioCall = await twilioClient.calls(call.callSid).fetch();
-              twilioStatus = twilioCall.status;
-              actualDuration = twilioCall.duration ? parseInt(twilioCall.duration) : null;
-              verifiedCount++;
-              
-              // Map Twilio status to our status
-              if (twilioStatus === 'in-progress' || twilioStatus === 'ringing' || twilioStatus === 'queued') {
-                // Call is still active in Twilio - but check if it's been running too long
-                const tenMinutesAgo = new Date(Date.now() - 10 * 60 * 1000);
-                const callStartTime = call.startTime || call.createdAt;
-                if (callStartTime && new Date(callStartTime) < tenMinutesAgo) {
-                  // Call has been running >10 minutes - FORCE terminate it
-                  console.log(`[CLEANUP] Force terminating long-running call ${call.callSid} (>10 min)`);
-                  try {
-                    await twilioClient.calls(call.callSid).update({ status: 'completed' });
-                    actualDuration = Math.floor((Date.now() - new Date(callStartTime).getTime()) / 1000);
-                    results.push({ id: call.id, callSid: call.callSid, twilioStatus, action: 'FORCE terminated (>10 min)' });
-                    // Continue to update DB below
-                  } catch (forceError: any) {
-                    console.error(`[CLEANUP] Failed to force terminate ${call.callSid}:`, forceError.message);
-                    results.push({ id: call.id, callSid: call.callSid, twilioStatus, action: `force terminate failed: ${forceError.message}` });
-                    continue;
-                  }
-                } else {
-                  // Call is legitimately active (<10 min), skip cleanup
-                  results.push({ id: call.id, callSid: call.callSid, twilioStatus, action: 'skipped (still active <10 min)' });
-                  continue;
-                }
-              } else if (twilioStatus === 'busy') {
-                finalStatus = 'busy';
-              } else if (twilioStatus === 'no-answer') {
-                finalStatus = 'no_answer';
-              } else if (twilioStatus === 'failed' || twilioStatus === 'canceled') {
-                finalStatus = 'failed';
-              }
-            } catch (twilioError: any) {
-              // Call not found in Twilio (may have been deleted/archived), mark as completed
-              console.log(`[CLEANUP] Twilio call ${call.callSid} not found, marking as completed`);
-            }
-          }
-          
-          const duration = actualDuration ?? (call.endTime 
-            ? Math.floor((new Date(call.endTime).getTime() - new Date(callTime).getTime()) / 1000)
-            : Math.floor((fiveMinutesAgo.getTime() - new Date(callTime).getTime()) / 1000));
-          
-          await storage.updateCallLog(call.id, {
-            status: finalStatus,
-            endTime: call.endTime || fiveMinutesAgo,
-            duration: Math.max(0, duration),
-          });
-          cleanedCount++;
-          results.push({ id: call.id, callSid: call.callSid, twilioStatus, action: `marked ${finalStatus}` });
-        }
-      }
-      
-      console.log(`[CLEANUP] Cleaned ${cleanedCount} stale calls (${verifiedCount} verified with Twilio)`);
-      res.json({ 
-        message: `Cleaned up ${cleanedCount} stale call(s) (${verifiedCount} verified with Twilio)`,
-        cleaned: cleanedCount,
-        verified: verifiedCount,
-        details: results,
-      });
-    } catch (error) {
-      console.error("Error cleaning up stale calls:", error);
-      res.status(500).json({ message: "Failed to cleanup stale calls" });
-    }
-  });
+  // The Live Calls "Cleanup Stale" button (staleCallCleanup.ts): admin only,
+  // rows open longer than 15 minutes, closed only when Twilio says the call
+  // has ended. It never hangs up a call.
+  mountStaleCallCleanup(app, { authenticate: isAuthenticated, admin: requireRole('admin') });
 
   // Recalculate call durations and costs from Twilio for accurate data (admin only)
   app.post('/api/call-logs/recalculate-durations', isAuthenticated, requireRole('admin', 'manager'), async (req, res) => {

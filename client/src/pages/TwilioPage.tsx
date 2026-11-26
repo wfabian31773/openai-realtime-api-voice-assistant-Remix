@@ -109,9 +109,13 @@ export function TwilioPage() {
       })
     },
     onError: (error: any) => {
+      // A 409 is the server refusing on purpose (src/services/phoneLineGuard.ts):
+      // nothing was changed, and the message says what the number points at now.
+      const refused = error?.response?.status === 409
+      if (refused) setShowConfigureDialog(false)
       addToast({
-        title: 'Configuration Failed',
-        description: error?.response?.data?.message || 'Failed to configure phone for agent',
+        title: refused ? 'Not changed' : 'Check failed',
+        description: error?.response?.data?.message || 'Could not check this number with Twilio',
         variant: 'destructive',
       })
     },
@@ -379,13 +383,22 @@ export function TwilioPage() {
                 ))}
               </Select>
               <p className="mt-1 text-sm text-muted-foreground">
-                This will update the Twilio webhook to route calls to the selected agent.
+                This does not change the number. It reads the number's current Voice URL from
+                Twilio and shows you what it is set to (a TwiML App on the number, if any, takes
+                precedence over it). The URL this action used to write is served
+                by neither voice pipeline, so it would have dropped every call. Repoint a number in
+                the Twilio console.
               </p>
             </div>
 
             {selectedEndpoint?.voiceWebhookUrl && (
               <div className="p-4 bg-muted rounded-lg">
-                <div className="text-sm text-muted-foreground">Current Webhook URL</div>
+                <div className="text-sm text-muted-foreground">
+                  Webhook URL at the last sync
+                  {selectedEndpoint.lastSyncedAt
+                    ? ` (${new Date(selectedEndpoint.lastSyncedAt).toLocaleDateString()}; may be out of date)`
+                    : ' (may be out of date)'}
+                </div>
                 <div className="text-sm font-mono break-all">
                   {selectedEndpoint.voiceWebhookUrl}
                 </div>
@@ -404,7 +417,7 @@ export function TwilioPage() {
                 onClick={handleConfigureForAgent}
                 disabled={!selectedAgentId || configureForAgentMutation.isPending}
               >
-                {configureForAgentMutation.isPending ? 'Configuring...' : 'Configure & Update Twilio'}
+                {configureForAgentMutation.isPending ? 'Checking...' : 'Check with Twilio'}
               </Button>
             </DialogFooter>
           </div>

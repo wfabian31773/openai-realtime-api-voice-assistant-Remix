@@ -125,16 +125,15 @@ function LiveCallCard({ call }: { call: CallLog }) {
     return () => clearInterval(t)
   }, [])
 
-  const { data: liveTimeline } = useQuery({
-    queryKey: ['azul-timeline', call.callSid],
-    queryFn: async () => {
-      const res = await apiClient.get(`/voice/azul/tool-timeline/${call.callSid}`)
-      return res.data as { events: NonNullable<NonNullable<CallLog['toolTimeline']>['events']>; live: boolean }
-    },
-    enabled: !!call.callSid,
-    refetchInterval: 3000,
-    retry: false,
-  })
+  // The tool list comes from the call row, which the live-calls query below
+  // re-reads every 3 seconds behind the login. It used to come from a live
+  // route on the old core that answered without one; that route is removed
+  // (2026-11-26). The old core writes this lane's timeline to the row at
+  // hangup, and the call leaves this live list at hangup too, so this card
+  // shows no tools; the call's history row below shows them once it ends.
+  // A live list would need a logged-in route that can read the old core's
+  // memory, which no longer exists (the lane took 1 call in 60 days).
+  const toolEvents = call.toolTimeline?.events ?? []
 
   const startedMs = call.startTime ? new Date(call.startTime).getTime() : new Date(call.createdAt).getTime()
   const liveSeconds = Math.max(0, Math.floor((Date.now() - startedMs) / 1000))
@@ -174,7 +173,11 @@ function LiveCallCard({ call }: { call: CallLog }) {
             <Wrench className="h-3 w-3" /> Tool activity
           </p>
           <div className="max-h-48 overflow-y-auto rounded-md bg-muted/50 p-2">
-            <ToolTimeline events={liveTimeline?.events ?? []} />
+            {toolEvents.length ? (
+              <ToolTimeline events={toolEvents} />
+            ) : (
+              <p className="text-sm text-muted-foreground">Tool calls show in the call history below once the call ends.</p>
+            )}
           </div>
         </div>
       </CardContent>
