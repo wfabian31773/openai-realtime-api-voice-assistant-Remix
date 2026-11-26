@@ -27,7 +27,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { VoiceCallBridge, type BridgeSessionHandlers, type CallOutcome, type VoiceCallRecord } from "./mediaStreamBridge";
 import { answeredQuestionResult } from "../agents/afterHoursAnsweredQuestion";
 import { followUpEvent } from "./followUpTelemetry";
-import { providerMarkupIndex, withoutProviderMarkup } from "./providerMarkup";
+import { audioForWordsBeforeMarkup, providerMarkupIndex, withoutProviderMarkup } from "./providerMarkup";
 
 const ANSWERED = "record_answered_question";
 /** What a lookup or a filing answers: something the caller IS waiting on. */
@@ -464,15 +464,80 @@ describe("FIX 2: provider markup is not played or recorded", () => {
     const h = harness();
     await h.say("Your request is filed. Is there anything else I can help you with?");
     h.caller("No, thank you.");
-    const mediaBefore = h.media.length;
     await h.respond({ deltas: [`${GOODBYE} `, "<turn_end>", " more"], done: `${GOODBYE} <turn_end> more` });
-    // One audio delta for the clean words; none after the tag.
-    expect(h.media.length).toBe(mediaBefore + 1);
     await h.end();
     expect(h.outcomes).toEqual(["agent_ended"]);
     expect(h.records[0].goodbyeGraceHangup).toBe(true);
     expect(h.agentLines().slice(-1)[0]).toBe(`AGENT: ${GOODBYE}`);
     expect(h.records[0].providerMarkupCuts).toBe(1);
+  });
+
+  /**
+   * The wire's real order (probed 2026-11-26 on grok-voice-3.0, synthetic
+   * lines): a sentence's transcript comes BEFORE its audio, and most of that
+   * audio comes after the next delta. On "Great, have a good day! <turn_end>"
+   * the goodbye's 12,677 bytes arrived as 3,869 before the tag's delta and
+   * 3,176 + 4,160 + 496 + 976 after it, and the tag added no audio at all.
+   * Codex P2 on #524: muting at the tag dropped the goodbye's own audio.
+   */
+  const bytes = (n: number) => Buffer.alloc(n, 0x55).toString("base64");
+  const sentBytes = (h: ReturnType<typeof harness>, from: number) =>
+    h.media.slice(from).reduce((sum, m) => sum + Buffer.from(m, "base64").length, 0);
+  const goodbyeThenTag = async (h: ReturnType<typeof harness>, transcriptDeltas: string[], audio: number[][], done: string) => {
+    h.begin();
+    const hs = h.handlers();
+    for (const [i, d] of transcriptDeltas.entries()) {
+      hs.onAgentTranscriptDelta(d);
+      for (const n of audio[i] ?? []) hs.onAudioDelta(bytes(n));
+    }
+    hs.onAudioDone(done);
+    await h.finish();
+    h.echo();
+  };
+
+  it("the goodbye's audio that arrives after the tag's delta still plays, and the call ends on it", async () => {
+    const h = harness();
+    await h.say("Is there anything else I can help you with?");
+    h.caller("No, thank you.");
+    const from = h.media.length;
+    await goodbyeThenTag(h, [GOODBYE, " <turn_end>"], [[3869], [3176, 4160, 496, 976]], `${GOODBYE} <turn_end>`);
+    expect(sentBytes(h, from)).toBe(12677);
+    await h.end();
+    expect(h.records[0].goodbyeGraceHangup).toBe(true);
+    expect(h.agentLines().slice(-1)[0]).toBe(`AGENT: ${GOODBYE}`);
+    expect(h.records[0].providerMarkupCuts).toBe(1);
+  });
+
+  it("CODEX SHAPE: one delta carrying the goodbye and the tag keeps the goodbye's audio", async () => {
+    const h = harness();
+    await h.say("Is there anything else I can help you with?");
+    h.caller("No, thank you.");
+    const from = h.media.length;
+    await goodbyeThenTag(h, [`${GOODBYE} <turn_end>`], [[3869, 3176, 4160, 496, 976]], `${GOODBYE} <turn_end>`);
+    expect(sentBytes(h, from)).toBe(12677);
+    await h.end();
+    expect(h.outcomes).toEqual(["agent_ended"]);
+    expect(h.records[0].goodbyeGraceHangup).toBe(true);
+    expect(h.agentLines().slice(-1)[0]).toBe(`AGENT: ${GOODBYE}`);
+  });
+
+  it("a tag that is read aloud is cut where the words before it could have ended", async () => {
+    // Probed: "Great, have a good day! <tool_call>end_call<arg_key>…" took
+    // 35,717 bytes, 23,040 of them the tool call read aloud.
+    const h = harness();
+    h.caller("No, thank you.");
+    const from = h.media.length;
+    await goodbyeThenTag(
+      h,
+      [GOODBYE, " <tool_call>end_call<arg_key>reason</arg_key></tool_call>"],
+      [[3869], [3176, 4160, 496, 976, 8000, 8000, 7040]],
+      `${GOODBYE} <tool_call>end_call<arg_key>reason</arg_key></tool_call>`,
+    );
+    const budget = audioForWordsBeforeMarkup(GOODBYE);
+    expect(sentBytes(h, from)).toBe(budget);
+    expect(budget).toBeLessThan(35717);
+    // The chunk that crosses the budget is cut, not dropped whole or sent whole.
+    expect(Buffer.from(h.media[h.media.length - 1], "base64").length).toBe(budget - 12677);
   });
 
   it("a tag split across two deltas is still caught", async () => {
@@ -596,6 +661,27 @@ describe("providerMarkup", () => {
   it.each(["2 < 3", "a <3", "x <-y", "less than <", "We open at 8."])("finds no tag in %j", (text) => {
     expect(providerMarkupIndex(text)).toBe(-1);
     expect(withoutProviderMarkup(text)).toBe(text);
+  });
+
+  it.each([
+    // Probed 2026-11-26 on grok-voice-3.0, synthetic lines: [text, audio bytes].
+    ["Great, have a good day!", 12677],
+    ["Great, have a good day! Take care.", 20357],
+    ["You're welcome. Take care.", 15237],
+    ["Okay, bye.", 7557],
+    ["Perfect, thank you. Goodbye!", 17797],
+    ["Thank you for calling Azul Vision. Have a great evening.", 25477],
+    ["I'm sorry, I'm not able to transfer calls. I can only take a message and put in a request, and the team will follow up with you.", 53637],
+    ["Your ticket number is V A seven three six zero one.", 33157],
+    ["Gracias por llamar. Que tenga un buen día.", 20357],
+    ["Igualmente, bendiciones. Adiós.", 22917],
+  ])("lets %j play all %i bytes of its measured audio before a tag", (text, measured) => {
+    expect(audioForWordsBeforeMarkup(text)).toBeGreaterThanOrEqual(measured);
+  });
+
+  it("gives no audio to a line that opens with the tag", () => {
+    expect(audioForWordsBeforeMarkup("")).toBe(0);
+    expect(audioForWordsBeforeMarkup("   ")).toBe(0);
   });
 
   it("keeps the words before the first tag", () => {

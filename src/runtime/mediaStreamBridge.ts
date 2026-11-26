@@ -115,7 +115,7 @@ import { noteCallerTranscript } from "../services/symptomCorroboration";
 import { noteCallLanguage } from "../services/callLanguage";
 import { ghostCallRefusal } from "../services/ghostCallProtection";
 import { callerConclusion, completesGoodbye, type CallerConclusion } from "./goodbye";
-import { providerMarkupIndex, withoutProviderMarkup } from "./providerMarkup";
+import { audioForWordsBeforeMarkup, providerMarkupIndex, withoutProviderMarkup } from "./providerMarkup";
 import {
   CallUsage,
   providerUsageMarker,
@@ -1000,7 +1000,7 @@ export class VoiceCallBridge {
   /** The utterance currently being spoken, opened by its first audio or
    * transcript delta and closed by its completion. `epoch` is what makes a
    * cancelled utterance's late completion recognisable (module doc). */
-  private current: { seq: number; epoch: number; text: string; bytes: number; muted: boolean } | null = null;
+  private current: { seq: number; epoch: number; text: string; bytes: number; muted: boolean; audioBudget?: number } | null = null;
   /** The response epoch a barge-in cancelled. Everything that epoch emits
    * afterwards is stale: dropped, not forwarded, not recorded. */
   private cancelledEpoch: number | null = null;
@@ -1646,7 +1646,7 @@ export class VoiceCallBridge {
   /** Opens the current utterance on its first event, whichever arrives
    * first — audio delta or transcript delta. Returns null when the event
    * belongs to a cancelled epoch (stale). */
-  private openOrGetCurrent(): { seq: number; epoch: number; text: string; bytes: number; muted: boolean } | null {
+  private openOrGetCurrent(): { seq: number; epoch: number; text: string; bytes: number; muted: boolean; audioBudget?: number } | null {
     const epoch = this.session.getResponseEpoch();
     if (this.cancelledEpoch !== null && epoch === this.cancelledEpoch) return null;
     // Also supports sessions that report only audio/transcript events.
@@ -1708,17 +1708,25 @@ export class VoiceCallBridge {
     current.text += delta;
     /**
      * v275: PROVIDER MARKUP IS NEVER THE AGENT'S WORDS (providerMarkup.ts).
-     * From the first tag on, the utterance is muted: its text stops here, and
-     * its audio is no longer sent to Twilio (handleAudioDelta). What came
-     * before the tag is kept and plays as it was. Audio already sent cannot
-     * be recalled, and a Twilio `clear` would also drop the clean words
-     * before the tag (often the goodbye), so none is sent.
+     * From the first tag on, the utterance's text stops here. Its audio stops
+     * too, but not at once: xAI sends a sentence's transcript BEFORE its audio
+     * and keeps sending that audio after the next delta (probed 2026-11-26,
+     * synthetic lines: on "Great, have a good day! <turn_end>" about 70% of
+     * the goodbye's audio arrived after the tag's own delta, and a delta can
+     * carry the words and the tag together; Codex P2 on #524). So the words
+     * before the tag keep up to the audio they could take
+     * (`audioForWordsBeforeMarkup`) and only what comes after that is dropped
+     * (handleAudioDelta). A line that opens with the tag has no words to keep
+     * and is muted from here. Audio already sent cannot be recalled, and a
+     * Twilio `clear` would also drop the clean words before the tag (often
+     * the goodbye), so none is sent.
      */
     const at = providerMarkupIndex(current.text);
     if (at >= 0) {
       current.text = current.text.slice(0, at);
       // The words before the tag are still the agent's and are still checked.
       if (current.text.trim()) this.checkGuardrails(current);
+      current.audioBudget = Math.max(current.bytes, audioForWordsBeforeMarkup(current.text));
       this.muteForMarkup(current);
       return;
     }
@@ -1841,13 +1849,24 @@ export class VoiceCallBridge {
     // prevent.
     if (!current) return;
     // v275: audio of an utterance muted at a provider tag is not the agent's
-    // words either; it is not sent. The utterance is still owed its
-    // completion, so the stall clock keeps running.
-    if (current.muted) {
-      this.armDeadAir("utterance");
-      return;
+    // words either, past what the words before the tag could take (see
+    // handleAgentTranscriptDelta); it is not sent. A chunk that crosses the
+    // budget is cut at it (mu-law is one byte a sample, so any cut is clean).
+    // The utterance is still owed its completion, so the stall clock keeps
+    // running.
+    let audio = Buffer.from(base64Audio, "base64");
+    if (current.audioBudget !== undefined) {
+      const left = current.audioBudget - current.bytes;
+      if (left <= 0) {
+        this.armDeadAir("utterance");
+        return;
+      }
+      if (audio.length > left) {
+        audio = audio.subarray(0, left);
+        base64Audio = audio.toString("base64");
+      }
     }
-    const forwarded = Buffer.from(base64Audio, "base64").length;
+    const forwarded = audio.length;
     current.bytes += forwarded;
     // AND THE CALLER'S SILENCE BOUND COUNTS IT HERE, at the moment it is handed
     // to Twilio, NOT when its utterance completes (Codex P1, #328 round 3). An
