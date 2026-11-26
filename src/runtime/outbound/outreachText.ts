@@ -318,8 +318,14 @@ async function textOne(
     await deps.store.patchText(claimed.id, { state: "skipped", reason: "do_not_contact" });
     return "do_not_contact";
   }
-  // The Campaigns screen once more, last (review of #531): a Pause pressed
-  // while this tick waited on the re-check or the offer check sends nothing.
+  const sender = await deps.sms();
+  if (!sender) {
+    await deps.store.patchText(claimed.id, { state: "retry", retry_after: later, reason: "no_sms_sender" });
+    return "no_sms_sender";
+  }
+  // The Campaigns screen once more, last, immediately before the send (review
+  // of #531, two rounds): a Pause pressed while this tick waited on the
+  // re-check, the offer check or the sender sends nothing.
   // The text waits, due at once, so Resume sends it on the next tick; no try
   // is spent. A status that cannot be read sends nothing.
   const lateHold = await deps.store
@@ -330,11 +336,6 @@ async function textOne(
     return TEXT_CAMPAIGN_HELD;
   }
 
-  const sender = await deps.sms();
-  if (!sender) {
-    await deps.store.patchText(claimed.id, { state: "retry", retry_after: later, reason: "no_sms_sender" });
-    return "no_sms_sender";
-  }
   try {
     const sent = await sender.send({ to: `+1${key}`, from, body: text.body(bookingLinkUrl(deps.host, token)) });
     await deps.store.patchText(claimed.id, { state: "sent", sent_at: now.toISOString(), message_sid: sent.sid });

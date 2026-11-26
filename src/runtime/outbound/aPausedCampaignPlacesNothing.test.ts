@@ -441,4 +441,21 @@ describe("a Pause pressed while a tick is under way (review of #531)", () => {
     expect(send).not.toHaveBeenCalled();
     expect(result.held).toEqual({ campaign_held: 1 });
   });
+
+  it("a Pause pressed while the SMS sender is fetched sends nothing: the check is the last step before the send", async () => {
+    const store = new FakeOutboundStore(() => NOW);
+    store.addContact({ id: "c1", phone: "+15555550111" });
+    const send = vi.fn(async () => ({ sid: "SM1" }));
+    let fetched = 0;
+    // The tick fetches the sender once at its start, and textOne once more just before the send.
+    const sms = async () => {
+      if (++fetched === 2) await screen(store).press("pause");
+      return { send };
+    };
+    const deps = { store, env: ON, host: "voice.example.test", sms, now: () => NOW, log: () => undefined };
+    const result = await runTextTick("test-lane", policy, deps);
+    expect(fetched).toBe(2);
+    expect(send).not.toHaveBeenCalled();
+    expect(result.held).toEqual({ campaign_held: 1 });
+  });
 });

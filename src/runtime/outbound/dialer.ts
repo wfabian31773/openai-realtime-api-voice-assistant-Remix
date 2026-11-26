@@ -609,7 +609,10 @@ async function dialOne(
   // the re-check and the offer check, so a Pause pressed meanwhile is read
   // again here, before anybody is rung. The row goes back exactly as it was,
   // so Resume dials it on the next tick; a status that cannot be read rings
-  // nobody.
+  // nobody. Between this read and Twilio taking the call sit one attempt
+  // insert (a single row) and the createCall request itself, which no read
+  // can close; the Pause route promises only "from its next minute's tick"
+  // (review of #531, round 2, declined with that reasoning).
   const lateHold = await deps.store
     .campaignRunState(campaignId)
     .then(campaignHoldReason, () => "the campaign's status could not be read");
