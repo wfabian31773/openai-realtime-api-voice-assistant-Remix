@@ -4,7 +4,7 @@ import {
   configureForAgentRefusal,
   isPhoneLineRefusal,
   PhoneLineRefusal,
-  webhookWriteRefusal,
+  twilioWriteRefusal,
 } from './phoneLineGuard';
 
 const PUBLISHED = 'https://openai-realtime-api-voice-assistant-remix--fabianwayne1.replit.app';
@@ -93,13 +93,9 @@ describe('configureForAgentRefusal: the action never changes a number', () => {
 
   it('the wording names the address it read and never claims this deployment answers it', () => {
     const other = 'https://unrelated-host.example.com/voice/records';
-    for (const r of [
-      configureForAgentRefusal('+1', { ok: true, url: other }, OLD_CORE_WRITE),
-      webhookWriteRefusal('+1', { ok: true, url: other }, STUDIO)!,
-    ]) {
-      expect(r.message).toContain(`a voice runtime address (lane "records"): ${other}`);
-      expect(r.message).not.toContain('is answered by');
-    }
+    const r = configureForAgentRefusal('+1', { ok: true, url: other }, OLD_CORE_WRITE);
+    expect(r.message).toContain(`a voice runtime address (lane "records"): ${other}`);
+    expect(r.message).not.toContain('is answered by');
   });
 
   it('a Studio phone-menu number is refused (it is a live line too)', () => {
@@ -143,60 +139,47 @@ describe('configureForAgentRefusal: the action never changes a number', () => {
   });
 });
 
-describe('webhookWriteRefusal: the dashboard writes a Voice URL only onto a number that has none', () => {
-  const TARGETS = [
-    `${PUBLISHED}/api/voice/records`,
-    STUDIO,
-    `${PUBLISHED}/voice/records/incoming`,
-    `${PUBLISHED}/voice/records//`,
-    'https://unrelated-host.example.com/voice/records',
-    `${WORKSPACE}/voice/records`,
-    `${PUBLISHED}/voice/recrods`,
-    `${PUBLISHED}/voice/surgery`,
-    `${PUBLISHED}/voice/records`,
-  ];
-
-  it.each(TARGETS)('refuses moving a runtime number to %s', (target) => {
-    const r = webhookWriteRefusal('+1', { ok: true, url: `${PUBLISHED}/voice/records` }, target);
-    expect(r?.reason).toBe('runtime_line');
-    expect(r?.message).toContain('"records"');
-    expect(r?.message).toContain('only onto a number that has none');
-    expect(r?.message).toContain('Twilio console');
-    expect(r?.body()).toMatchObject({ success: false, changed: false, wouldWrite: target });
-  });
-
+describe('twilioWriteRefusal: the dashboard never writes a Voice URL to Twilio', () => {
+  // Every URL the #528 review rounds named, plus the runtime URL itself and a
+  // Studio flow: none of them may be written, whatever the number is on now.
   it.each([
-    // Codex on #528, round 4: Express decodes the lane, so this reaches
-    // records; the wording does not decode it, and the write is refused anyway.
+    `${PUBLISHED}/voice/records`,
     `${PUBLISHED}/voice/%72ecords`,
-    STUDIO,
-    `${PUBLISHED}/api/voice/no-ivr`,
-    // Broken URLs are repaired in the Twilio console too.
-    `${PUBLISHED}/voice/records/typo`,
-    `${PUBLISHED}/voice/records//`,
+    `${PUBLISHED}/api/voice/records`,
+    `${PUBLISHED}/api/voice/operator-line/inbound`,
     `${PUBLISHED}/api/voice/operator-line/inbound/`,
+    `${PUBLISHED}/voice/records/incoming`,
+    `${PUBLISHED}/voice/recrods`,
+    `${WORKSPACE}/voice/records`,
+    'https://unrelated-host.example.com/voice/records',
+    STUDIO,
     'not a url',
-  ])('refuses overwriting a number already on %s', (current) => {
-    const r = webhookWriteRefusal('+1', { ok: true, url: current }, `${PUBLISHED}/voice/records`);
-    expect(r?.reason).toBe('live_line');
-    expect(r?.message).toContain(current);
-    expect(r?.message).toContain('only onto a number that has none');
-    expect(r?.body()).toMatchObject({ success: false, changed: false, currentVoiceUrl: current });
+  ])('refuses writing %s', (target) => {
+    const r = twilioWriteRefusal('+19095550001', target);
+    expect(r).toBeInstanceOf(PhoneLineRefusal);
+    expect(r.status).toBe(409);
+    expect(r.reason).toBe('twilio_write_not_allowed');
+    expect(r.body()).toEqual({
+      success: false,
+      changed: false,
+      reason: 'twilio_write_not_allowed',
+      message: r.message,
+      currentVoiceUrl: null,
+      wouldWrite: target,
+    });
   });
 
-  it.each([`${WORKSPACE}/voice/tech`, `${PUBLISHED}/Voice/Tech/`, `${PUBLISHED}/api/voice/operator-line/inbound`])(
-    'names the runtime when the number is on %s',
-    (current) => {
-      expect(webhookWriteRefusal('+1', { ok: true, url: current }, STUDIO)?.reason).toBe('runtime_line');
-    },
-  );
-
-  it.each([null, '', '   '])('lets a number with no Voice URL (%s) be given one', (current) => {
-    expect(webhookWriteRefusal('+1', { ok: true, url: current }, `${PUBLISHED}/voice/records`)).toBeNull();
+  it('says nothing changed and where a number is repointed', () => {
+    const r = twilioWriteRefusal('+19095550001', `${PUBLISHED}/voice/records`);
+    expect(r.message).toContain('+19095550001');
+    expect(r.message).toContain('does not write a Voice URL to Twilio');
+    expect(r.message).toContain('Nothing was changed, in Twilio or here.');
+    expect(r.message).toContain('Twilio console');
+    expect(r.message).toContain("Wayne's decision");
   });
 
-  it('refuses when the current URL cannot be read', () => {
-    expect(webhookWriteRefusal('+1', { ok: false }, `${PUBLISHED}/voice/records`)?.reason).toBe('voice_url_unreadable');
+  it('is recognised by the routes as a refusal', () => {
+    expect(isPhoneLineRefusal(twilioWriteRefusal('+1', STUDIO))).toBe(true);
   });
 });
 

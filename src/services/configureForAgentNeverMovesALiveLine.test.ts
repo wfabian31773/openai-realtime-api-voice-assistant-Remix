@@ -8,8 +8,8 @@
  * 2026-02-16) and the runtime URL Twilio would report. No Twilio number is
  * touched by this file: the client is a fake that records what it was asked.
  */
-import { readFileSync } from 'node:fs';
-import { join } from 'node:path';
+import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { join, relative } from 'node:path';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const fake = vi.hoisted(() => ({
@@ -35,13 +35,6 @@ vi.mock('../../server/db', () => ({
       },
     }),
   },
-}));
-
-// The real getEnvironmentConfig validates DATABASE_URL and friends; the
-// write path only asks it whether this is production.
-vi.mock('../config/environment', async (importOriginal) => ({
-  ...(await importOriginal<typeof import('../config/environment')>()),
-  getEnvironmentConfig: () => ({ isProduction: false }),
 }));
 
 vi.mock('../lib/twilioClient', () => ({
@@ -177,65 +170,107 @@ describe('configurePhoneForAgent changes nothing', () => {
   });
 });
 
-describe('updatePhoneEndpointWebhook (the update-webhook route)', () => {
-  it('refuses to point a runtime number at the old core', async () => {
-    fake.endpoint = endpoint('5645', null);
-    fake.twilioVoiceUrl = `https://${PUBLISHED}/voice/records`;
-    const refusal = await refusalFrom(
-      (await service()).updatePhoneEndpointWebhook('ep-5645', `https://${PUBLISHED}/api/voice/records`, { updateTwilio: true }),
-    );
-    expect(refusal.reason).toBe('runtime_line');
-    expect(fake.twilioUpdates).toEqual([]);
-    expect(fake.dbUpdates).toEqual([]);
-  });
+describe('updatePhoneEndpointWebhook (the update-webhook route) never writes to Twilio', () => {
+  // Every shape a number can be in. With updateTwilio: true each one is
+  // refused before Twilio is read, and nothing is saved here either.
+  const NUMBERS: Array<[label: string, last4: string, voiceUrl: string | null, fetchFails: boolean]> = [
+    ['a runtime number', '5645', `https://${PUBLISHED}/voice/records`, false],
+    ['another runtime lane', '8277', `https://${PUBLISHED}/voice/surgery`, false],
+    ['a Studio main line', '3570', 'https://webhooks.twilio.com/v1/Accounts/ACx/Flows/FWx', false],
+    ['an old-core number', '1543', `https://${PUBLISHED}/api/voice/no-ivr`, false],
+    ['a number with no Voice URL', '4677', null, false],
+    ['a number Twilio cannot be read for', '6683', null, true],
+  ];
+  const TARGETS = [`https://${PUBLISHED}/voice/records`, `https://${PUBLISHED}/api/voice/records`];
 
-  it('refuses even a move to another runtime lane: repoints are done in the Twilio console', async () => {
+  for (const [label, last4, voiceUrl, fetchFails] of NUMBERS) {
+    it.each(TARGETS)(`${label}: a write of %s is refused, and Twilio is not touched`, async (target) => {
+      fake.endpoint = endpoint(last4, null);
+      fake.twilioVoiceUrl = voiceUrl;
+      fake.twilioFetchFails = fetchFails;
+      const refusal = await refusalFrom(
+        (await service()).updatePhoneEndpointWebhook(`ep-${last4}`, target, { updateTwilio: true }),
+      );
+      expect(refusal.status).toBe(409);
+      expect(refusal.reason).toBe('twilio_write_not_allowed');
+      expect(refusal.body()).toMatchObject({ success: false, changed: false, wouldWrite: target });
+      expect(refusal.message).toContain('Twilio console');
+      expect(fake.twilioFetches).toEqual([]);
+      expect(fake.twilioUpdates).toEqual([]);
+      expect(fake.dbUpdates).toEqual([]);
+    });
+  }
+
+  it('a save without updateTwilio is kept here only, marked not synced', async () => {
     fake.endpoint = endpoint('8277', null);
-    fake.twilioVoiceUrl = `https://${PUBLISHED}/voice/surgery`;
-    const refusal = await refusalFrom(
-      (await service()).updatePhoneEndpointWebhook('ep-8277', `https://${PUBLISHED}/voice/records`, { updateTwilio: true }),
-    );
-    expect(refusal.reason).toBe('runtime_line');
-    expect(fake.twilioUpdates).toEqual([]);
-    expect(fake.dbUpdates).toEqual([]);
-  });
-
-  it('refuses overwriting a Studio main line', async () => {
-    fake.endpoint = endpoint('3570', null);
-    fake.twilioVoiceUrl = 'https://webhooks.twilio.com/v1/Accounts/ACx/Flows/FWx';
-    const refusal = await refusalFrom(
-      (await service()).updatePhoneEndpointWebhook('ep-3570', `https://${PUBLISHED}/api/voice/records`, { updateTwilio: true }),
-    );
-    expect(refusal.reason).toBe('live_line');
-    expect(fake.twilioUpdates).toEqual([]);
-    expect(fake.dbUpdates).toEqual([]);
-  });
-
-  it('a number with no Voice URL is still given one', async () => {
-    fake.endpoint = endpoint('4677', null);
-    fake.twilioVoiceUrl = null;
-    await (await service()).updatePhoneEndpointWebhook('ep-4677', `https://${PUBLISHED}/voice/records`, { updateTwilio: true });
-    expect(fake.twilioUpdates).toEqual([
-      { sid: fake.endpoint.twilioSid, voiceUrl: `https://${PUBLISHED}/voice/records`, voiceMethod: 'POST' },
-    ]);
-  });
-
-  it('refuses when Twilio cannot be read', async () => {
-    fake.endpoint = endpoint('8277', null);
-    fake.twilioFetchFails = true;
-    const refusal = await refusalFrom(
-      (await service()).updatePhoneEndpointWebhook('ep-8277', `https://${PUBLISHED}/voice/records`, { updateTwilio: true }),
-    );
-    expect(refusal.reason).toBe('voice_url_unreadable');
-    expect(fake.twilioUpdates).toEqual([]);
-  });
-
-  it('a save that does not touch Twilio does not ask Twilio', async () => {
-    fake.endpoint = endpoint('8277', null);
-    await (await service()).updatePhoneEndpointWebhook('ep-8277', `https://${PUBLISHED}/api/voice/records`);
+    const saved = await (await service()).updatePhoneEndpointWebhook('ep-8277', `https://${PUBLISHED}/voice/surgery`);
     expect(fake.twilioFetches).toEqual([]);
     expect(fake.twilioUpdates).toEqual([]);
     expect(fake.dbUpdates).toHaveLength(1);
+    expect(fake.dbUpdates[0]).toMatchObject({
+      voiceWebhookUrl: `https://${PUBLISHED}/voice/surgery`,
+      voiceWebhookMethod: 'POST',
+      syncStatus: 'pending',
+    });
+    expect(fake.dbUpdates[0]).not.toHaveProperty('lastSyncedAt');
+    expect(saved.voiceWebhookUrl).toBe(`https://${PUBLISHED}/voice/surgery`);
+  });
+
+  it('updateTwilio: false saves the same way', async () => {
+    fake.endpoint = endpoint('8277', null);
+    await (await service()).updatePhoneEndpointWebhook('ep-8277', `https://${PUBLISHED}/voice/surgery`, { updateTwilio: false });
+    expect(fake.twilioUpdates).toEqual([]);
+    expect(fake.dbUpdates).toHaveLength(1);
+    expect(fake.dbUpdates[0]).toMatchObject({ syncStatus: 'pending' });
+  });
+
+  it('an unknown endpoint is not found, and Twilio is not asked', async () => {
+    fake.endpoint = null;
+    await expect(
+      (await service()).updatePhoneEndpointWebhook('missing', `https://${PUBLISHED}/voice/tech`, { updateTwilio: true }),
+    ).rejects.toThrow('Phone endpoint not found');
+    expect(fake.twilioFetches).toEqual([]);
+    expect(fake.twilioUpdates).toEqual([]);
+  });
+});
+
+describe('no code in this repository writes a Voice URL to Twilio', () => {
+  // The dashboard's update-webhook route was the only writer, and it no
+  // longer writes. A number is repointed in the Twilio console (standing
+  // instruction 11). This scan fails if a writer comes back anywhere.
+  const ROOT = join(__dirname, '../..');
+  const SKIP = new Set(['node_modules', '.git', 'dist', 'build', 'coverage']);
+  function sources(dir: string): string[] {
+    const out: string[] = [];
+    for (const name of readdirSync(dir)) {
+      if (SKIP.has(name)) continue;
+      const path = join(dir, name);
+      if (statSync(path).isDirectory()) out.push(...sources(path));
+      else if (/\.(ts|tsx|js|mjs|cjs)$/.test(name) && !/\.test\.(ts|tsx)$/.test(name)) out.push(path);
+    }
+    return out;
+  }
+  const WRITERS = [
+    /incomingPhoneNumbers\s*\([^)]*\)\s*\.update\s*\(/,
+    /incomingPhoneNumbers\.create\s*\(/,
+    /phone-numbers:update/,
+    /IncomingPhoneNumbers\/[^'"`\s]*['"`]\s*,\s*\{\s*method:\s*['"`]POST/i,
+  ];
+
+  it('finds the source tree it is scanning', () => {
+    const files = sources(join(ROOT, 'src')).map((f) => relative(ROOT, f));
+    expect(files).toContain(join('src', 'services', 'twilioPhoneManagementService.ts'));
+  });
+
+  it('src, server, client and scripts hold no Twilio phone-number write', () => {
+    const offenders: string[] = [];
+    for (const dir of ['src', 'server', 'client', 'scripts']) {
+      for (const file of sources(join(ROOT, dir))) {
+        const text = readFileSync(file, 'utf8');
+        for (const writer of WRITERS) if (writer.test(text)) offenders.push(`${relative(ROOT, file)}: ${writer}`);
+      }
+    }
+    expect(offenders).toEqual([]);
   });
 });
 
@@ -256,10 +291,12 @@ describe('the routes and the page say what happens', () => {
     expect(body).not.toContain('success: true');
   });
 
-  it('update-webhook answers the refusal with its own status and body', () => {
+  it('update-webhook answers the refusal with its own status and body, and never claims Twilio was updated', () => {
     const body = handler('/api/phone-endpoints/:id/update-webhook');
     expect(body).toContain('isPhoneLineRefusal(error)');
     expect(body).toContain('res.status(error.status).json(error.body())');
+    expect(body).not.toContain('Webhook updated in Twilio');
+    expect(body).toContain('Twilio was not changed');
   });
 
   it('the dialog no longer says it will update Twilio', () => {

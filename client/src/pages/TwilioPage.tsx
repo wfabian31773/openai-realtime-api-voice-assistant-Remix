@@ -25,6 +25,14 @@ import {
 import { RefreshCw, Phone, Link2, Settings, Check, AlertCircle, Info } from 'lucide-react'
 import type { Agent } from '@/types'
 import { formatPhoneNumber } from '@/lib/phoneFormat'
+import {
+  OPERATOR_INBOUND_URL,
+  RUNTIME_URL_SHAPE,
+  WHERE_TO_REPOINT,
+  runtimePathFor,
+  servableLanes,
+  type VoiceHealthLanes,
+} from '@/lib/twilioEndpointReference'
 
 interface PhoneEndpoint {
   id: string
@@ -67,6 +75,19 @@ export function TwilioPage() {
       return data
     },
   })
+
+  // The lanes this build can answer, for the reference card. Same request the
+  // Operations Monitor makes; /voice/health is served on this origin.
+  const health = useQuery<VoiceHealthLanes>({
+    queryKey: ['voice-health'],
+    queryFn: async () => {
+      const res = await fetch('/voice/health', { headers: { Accept: 'application/json' } })
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      return res.json()
+    },
+    retry: false,
+  })
+  const lanes = servableLanes(health.data)
 
   const syncMutation = useMutation({
     mutationFn: async () => {
@@ -257,7 +278,8 @@ export function TwilioPage() {
         </Card>
       )}
 
-      {/* Production Endpoint Reference */}
+      {/* Production Endpoint Reference: only what the running code serves.
+          See client/src/lib/twilioEndpointReference.ts. */}
       <Card>
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
@@ -267,85 +289,79 @@ export function TwilioPage() {
         </CardHeader>
         <CardContent className="space-y-4">
           <p className="text-sm text-muted-foreground">
-            The webhook URL determines which agent handles calls. Use this reference when configuring phone numbers.
+            A number's Voice URL in Twilio decides where its calls go. {WHERE_TO_REPOINT}
           </p>
-          
-          <div className="grid gap-4 md:grid-cols-2">
-            {/* Known Production Mappings */}
-            <div className="p-4 border rounded-lg">
-              <h4 className="font-semibold mb-3 flex items-center gap-2">
-                <Phone className="h-4 w-4" />
-                Known Production Numbers
-              </h4>
-              <div className="space-y-2 text-sm">
-                <div className="flex justify-between items-center p-2 bg-muted rounded">
-                  <span className="font-mono">(626) 382-1543</span>
-                  <Badge variant="outline">no-ivr</Badge>
-                </div>
-                <div className="flex justify-between items-center p-2 bg-muted rounded">
-                  <span className="font-mono">(909) 413-5645</span>
-                  <Badge variant="outline">answering-service</Badge>
-                </div>
-              </div>
-            </div>
 
-            {/* Webhook URL Patterns */}
+          <div className="grid gap-4 md:grid-cols-2">
             <div className="p-4 border rounded-lg">
               <h4 className="font-semibold mb-3 flex items-center gap-2">
                 <Link2 className="h-4 w-4" />
-                Webhook URL Patterns
+                Voice runtime lane
               </h4>
-              <div className="space-y-2 text-sm">
-                <div className="p-2 bg-muted rounded">
-                  <div className="text-muted-foreground text-xs mb-1">Direct Agent Routing:</div>
-                  <code className="text-xs">/api/voice/inbound?agent=AGENT_SLUG</code>
-                </div>
-                <div className="p-2 bg-muted rounded">
-                  <div className="text-muted-foreground text-xs mb-1">SIP Header Routing:</div>
-                  <code className="text-xs">/api/voice/inbound</code>
-                  <div className="text-xs text-muted-foreground mt-1">Uses X-Agent-Slug SIP header</div>
-                </div>
+              <div className="p-2 bg-muted rounded">
+                <code className="text-xs break-all">{RUNTIME_URL_SHAPE}</code>
               </div>
+              <p className="text-xs text-muted-foreground mt-2">
+                Use the published deployment's host (it ends in .replit.app), never a workspace
+                (*.replit.dev) URL: a workspace answers too, but runs a different build.
+              </p>
+            </div>
+
+            <div className="p-4 border rounded-lg">
+              <h4 className="font-semibold mb-3 flex items-center gap-2">
+                <Phone className="h-4 w-4" />
+                Operator line
+              </h4>
+              <div className="p-2 bg-muted rounded">
+                <code className="text-xs break-all">{OPERATOR_INBOUND_URL}</code>
+              </div>
+              <p className="text-xs text-muted-foreground mt-2">
+                Exactly this path, no trailing slash. It is the only /api/voice path the voice
+                runtime answers; any other /api/voice/... URL reaches the retired pipeline.
+              </p>
             </div>
           </div>
 
-          {/* Agent Webhook URLs */}
           <div className="p-4 border rounded-lg">
-            <h4 className="font-semibold mb-3">Available Agent Webhooks</h4>
-            <Table>
-              <TableHeader>
-                <TableRow>
-                  <TableHead>Agent</TableHead>
-                  <TableHead>Slug</TableHead>
-                  <TableHead>Production Webhook URL</TableHead>
-                </TableRow>
-              </TableHeader>
-              <TableBody>
-                {agents?.filter(a => a.status === 'active').map((agent) => (
-                  <TableRow key={agent.id}>
-                    <TableCell className="font-medium">{agent.name}</TableCell>
-                    <TableCell>
-                      <Badge variant="outline">{agent.slug}</Badge>
-                    </TableCell>
-                    <TableCell className="font-mono text-xs">
-                      <div className="flex items-center gap-2">
-                        <span className="text-muted-foreground">https://YOUR_DOMAIN</span>
-                        <span>/api/voice/inbound?agent={agent.slug}</span>
-                      </div>
-                    </TableCell>
+            <h4 className="font-semibold mb-1">Lanes this deployment can answer</h4>
+            <p className="text-xs text-muted-foreground mb-3">
+              From this build's /voice/health. It does not say which number points where: that is
+              the number's Voice URL in Twilio (Sync from Twilio refreshes the table above).
+            </p>
+            {lanes === null ? (
+              <p className="text-sm text-muted-foreground">
+                {health.isLoading ? 'Reading /voice/health…' : 'Could not read the lane list from /voice/health.'}
+              </p>
+            ) : lanes.length === 0 ? (
+              <p className="text-sm text-muted-foreground">/voice/health reports no lane it can answer.</p>
+            ) : (
+              <Table>
+                <TableHeader>
+                  <TableRow>
+                    <TableHead>Lane</TableHead>
+                    <TableHead>Voice URL path</TableHead>
                   </TableRow>
-                ))}
-              </TableBody>
-            </Table>
+                </TableHeader>
+                <TableBody>
+                  {lanes.map((slug) => (
+                    <TableRow key={slug}>
+                      <TableCell>
+                        <Badge variant="outline">{slug}</Badge>
+                      </TableCell>
+                      <TableCell className="font-mono text-xs">{runtimePathFor(slug)}</TableCell>
+                    </TableRow>
+                  ))}
+                </TableBody>
+              </Table>
+            )}
           </div>
 
           <div className="p-3 bg-amber-500/10 border border-amber-500/20 rounded-lg">
             <div className="flex gap-2">
               <AlertCircle className="h-4 w-4 text-amber-500 flex-shrink-0 mt-0.5" />
               <div className="text-sm">
-                <strong>Important:</strong> The webhook URL is the source of truth for agent routing. 
-                Changing the phone number alone does not change which agent handles calls - you must 
-                update the webhook URL in Twilio to route to a different agent.
+                <strong>Important:</strong> A TwiML App set on a number takes precedence over its
+                Voice URL. Check both in the Twilio console before and after you repoint a number.
               </div>
             </div>
           </div>
