@@ -391,7 +391,10 @@ export class ReconnectingSession implements BridgeSession {
 
   constructor(deps: ReconnectingSessionDeps) {
     this.deps = deps;
-    this.now = deps.now ?? Date.now;
+    // A monotonic clock: every reading here is an interval, and a wall
+    // clock stepped backwards would make one negative (Codex P2 on #523:
+    // a negative lifetime read as a quick redrop even with the check off).
+    this.now = deps.now ?? (() => performance.now());
     this.setTimer = deps.setTimer ?? ((fn, ms) => {
       const t = setTimeout(fn, ms);
       (t as unknown as { unref?: () => void }).unref?.();
@@ -591,9 +594,11 @@ export class ReconnectingSession implements BridgeSession {
     }
     // A reconnected session that could not last half a minute: the path is
     // not holding, so the call ends here rather than pausing again (v274).
-    // quickRedropMs 0 turns this off, since nothing lives under 0 ms.
+    // quickRedropMs 0 turns this off, whatever the clock reads.
     const livedMs =
-      this.replacementConfiguredAtMs === null ? null : this.now() - this.replacementConfiguredAtMs;
+      this.quickRedropMs <= 0 || this.replacementConfiguredAtMs === null
+        ? null
+        : this.now() - this.replacementConfiguredAtMs;
     if (livedMs !== null && livedMs < this.quickRedropMs) {
       this.log(
         `[RECONNECT] ${this.deps.slug} ${this.deps.callSid}: the reconnected session dropped ${livedMs} ms ` +

@@ -5,7 +5,7 @@
  * The bridge's side is a set of recording handlers: what the wrapper hands
  * the bridge is the whole contract, because the bridge does not change.
  */
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ReconnectingSession,
   REPLAY_LEAD_FRAMES,
@@ -457,6 +457,36 @@ describe("a reconnected session that drops again quickly ends the call (v274)", 
     await h.dropAndReconnect(t2);
     expect(h.events.map((e) => e.result)).toEqual(["reconnected", "reconnected"]);
     expect(h.named("onClosed")).toHaveLength(0);
+  });
+
+  it("quickRedropMs 0 stays off when the clock steps backwards (Codex P2 on #523)", async () => {
+    const h = harness({ quickRedropMs: 0 });
+    h.configureFirst();
+    const t2 = await h.dropAndReconnect();
+    h.advance(-60_000);
+    await h.dropAndReconnect(t2);
+    expect(h.events.map((e) => e.result)).toEqual(["reconnected", "reconnected"]);
+    expect(h.named("onClosed")).toHaveLength(0);
+  });
+
+  describe("the default clock is monotonic", () => {
+    afterEach(() => vi.restoreAllMocks());
+
+    it("a wall clock stepped backwards does not end a call that lasted (Codex P2 on #523)", async () => {
+      let mono = 0;
+      let wall = 2_000_000;
+      vi.spyOn(performance, "now").mockImplementation(() => mono);
+      vi.spyOn(Date, "now").mockImplementation(() => wall);
+      const h = harness({ now: undefined });
+      h.configureFirst();
+      const t2 = await h.dropAndReconnect();
+      // A minute passes, and the wall clock is stepped back two minutes.
+      mono += 60_000;
+      wall -= 120_000;
+      await h.dropAndReconnect(t2);
+      expect(h.events.map((e) => e.result)).toEqual(["reconnected", "reconnected"]);
+      expect(h.named("onClosed")).toHaveLength(0);
+    });
   });
 
   it("the limit is checked first: a drop past the fifth reconnect is limit, however soon it came", async () => {
