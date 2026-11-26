@@ -146,12 +146,6 @@ export function resolveAppDomain(params: {
   return { domain: 'localhost:8000', source: 'fallback' };
 }
 
-/** Would writing this callback URL point production traffic at a development host? */
-export function isDevCallbackUrl(url: string): boolean {
-  const host = url.replace(/^https?:\/\//, '').split('/')[0].toLowerCase();
-  return host.endsWith('.replit.dev') || host.startsWith('localhost') || host.startsWith('127.0.0.1');
-}
-
 export function getEnvironmentConfig(): EnvironmentConfig {
   if (cachedConfig) {
     return cachedConfig;

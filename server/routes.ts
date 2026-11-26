@@ -691,7 +691,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
     }
   });
 
-  // Update phone endpoint webhook (and optionally sync to Twilio)
+  // Save a phone endpoint's webhook URL in our own table. Never writes to
+  // Twilio: updateTwilio: true is refused with a 409 (src/services/phoneLineGuard.ts).
   app.post('/api/phone-endpoints/:id/update-webhook', isAuthenticated, requireRole('admin'), async (req, res) => {
     try {
       const { twilioPhoneManagementService } = await import('../src/services/twilioPhoneManagementService');
@@ -709,7 +710,7 @@ export async function registerRoutes(app: Express): Promise<Server> {
       
       res.json({
         success: true,
-        message: updateTwilio ? 'Webhook updated in Twilio' : 'Webhook URL saved (not synced to Twilio)',
+        message: 'Webhook URL saved here only. Twilio was not changed; repoint a number in the Twilio console.',
         endpoint
       });
     } catch (error) {

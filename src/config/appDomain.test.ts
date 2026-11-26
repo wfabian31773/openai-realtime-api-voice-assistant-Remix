@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { resolveAppDomain, isDevCallbackUrl } from './environment';
+import { resolveAppDomain } from './environment';
 
 /**
  * The callback domain is recomputed on every boot, so a wrong value re-applies itself
@@ -46,22 +46,5 @@ describe('callback domain resolution', () => {
 
   it('falls back to localhost only when nothing else is known', () => {
     expect(resolveAppDomain({ isProduction: false })).toEqual({ domain: 'localhost:8000', source: 'fallback' });
-  });
-});
-
-describe('dev callback detection', () => {
-  it('recognizes the hosts that must never be written onto a live number', () => {
-    expect(isDevCallbackUrl(`https://${DEV}/api/voice/incoming`)).toBe(true);
-    expect(isDevCallbackUrl('http://localhost:8000/api/voice/incoming')).toBe(true);
-    expect(isDevCallbackUrl('https://127.0.0.1:8000/api/voice/incoming')).toBe(true);
-  });
-
-  it('accepts published and custom hosts', () => {
-    expect(isDevCallbackUrl(`https://${PUBLISHED}/api/voice/incoming`)).toBe(false);
-    expect(isDevCallbackUrl('https://voice.azulvision.com/api/voice/incoming')).toBe(false);
-  });
-
-  it('is not fooled by a dev host appearing in the path', () => {
-    expect(isDevCallbackUrl(`https://${PUBLISHED}/api/voice/proxy?to=${DEV}`)).toBe(false);
   });
 });
