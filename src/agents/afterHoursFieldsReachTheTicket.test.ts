@@ -25,6 +25,20 @@ const h = vi.hoisted(() => ({
   lookupByNameAndDOB: vi.fn(async () => ({ patientFound: false, upcomingAppointments: [], pastAppointments: [] })),
 }));
 vi.mock('../../server/db', () => ({ db: {} }));
+// v276: the after-hours floor files only a request the reader confirms. This
+// suite is about what the floor files, so the reader confirms one; the reader
+// itself is tested in afterHoursFloorFilesOnlyARequest.test.ts.
+vi.mock('../runtime/requestFromTheRecording', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../runtime/requestFromTheRecording')>()),
+  askModelForTheRequest: async () => ({ request: 'Wants help with an eye medication refill.' }),
+}));
+// v276: the floor files under the stand-in name only for a records request,
+// so these suites give it the patient's name the recording would yield; the
+// name reader itself is tested in theNameFromTheRecording.test.ts.
+vi.mock('../runtime/nameFromTheRecording', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../runtime/nameFromTheRecording')>()),
+  nameFromTheRecording: async () => ({ firstName: 'Synthetic', lastName: 'Patient' }),
+}));
 vi.mock('../../server/storage', () => ({ storage: { getCallLogBySid: h.getCallLogBySid } }));
 vi.mock('../services/syncAgentService', () => ({
   SyncAgentService: {

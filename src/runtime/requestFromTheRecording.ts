@@ -118,7 +118,12 @@ export const askModelForTheRequest: RequestAsker = async (transcript, retry) => 
   });
   const text = res.choices[0]?.message?.content ?? "";
   const parsed = JSON.parse(text) as { request?: unknown };
-  return { request: typeof parsed?.request === "string" ? parsed.request : null };
+  if (typeof parsed?.request === "string") return { request: parsed.request };
+  // v276 (review of #526): only an explicit null is the model saying nothing
+  // was asked. A missing or mistyped field is an answer we cannot read, and
+  // `readTheRequest` must take it as the reader failing, never as "no request".
+  if (parsed?.request === null) return { request: null };
+  return null;
 };
 
 /**
@@ -522,7 +527,13 @@ export async function readTheRequest(
     console.info(`[REQUEST FROM RECORDING] the reader did not run — the request could not be read${where}`);
     return { kind: "unavailable" };
   }
-  if (typeof answer.request !== "string" || !answer.request.trim()) {
+  // v276 (review of #526): a field that is neither a string nor an explicit
+  // null is an answer we cannot read, not the model saying nothing was asked.
+  if (answer.request !== null && typeof answer.request !== "string") {
+    console.warn(`[REQUEST FROM RECORDING] the reader answered no usable field — the request could not be read${where}`);
+    return { kind: "unavailable" };
+  }
+  if (answer.request === null || !answer.request.trim()) {
     console.info(`[REQUEST FROM RECORDING] the model read no request${where}`);
     return { kind: "none" };
   }

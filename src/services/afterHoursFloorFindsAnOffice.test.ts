@@ -16,8 +16,23 @@ const h = vi.hoisted(() => ({
   confirmedClinicFor: vi.fn(),
   verifiedIdentityFor: vi.fn(),
   officeTheCallerGave: vi.fn(),
+  heardName: { firstName: 'Synthetic', lastName: 'Patient' } as { firstName: string; lastName: string } | null,
 }));
 vi.mock('../../server/db', () => ({ db: {} }));
+// v276: the after-hours floor files only a request the reader confirms. This
+// suite is about what the floor files, so the reader confirms one; the reader
+// itself is tested in afterHoursFloorFilesOnlyARequest.test.ts.
+vi.mock('../runtime/requestFromTheRecording', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../runtime/requestFromTheRecording')>()),
+  askModelForTheRequest: async () => ({ request: 'Wants help with an eye medication refill.' }),
+}));
+// v276: the floor files under the stand-in name only for a records request,
+// so these suites give it the patient's name the recording would yield; the
+// name reader itself is tested in theNameFromTheRecording.test.ts.
+vi.mock('../runtime/nameFromTheRecording', async (importOriginal) => ({
+  ...(await importOriginal<typeof import('../runtime/nameFromTheRecording')>()),
+  nameFromTheRecording: async () => h.heardName,
+}));
 vi.mock('../../server/storage', () => ({ storage: { getCallLogBySid: h.getCallLogBySid } }));
 vi.mock('./syncAgentService', () => ({
   SyncAgentService: { submitSimplifiedTicket: h.submitSimplifiedTicket },
@@ -64,6 +79,7 @@ beforeEach(() => {
   h.confirmedClinicFor.mockReset().mockReturnValue(undefined);
   h.verifiedIdentityFor.mockReset().mockReturnValue(undefined);
   h.officeTheCallerGave.mockReset().mockResolvedValue(undefined);
+  h.heardName = { firstName: 'Synthetic', lastName: 'Patient' };
 });
 
 describe('after-hours floor with no office named', () => {
@@ -123,10 +139,21 @@ describe('after-hours floor with no office named', () => {
     expect(p.additionalDetails).toContain(floor.FLOOR_MISSING_LOCATION_NOTE);
   });
 
-  it('(d) an unverified identity files a stand-in name with a missing-identity advisory', async () => {
+  it('(d) v276: an unverified identity with no name heard on the recording files nothing', async () => {
+    h.heardName = null;
+    const callId = 'synthetic-floor-unidentified';
+    floor.registerAfterHoursFloor({
+      callId, callSid: 'CA' + 'd'.repeat(32), callerPhone: '+12025550100', dialedNumber: UNLISTED_LINE,
+    }, 'no-ivr');
+    await floor.sweepAfterHoursUnfiledCall(callId, { transcript: TRANSCRIPT });
+    expect(h.submitSimplifiedTicket).not.toHaveBeenCalled();
+  });
+
+  it('an unverified identity with a name heard on the recording files under that name, with no stand-in advisory', async () => {
     const p = await sweep();
-    expect(p.patientFullName).toBe(STAND_IN_FULL_NAME);
-    expect(p.additionalDetails).toContain(floor.FLOOR_MISSING_IDENTITY_NOTE);
+    expect(p.patientFullName).toBe('Synthetic Patient');
+    expect(p.patientFullName).not.toBe(STAND_IN_FULL_NAME);
+    expect(p.additionalDetails).not.toContain(floor.FLOOR_MISSING_IDENTITY_NOTE);
   });
 
   it('a verified identity carries no missing-identity advisory', async () => {

@@ -46,8 +46,9 @@ export const FLOOR_DIALED_LOCATION_NOTE =
   'LOCATION from the number dialled (an office line) — not confirmed by the caller.';
 /**
  * v276: the request reader could not run at teardown (no model key, the
- * reader switched off, or the model failed), so the floor files as it did
- * before v276 rather than lose a request it cannot judge.
+ * reader switched off, the model failed, or it answered no usable field), so
+ * the floor files a named caller as it did before v276 rather than lose a
+ * request it cannot judge. A caller with no name is not filed either way.
  */
 export const FLOOR_REQUEST_NOT_CONFIRMED_NOTE =
   'REQUEST NOT CONFIRMED — the request reader could not run at teardown, so this was filed as before so nothing is lost. Please review the conversation.';
@@ -208,7 +209,8 @@ export async function sweepAfterHoursUnfiledCall(
     // the v201 reader whether the caller asked for anything; no request files
     // nothing, and a request with no patient identified (below) files nothing
     // either. A records request is not read: v190 and the CAP SOP log every
-    // access request. A reader that could not run files as before, with a note.
+    // access request. A reader that could not run files a named caller as
+    // before, with a note; a caller with no name files nothing (below).
     const reading = records
       ? undefined
       : await readTheRequest(
@@ -242,8 +244,11 @@ export async function sweepAfterHoursUnfiledCall(
       identity?.firstName ?? found?.firstName,
       identity?.lastName ?? found?.lastName,
     );
-    if (standIn && reading?.kind === 'request') {
-      console.info(`[AFTER-HOURS FLOOR] ${metadata.callSid}: not filed — request read but the patient was not identified`);
+    // v276 (review of #526): the identity rule holds whatever the reader
+    // answered, so a reader that could not run files only under a name. A
+    // records request still files under the stand-in (v190, the CAP SOP).
+    if (standIn && !records) {
+      console.info(`[AFTER-HOURS FLOOR] ${metadata.callSid}: not filed — the patient was not identified`);
       return;
     }
     const named = confirmedClinicFor(metadata.callSid) ?? await officeTheCallerGave(transcript);

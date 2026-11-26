@@ -2247,8 +2247,9 @@ import { callEnvironment } from "./callRecord";
  * request. Before filing, the floor asks the request reader (readTheRequest,
  * v201's reader with v241's second ask) what the caller asked: no request
  * files nothing; a request under the stand-in name files nothing; a reader
- * that could not run files as before with FLOOR_REQUEST_NOT_CONFIRMED_NOTE;
- * a records request is not read and files to Medical Records as before.
+ * that could not run (a missing or mistyped request field included) files
+ * only under a name, with FLOOR_REQUEST_NOT_CONFIRMED_NOTE; a records request
+ * is not read and files to Medical Records as before.
  * Above v275 (#524). No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =

@@ -20,8 +20,9 @@
  *   - no request read from the recording files nothing, named or not;
  *   - a request read from the recording files only under a name (a certain
  *     identity, or the patient's name as the caller said it, v239);
- *   - a reader that could not run (no key, switched off, a model failure)
- *     files as before, with a note, so an outage loses nothing;
+ *   - a reader that could not run (no key, switched off, a model failure,
+ *     an answer with no usable field) files a named caller as before, with a
+ *     note, and a caller with no name files nothing (review of #526);
  *   - a records request is not read: v190 and the CAP SOP log every access
  *     request, so it files to Medical Records as before.
  *
@@ -350,13 +351,31 @@ describe('v276: a request read from the recording files only under a name', () =
   });
 });
 
-describe('v276: a reader that could not run files as before, with a note', () => {
-  it('the reader answering nothing (no key, switched off) files a stand-in with the note', async () => {
-    const { payload } = await sweep(
+describe('v276: a reader that could not run files a named caller with a note, and a stand-in not at all', () => {
+  it('the reader answering nothing (no key, switched off) files no stand-in (review of #526)', async () => {
+    const { payload, askRequest } = await sweep(
       [GREETING, 'CALLER: I need to move my appointment to next week.', 'AGENT: I can take that for the team.'].join('\n'),
       { request: null },
     );
-    expect(payload?.patientFullName).toBe(STAND_IN_FULL_NAME);
+    expect(askRequest).toHaveBeenCalledTimes(1);
+    expect(payload).toBeUndefined();
+  });
+
+  it('the reader answering nothing files a named caller with the note', async () => {
+    const { payload } = await sweep(
+      [GREETING, 'CALLER: My name is Owen Lark, I need to move my appointment.', 'AGENT: I can take that.'].join('\n'),
+      { request: null, heard: { firstName: 'Owen', lastName: 'Lark' } },
+    );
+    expect(payload?.patientFullName).toBe('Owen Lark');
+    expect(payload.additionalDetails).toContain(floor.FLOOR_REQUEST_NOT_CONFIRMED_NOTE);
+  });
+
+  it('the reader answering nothing files a certain identity with the note', async () => {
+    const { payload } = await sweep(
+      [GREETING, 'CALLER: Yes. I need to move my appointment on Thursday.', 'AGENT: I will pass that on.'].join('\n'),
+      { request: null, identity: { firstName: 'Mara', lastName: 'Quill', dateOfBirth: '01/02/1950' } },
+    );
+    expect(payload?.patientFullName).toBe('Mara Quill');
     expect(payload.additionalDetails).toContain(floor.FLOOR_REQUEST_NOT_CONFIRMED_NOTE);
   });
 
@@ -373,6 +392,46 @@ describe('v276: a reader that could not run files as before, with a note', () =>
     expect(payload?.patientFullName).toBe('Owen Lark');
     expect(payload.additionalDetails).toContain(floor.FLOOR_REQUEST_NOT_CONFIRMED_NOTE);
   });
+
+  it('the reader throwing files no stand-in', async () => {
+    const { payload } = await sweep(
+      [GREETING, 'CALLER: I need to move my appointment.', 'AGENT: I can take that.'].join('\n'),
+      {
+        request: async () => {
+          throw new Error('synthetic outage');
+        },
+      },
+    );
+    expect(payload).toBeUndefined();
+  });
+
+  it('an answer with no usable request field is the reader failing, not "no request" (review of #526)', async () => {
+    for (const answer of [{}, { request: 5 }, { request: true }] as unknown as RequestAnswer[]) {
+      h.submitSimplifiedTicket.mockClear();
+      const named = await sweep(
+        [GREETING, 'CALLER: My name is Owen Lark, I need to move my appointment.', 'AGENT: I can take that.'].join('\n'),
+        { request: answer, heard: { firstName: 'Owen', lastName: 'Lark' } },
+      );
+      expect(named.askRequest).toHaveBeenCalledTimes(1);
+      expect(named.payload?.patientFullName).toBe('Owen Lark');
+      expect(named.payload.additionalDetails).toContain(floor.FLOOR_REQUEST_NOT_CONFIRMED_NOTE);
+
+      h.submitSimplifiedTicket.mockClear();
+      const standIn = await sweep(
+        [GREETING, 'CALLER: I need to move my appointment.', 'AGENT: I can take that.'].join('\n'),
+        { request: answer },
+      );
+      expect(standIn.payload).toBeUndefined();
+    }
+  });
+
+  it('an explicit null request field is the model reading no request, which files nothing named or not', async () => {
+    const { payload } = await sweep(
+      [GREETING, 'CALLER: My name is Owen Lark, never mind.', 'AGENT: All right.'].join('\n'),
+      { request: { request: null }, heard: { firstName: 'Owen', lastName: 'Lark' } },
+    );
+    expect(payload).toBeUndefined();
+  });
 });
 
 describe('v276: a records request is not read', () => {
@@ -384,6 +443,16 @@ describe('v276: a records request is not read', () => {
     expect(askRequest).not.toHaveBeenCalled();
     expect(payload?.departmentId).toBe(MEDICAL_RECORDS_DEPARTMENT_ID);
     expect(payload.additionalDetails).not.toContain(floor.FLOOR_REQUEST_NOT_CONFIRMED_NOTE);
+  });
+
+  it('a records request under a stand-in still files when the reader is down (it is never asked)', async () => {
+    const { payload, askRequest } = await sweep(
+      [GREETING, "CALLER: I'm calling from a doctor's office, we need records for a mutual patient.", 'AGENT: Who is the patient?', 'CALLER: I will have to call back with that.'].join('\n'),
+      { records: true, request: null },
+    );
+    expect(askRequest).not.toHaveBeenCalled();
+    expect(payload?.departmentId).toBe(MEDICAL_RECORDS_DEPARTMENT_ID);
+    expect(payload?.patientFullName).toBe(STAND_IN_FULL_NAME);
   });
 });
 

@@ -49,7 +49,7 @@ vi.mock('./afterHoursCallFacts', async (importOriginal) => ({
 }));
 
 const floor = await import('./afterHoursTeardownFloor');
-const { STAND_IN_FULL_NAME, STAND_IN_NAME_NOTE } = await import('./standInName');
+const { STAND_IN_NAME_NOTE } = await import('./standInName');
 const { HEARD_NAME_NOTE } = await import('../runtime/requestSweep');
 
 const GREETING =
@@ -61,7 +61,8 @@ type Answer = { firstName?: string | null; lastName?: string | null } | null;
  * v276: the floor reads whether a request was made before it files. Every
  * corpus call made one, so by default the request reader answers with one;
  * `reader: 'unavailable'` is the reader that could not run (no key, switched
- * off, a model failure), where the floor files as before so nothing is lost.
+ * off, a model failure), where a named caller files as before, with a note,
+ * and a caller with no name files nothing (review of #526).
  */
 type Reader = 'request' | 'unavailable';
 
@@ -249,12 +250,11 @@ describe('v239: still fails, and correctly refused', () => {
     expect(h.submitSimplifiedTicket).not.toHaveBeenCalled();
   });
 
-  it('VA-85388: with the request reader down, still the stand-in, never the heard name', async () => {
-    const { payload } = await sweep(FILLER, { firstName: 'Pablo', lastName: 'Ortiz' }, { reader: 'unavailable' });
-    expect(payload.patientFullName).toBe(STAND_IN_FULL_NAME);
-    expect(payload.additionalDetails).toContain(STAND_IN_NAME_NOTE);
-    expect(payload.additionalDetails).not.toContain(HEARD_NAME_NOTE);
-    expect(payload.additionalDetails).toContain(floor.FLOOR_REQUEST_NOT_CONFIRMED_NOTE);
+  it('VA-85388: with the request reader down, never the heard name, and nothing under the stand-in', async () => {
+    const { payload, askName } = await sweep(FILLER, { firstName: 'Pablo', lastName: 'Ortiz' }, { reader: 'unavailable' });
+    expect(askName).toHaveBeenCalledTimes(1);
+    expect(payload).toBeUndefined();
+    expect(h.submitSimplifiedTicket).not.toHaveBeenCalled();
   });
 
   it('VA-84172 (CA578334d5580401a6de5c3002f19c8b6a): the caller denied the only name the agent said — never filed under it', async () => {
@@ -263,30 +263,28 @@ describe('v239: still fails, and correctly refused', () => {
     const { payload } = await sweep(DENIED, { firstName: 'Greta', lastName: 'Holm' });
     expect(payload).toBeUndefined();
     const down = await sweep(DENIED, { firstName: 'Greta', lastName: 'Holm' }, { reader: 'unavailable' });
-    expect(down.payload.patientFullName).toBe(STAND_IN_FULL_NAME);
-    expect(down.payload.additionalDetails).toContain(floor.FLOOR_MISSING_IDENTITY_NOTE);
+    expect(down.payload).toBeUndefined();
+    expect(h.submitSimplifiedTicket).not.toHaveBeenCalled();
   });
 
   it('a model that crosses the caller with the patient is refused (the halves were never said together)', async () => {
     expect((await sweep(CROSSED, { firstName: 'Ivy', lastName: 'Vance' })).payload).toBeUndefined();
     const down = await sweep(CROSSED, { firstName: 'Ivy', lastName: 'Vance' }, { reader: 'unavailable' });
-    expect(down.payload.patientFullName).toBe(STAND_IN_FULL_NAME);
+    expect(down.payload).toBeUndefined();
+    expect(h.submitSimplifiedTicket).not.toHaveBeenCalled();
   });
 
-  it('a name model that answers nothing, a half, or throws: not filed when a request was read, the stand-in when the reader is down', async () => {
+  it('a name model that answers nothing, a half, or throws: not filed, whether or not the request reader ran', async () => {
     const t = `${GREETING}\nCALLER: Please have someone call me back about my glasses order.`;
     expect((await sweep(t, null)).payload).toBeUndefined();
     expect((await sweep(t, { firstName: 'Nora', lastName: null })).payload).toBeUndefined();
     expect((await sweep(t, { firstName: 'Nora', lastName: 'Vance' }, { throws: true })).payload).toBeUndefined();
     expect(h.submitSimplifiedTicket).not.toHaveBeenCalled();
 
-    expect((await sweep(t, null, { reader: 'unavailable' })).payload.patientFullName).toBe(STAND_IN_FULL_NAME);
-    h.submitSimplifiedTicket.mockClear();
-    expect((await sweep(t, { firstName: 'Nora', lastName: null }, { reader: 'unavailable' })).payload.patientFullName).toBe(STAND_IN_FULL_NAME);
-    h.submitSimplifiedTicket.mockClear();
-    const thrown = await sweep(t, { firstName: 'Nora', lastName: 'Vance' }, { throws: true, reader: 'unavailable' });
-    expect(thrown.payload.patientFullName).toBe(STAND_IN_FULL_NAME);
-    expect(thrown.payload.additionalDetails).toContain(STAND_IN_NAME_NOTE);
+    expect((await sweep(t, null, { reader: 'unavailable' })).payload).toBeUndefined();
+    expect((await sweep(t, { firstName: 'Nora', lastName: null }, { reader: 'unavailable' })).payload).toBeUndefined();
+    expect((await sweep(t, { firstName: 'Nora', lastName: 'Vance' }, { throws: true, reader: 'unavailable' })).payload).toBeUndefined();
+    expect(h.submitSimplifiedTicket).not.toHaveBeenCalled();
   });
 });
 
