@@ -129,7 +129,10 @@ function LiveCallCard({ call }: { call: CallLog }) {
   // re-reads every 3 seconds behind the login. It used to come from a live
   // route on the old core that answered without one; that route is removed
   // (2026-11-26). The old core writes this lane's timeline to the row at
-  // hangup, so a call still in progress shows its tools once it ends.
+  // hangup, and the call leaves this live list at hangup too, so this card
+  // shows no tools; the call's history row below shows them once it ends.
+  // A live list would need a logged-in route that can read the old core's
+  // memory, which no longer exists (the lane took 1 call in 60 days).
   const toolEvents = call.toolTimeline?.events ?? []
 
   const startedMs = call.startTime ? new Date(call.startTime).getTime() : new Date(call.createdAt).getTime()
@@ -173,7 +176,7 @@ function LiveCallCard({ call }: { call: CallLog }) {
             {toolEvents.length ? (
               <ToolTimeline events={toolEvents} />
             ) : (
-              <p className="text-sm text-muted-foreground">Tool calls are recorded on the call when it ends.</p>
+              <p className="text-sm text-muted-foreground">Tool calls show in the call history below once the call ends.</p>
             )}
           </div>
         </div>
