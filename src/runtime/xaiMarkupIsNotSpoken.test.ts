@@ -1034,6 +1034,7 @@ describe("v275 round 8: what the caller heard decides the goodbye, and a lone \"
     hs.onAudioDone("<");
     await h.finish();
     expect(h.media.length).toBe(mediaBefore);
+    h.echo();
     await stop(h);
     expect(h.agentLines()).toEqual([]);
   });
@@ -1049,6 +1050,7 @@ describe("v275 round 8: what the caller heard decides the goodbye, and a lone \"
     hs.onAudioDone(undefined);
     await h.finish();
     expect(h.media.length).toBe(mediaBefore);
+    h.echo();
     await stop(h);
     expect(h.agentLines()).toEqual([]);
   });
@@ -1086,6 +1088,25 @@ describe("v275 round 8: what the caller heard decides the goodbye, and a lone \"
     await stop(h);
     expect(h.records[0].providerMarkupCuts).toBe(1);
     expect(h.records[0].providerMarkupHeard).toBe(1);
+  });
+
+  it("(e) a line that opens with markup after its first audio was sent is not a goodbye: the turn is asked for", async () => {
+    // A line that opens with the tag plays nothing more once the tag is seen,
+    // so the goodbye inside the repeated segment was never heard whole and
+    // must not end the turn, even when some audio reached Twilio first.
+    const [, q, closing] = LEAD[0];
+    const h = harness();
+    await answeredThenClosing(h, q, closing);
+    const before = h.session.requestResponse.mock.calls.length;
+    await h.respond({
+      deltas: ["<response_segment_0_already_spoken>", GOODBYE, "</response_segment_0_already_spoken>"],
+      done: ECHO_MARKUP,
+      audioFirst: true,
+      tools: [[ANSWERED, { follow_up_owed: false }]],
+    });
+    expect(h.session.requestResponse.mock.calls.length).toBe(before + 1);
+    await stop(h);
+    expect(h.records[0].goodbyeGraceHangup).not.toBe(true);
   });
 });
 

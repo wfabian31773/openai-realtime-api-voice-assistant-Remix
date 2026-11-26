@@ -2306,9 +2306,11 @@ export class VoiceCallBridge {
     // plays its audio whole, so the words after its tag count too, and a
     // question or a tool written out after the goodbye means it was not one
     // (#524 review, round 8). The stored line keeps the cut (`text`).
+    // A line that opens with markup sent none of its audio, so nothing was
+    // heard; a lone "<" that never resolved set `audioOff` above.
     const heardSource = done.heardText ?? wire;
     const heard =
-      done.audioOff || unresolvedPrefix
+      done.audioOff
         ? ""
         : providerMarkupIndex(heardSource) >= 0
           ? withoutAnyProviderMarkup(heardSource)
