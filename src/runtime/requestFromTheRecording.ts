@@ -529,13 +529,14 @@ export async function requestFromTheRecording(
  * or the model failing), because the after-hours floor files nothing on the
  * first and must not lose a request on the second.
  *
- * `request` means the model read one. A sentence fit for a ticket comes with
- * it when the first answer, or the one retry a content check earns (v241),
- * passes every check; a request whose sentence carried a name, a number or an
- * address is still a request, so it comes back with no sentence. A correct
- * drop (the model says nothing was asked, the placeholder, no topic) is
- * `none`. Never throws; the log lines name the call and the kind, never what
- * the sentence said.
+ * `request` means the model read one, and always comes with a sentence fit
+ * for a ticket: the first answer, or the one retry a content check earns
+ * (v241), passed every check. A correct drop on the first answer (the model
+ * says nothing was asked, the placeholder, no topic) is `none`. On the retry
+ * only an explicit null is `none` (v277, operator, 2026-11-26, "Only null
+ * retracts"); any other failing second answer is `unavailable`, an
+ * unconfirmed request. Never throws; the log lines name the call and the
+ * kind, never what the sentence said.
  */
 export type RequestReading =
   | { kind: "request"; sentence?: string }
@@ -589,29 +590,32 @@ export async function readTheRequest(
   console.warn(`[REQUEST FROM RECORDING] the model's sentence failed a check (${checked.kind}) — asking once more${where}`);
   const second = await askOnce(ask, transcript, { previous: first, leaveOut: LEAVE_OUT[checked.kind] }, where);
   // v276 (review of #526): the model answering the retry with an explicit null
-  // takes the request back once what it was told to leave out is gone.
+  // takes the request back once what it was told to leave out is gone. v277
+  // (operator, 2026-11-26, "Only null retracts"): that is the only retry that
+  // means no request.
   if (second.kind === "none") return { kind: "none" };
   // v277 (review of #532): a retry the model failed to answer, or answered
   // with no words, settles nothing; the first answer was refused, so neither
   // established a request. The floor files a named caller with its
   // request-not-confirmed note and files nothing under the stand-in.
   if (second.kind === "failed") return { kind: "unavailable" };
-  if (second.kind === "sentence") {
-    const again = checkRequest(second.text, heldNames);
-    if ("sentence" in again) {
-      console.info(`[REQUEST FROM RECORDING] the second answer was used${where}`);
-      return { kind: "request", sentence: again.sentence };
-    }
-    // v276, review of #526: a second answer that says nothing was asked, is
-    // the placeholder, or names no topic ("Wants to speak with someone.") is
-    // the model taking the request back once the held name is out of it, so
-    // the call carries no request.
-    if (!RETRYABLE_KINDS.has(again.kind)) {
-      console.info(`[REQUEST FROM RECORDING] the second answer names no request (${again.kind})${where}`);
-      return { kind: "none" };
-    }
-    console.warn(`[REQUEST FROM RECORDING] the second answer failed a check too (${again.kind})${where}`);
+  const again = checkRequest(second.text, heldNames);
+  if ("sentence" in again) {
+    console.info(`[REQUEST FROM RECORDING] the second answer was used${where}`);
+    return { kind: "request", sentence: again.sentence };
   }
-  // Both answers named a request; only their wording was unusable.
-  return { kind: "request" };
+  // v277 (operator, 2026-11-26, "Only null retracts"): any other failing
+  // second answer, one that reads as no request ("Wants to speak with
+  // someone.", "not provided") or fails a content check again, settles
+  // nothing. The first answer was refused too, so the request is unconfirmed:
+  // the floor files a named caller with its note and nothing under the
+  // stand-in.
+  if (!RETRYABLE_KINDS.has(again.kind)) {
+    console.info(
+      `[REQUEST FROM RECORDING] the second answer reads as no request (${again.kind}) — only a null retracts, so the request is unconfirmed${where}`,
+    );
+  } else {
+    console.warn(`[REQUEST FROM RECORDING] the second answer failed a check too (${again.kind}) — the request is unconfirmed${where}`);
+  }
+  return { kind: "unavailable" };
 }

@@ -303,7 +303,7 @@ describe('v276: a request read from the recording files only under a name', () =
     expect(payload?.patientFullName).toBe('Mara Quill');
   });
 
-  it("the heard name is held when the request is read, and a retry that names no topic is no request (review of #526)", async () => {
+  it("the heard name is held when the request is read, and a retry that names no topic files only as unconfirmed (operator, \"Only null retracts\")", async () => {
     const answers: RequestAnswer[] = [
       { request: 'Wants to speak with Mara Quill.' },
       { request: 'Wants to speak with someone.' },
@@ -312,8 +312,56 @@ describe('v276: a request read from the recording files only under a name', () =
       [GREETING, 'CALLER: My name is Mara Quill, I just want to talk to someone.', 'AGENT: I can take a message.'].join('\n'),
       { request: async () => answers.shift() ?? null, heard: { firstName: 'Mara', lastName: 'Quill' } },
     );
+    // The heard name is held, so the first answer is refused and asked again.
+    expect(askRequest).toHaveBeenCalledTimes(2);
+    // Only an explicit null retracts: a named caller files, with the note.
+    expect(payload?.patientFullName).toBe('Mara Quill');
+    expect(payload.additionalDetails).toContain(floor.FLOOR_REQUEST_NOT_CONFIRMED_NOTE);
+  });
+
+  it('a retry that names no topic files nothing under the stand-in (operator, "Only null retracts")', async () => {
+    const answers: RequestAnswer[] = [
+      { request: 'Wants to speak with someone on March 3.' },
+      { request: 'Wants to speak with someone.' },
+    ];
+    const { payload, askRequest } = await sweep(
+      [GREETING, 'CALLER: I just want to talk to someone about March third.', 'AGENT: I can take a message.'].join('\n'),
+      { request: async () => answers.shift() ?? null },
+    );
     expect(askRequest).toHaveBeenCalledTimes(2);
     expect(payload).toBeUndefined();
+  });
+
+  it('a retry that reads as saying nothing was asked files a named caller with the note, and no stand-in (review of #532, Codex P1)', async () => {
+    let calls = 0;
+    const notProvidedOnRetry = async (): Promise<RequestAnswer> => {
+      calls += 1;
+      return calls % 2 === 1
+        ? { request: 'Wants a refill for Owen Lark.' }
+        : { request: 'Asking why the prescription was not provided.' };
+    };
+    const named = await sweep(
+      [GREETING, 'CALLER: My name is Owen Lark, my pharmacy says my prescription was never sent.', 'AGENT: I will pass that on.'].join('\n'),
+      { request: notProvidedOnRetry, heard: { firstName: 'Owen', lastName: 'Lark' } },
+    );
+    expect(named.askRequest).toHaveBeenCalledTimes(2);
+    expect(named.payload?.patientFullName).toBe('Owen Lark');
+    expect(named.payload.additionalDetails).toContain(floor.FLOOR_REQUEST_NOT_CONFIRMED_NOTE);
+
+    h.submitSimplifiedTicket.mockClear();
+    const standIn = await sweep(
+      [GREETING, 'CALLER: My pharmacy says my prescription was never sent on March third.', 'AGENT: I will pass that on.'].join('\n'),
+      {
+        request: async () => {
+          calls += 1;
+          return calls % 2 === 1
+            ? { request: 'Wants a refill sent on March 3.' }
+            : { request: 'Asking why the prescription was not provided.' };
+        },
+      },
+    );
+    expect(standIn.askRequest).toHaveBeenCalledTimes(2);
+    expect(standIn.payload).toBeUndefined();
   });
 
   it('the heard name is held, and a retry that states a request files under it (the control)', async () => {
@@ -400,13 +448,14 @@ describe('v276: a request read from the recording files only under a name', () =
     expect(standIn.payload).toBeUndefined();
   });
 
-  it('two answers that both fail a content check still read as a request (files under a name, not under a stand-in)', async () => {
+  it('two answers that both fail a content check file as unconfirmed (under a name with the note, not under a stand-in)', async () => {
     const named = await sweep(
       [GREETING, 'CALLER: My name is Owen Lark, I need to talk to Dr. Lin about my drops.', 'AGENT: I will pass that on.'].join('\n'),
       { request: { request: 'Wants to talk to Dr. Lin.' }, heard: { firstName: 'Owen', lastName: 'Lark' } },
     );
     expect(named.askRequest).toHaveBeenCalledTimes(2);
     expect(named.payload?.patientFullName).toBe('Owen Lark');
+    expect(named.payload.additionalDetails).toContain(floor.FLOOR_REQUEST_NOT_CONFIRMED_NOTE);
 
     h.submitSimplifiedTicket.mockClear();
     const standIn = await sweep(

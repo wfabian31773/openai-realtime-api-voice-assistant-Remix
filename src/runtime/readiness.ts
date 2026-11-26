@@ -2278,8 +2278,18 @@ import { callEnvironment } from "./callRecord";
  * running, none deleted. Written as v277; renumbered when #532 took v277 on
  * main. Above v277 (#532, `5183de93`). No migration.
  */
+/*
+ * v279 (2026-11-26): on the floor's retry, only an explicit null is no
+ * request. Operator, 2026-11-26, "Only null retracts": a second answer that
+ * names no topic, reads as nothing asked, is the placeholder or fails a
+ * content check again is the reader unsure (unavailable), so a named caller
+ * files with FLOOR_REQUEST_NOT_CONFIRMED_NOTE and the stand-in files nothing.
+ * Before, the first three filed nothing for a real request and the last filed
+ * as confirmed with no note. Pushed to #532's branch 17 minutes after #532
+ * merged, so it ships here. Above v278 (#531, `5e411d95`). No migration.
+ */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v278-campaign-controls-stop-a-runtime-campaign-20261126";
+  "voice-runtime-v279-only-a-null-retracts-on-the-retry-20261126";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can
