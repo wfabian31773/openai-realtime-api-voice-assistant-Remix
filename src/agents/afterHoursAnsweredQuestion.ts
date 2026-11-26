@@ -16,6 +16,10 @@
  * refusal stays on the timeline, so `answeredWithoutTicket` no longer reads
  * the call as answered and the floor files it if the caller hangs up first.
  * An omitted answer records the call as answered, as before.
+ *
+ * v275: an answered result declares `nothing_to_say`, so after the agent's
+ * goodbye the bridge asks for no further turn and the call ends on the
+ * goodbye grace.
  */
 
 export const FOLLOW_UP_OWED_DESCRIPTION =
@@ -28,5 +32,9 @@ export function answeredQuestionResult(followUpOwed: boolean | undefined): Recor
   if (followUpOwed === true) {
     return { success: false, ticketCreated: false, refused: 'follow_up_owed', fix: FOLLOW_UP_OWED_FIX };
   }
-  return { success: true, ticketCreated: false, callbackRequired: false };
+  // v275: a fully answered question leaves nothing to say: the answer was
+  // already spoken before this was recorded. Asking the model for a turn after
+  // its goodbye is what drew xAI markup in place of words (see
+  // `declaresNothingToSay`, mediaStreamBridge.ts).
+  return { success: true, ticketCreated: false, callbackRequired: false, nothing_to_say: true };
 }

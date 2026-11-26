@@ -88,3 +88,34 @@ describe("goodbye matcher cost (Codex P2, #396)", () => {
     expect(Date.now() - started).toBeLessThan(200);
   });
 });
+
+describe("v275: the after-hours line's own closing is a sign-off", () => {
+  it.each(["Great, have a good day!", "Perfect, have a great day!", "Sounds good. Have a great day.", "Good, take care.", "Great, have a good day, Irene!"])(
+    "%s", (text) => {
+      expect(isAgentSignOff(text)).toBe(true);
+      expect(completesGoodbye(text, "done")).toBe(true);
+    },
+  );
+
+  it.each(["Great.", "Perfect!", "Sounds good.", "Great, what is your date of birth?", "Great, I'll file that now."])(
+    "an opener with no farewell beside it is not one: %s", (text) => expect(isAgentSignOff(text)).toBe(false),
+  );
+
+  it.each(["Great.", "Perfect!", "Good.", "Sounds good."])(
+    "an opener alone does not answer a caller's goodbye either: %s", (text) => {
+      // P2 on #524: the openers were added where they also made a whole reply.
+      expect(completesGoodbye(text, "farewell")).toBe(false);
+    },
+  );
+
+  it("the replies that answered a caller's goodbye before still do", () => {
+    expect(completesGoodbye("You're welcome.", "farewell")).toBe(true);
+    expect(completesGoodbye("Okay.", "farewell")).toBe(true);
+    expect(completesGoodbye("Great, take care.", "farewell")).toBe(true);
+  });
+
+  it("the new openers are agent words only: a caller's \"Great.\" is not a closing", () => {
+    expect(callerConclusion("Great.", "Is there anything else I can help you with?")).toBeNull();
+    expect(callerConclusion("Perfect.", "Your request is filed.")).toBeNull();
+  });
+});

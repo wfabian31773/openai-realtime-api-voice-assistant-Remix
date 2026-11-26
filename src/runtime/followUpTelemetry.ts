@@ -60,6 +60,8 @@ export function followUpEvent(
     | "goodbyeGraceHangup"
     | "mediaGapHangup"
     | "filedSilenceHangup"
+    | "providerMarkupCuts"
+    | "providerMarkupHeard"
   >,
 ): FollowUpEvent | null {
   const f = record.followUps;
@@ -71,7 +73,8 @@ export function followUpEvent(
     nudges === 0 &&
     !record.goodbyeGraceHangup &&
     !record.mediaGapHangup &&
-    !record.filedSilenceHangup
+    !record.filedSilenceHangup &&
+    (record.providerMarkupCuts ?? 0) === 0
   )
     return null;
   const suspicious =
@@ -124,6 +127,13 @@ export function followUpEvent(
       // minutes and the call was ended with a sign-off. Also readable as
       // `runtime_outcome = 'filed_silence'`.
       filedSilenceHangup: record.filedSilenceHangup === true,
+      // v275: follow-ups not requested because the agent had just said a
+      // goodbye and the tool answer had nothing for the caller; and agent
+      // utterances cut where provider markup began.
+      skippedAfterGoodbye: f?.skippedAfterGoodbye ?? 0,
+      providerMarkupCuts: record.providerMarkupCuts ?? 0,
+      // ...and of those, markup found only after its audio had been sent.
+      providerMarkupHeard: record.providerMarkupHeard ?? 0,
       outcome: record.outcome,
     },
   };

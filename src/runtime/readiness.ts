@@ -2240,7 +2240,7 @@ import { callEnvironment } from "./callRecord";
  * v263's rule. Above main's v273 (#522, `f89bc66d`). No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v274-a-reconnect-stops-on-a-quick-redrop-20261126";
+  "voice-runtime-v275-no-turn-after-a-goodbye-and-no-xai-markup-20261126";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

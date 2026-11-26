@@ -241,14 +241,14 @@ describe('the model says something is owed: the call is not answered, and the fl
 describe('the model says nothing is owed: the call is answered, as before', () => {
   it.each(ANSWERED)('$sid: $shape', async ({ transcript }) => {
     const { result, answered, filed } = await recordThenHangUp(transcript, { follow_up_owed: false });
-    expect(result).toEqual({ success: true, ticketCreated: false, callbackRequired: false });
+    expect(result).toEqual({ success: true, ticketCreated: false, callbackRequired: false, nothing_to_say: true });
     expect(answered).toBe(true);
     expect(filed).toBe(0);
   });
 
   it('an omitted answer records the call as answered, as before v267', async () => {
     const { result, answered, filed } = await recordThenHangUp(ANSWERED[0].transcript, {});
-    expect(result).toEqual({ success: true, ticketCreated: false, callbackRequired: false });
+    expect(result).toEqual({ success: true, ticketCreated: false, callbackRequired: false, nothing_to_say: true });
     expect(answered).toBe(true);
     expect(filed).toBe(0);
   });
