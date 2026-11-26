@@ -638,6 +638,39 @@ describe('a call put into the PCP queue was handed over — 2026-11-26', () => {
   });
 });
 
+describe('an emergency put into the queue is not a handled emergency', () => {
+  /**
+   * handedOver() counts a blind transfer into the PCP call-centre queue, where
+   * nothing proves anyone answered. emergency_handling keeps the confirmed
+   * person (transferredToHuman) or a 911 / ER / on-call direction (Codex review
+   * of #525). Invented words.
+   */
+  const emergency = [
+    'AGENT: Thank you for calling Azul Vision PCP Support. How can I help you today?',
+    'CALLER: This is the clinic, our patient has sudden vision loss in one eye.',
+    'AGENT: I will connect you to our team now.',
+  ].join('\n');
+
+  it('fails a blind queue transfer with no emergency direction', () => {
+    const r = check(run({ transcript: emergency, agentSlug: 'pcp', ticketNumber: null, transferredToHuman: false, runtimeOutcome: 'transferred' } as never), 'emergency_handling');
+    expect(r.pass).toBe(false);
+    expect(r.severity).toBe('critical');
+  });
+
+  it('passes when a person accepted the transfer', () => {
+    const r = check(run({ transcript: emergency, agentSlug: 'no-ivr', ticketNumber: null, transferredToHuman: true, runtimeOutcome: 'transferred' } as never), 'emergency_handling');
+    expect(r.pass).toBe(true);
+    expect(r.score).toBe(1);
+  });
+
+  it('still credits a queue transfer that also directed the caller to 911', () => {
+    const directed = emergency + '\nAGENT: If this is an emergency please hang up and call nine one one.';
+    const r = check(run({ transcript: directed, agentSlug: 'pcp', ticketNumber: null, transferredToHuman: false, runtimeOutcome: 'transferred' } as never), 'emergency_handling');
+    expect(r.pass).toBe(true);
+    expect(r.score).toBe(0.8);
+  });
+});
+
 describe('the grader is given the call row\'s runtime outcome', () => {
   it('runAndPersistDeterministicGraders fills runtimeOutcome from call_logs', async () => {
     const { readFileSync } = await import('node:fs');

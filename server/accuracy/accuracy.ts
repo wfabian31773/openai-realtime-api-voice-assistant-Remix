@@ -28,8 +28,51 @@ export const ACCURACY_API = '/api/observatory/accuracy';
 const RETENTION_DAYS = 90;
 const SCHEDULE_MS = 60 * 60_000;
 /** pg_try_advisory_lock key: hashtext('accuracy_check_run'), fixed so every process agrees. */
-const LOCK_SQL = `SELECT pg_try_advisory_lock(hashtext('accuracy_check_run')) AS got`;
-const UNLOCK_SQL = `SELECT pg_advisory_unlock(hashtext('accuracy_check_run'))`;
+export const LOCK_SQL = `SELECT pg_try_advisory_lock(hashtext('accuracy_check_run')) AS got`;
+export const UNLOCK_SQL = `SELECT pg_advisory_unlock(hashtext('accuracy_check_run'))`;
+
+/** A pool the lock can be taken on: one checked-out connection holds it. */
+export interface LockablePool extends Queryable {
+  connect(): Promise<Queryable & { release(destroy?: boolean | Error): void }>;
+}
+
+/**
+ * One hourly run under the session advisory lock. The lock belongs to a
+ * database SESSION, so taking it and releasing it through the pool could land
+ * on two different connections: the lock would stay held on the first, and
+ * every later run would skip. Both statements run on one checked-out
+ * connection; if the unlock fails, that connection is destroyed rather than
+ * returned, which ends the session and so releases the lock.
+ */
+export async function runUnderLock(pool: LockablePool, run: () => Promise<unknown>): Promise<boolean> {
+  let client: Awaited<ReturnType<LockablePool['connect']>>;
+  try {
+    client = await pool.connect();
+  } catch (err) {
+    console.warn(`[ACCURACY] hourly run skipped, no database connection: ${safeError(err)}`);
+    return false;
+  }
+  let got = false;
+  let destroy = false;
+  try {
+    got = (await client.query(LOCK_SQL)).rows[0]?.got === true;
+    if (!got) return false;
+    await run();
+    return true;
+  } catch (err) {
+    console.warn(`[ACCURACY] hourly run failed: ${safeError(err)}`);
+    return false;
+  } finally {
+    if (got) {
+      try {
+        await client.query(UNLOCK_SQL);
+      } catch {
+        destroy = true;
+      }
+    }
+    client.release(destroy || undefined);
+  }
+}
 
 export const CREATE_TABLE_SQL = `
 CREATE TABLE IF NOT EXISTS accuracy_check_results (
@@ -157,7 +200,7 @@ export async function withHistory(q: Queryable, report: AccuracyReport): Promise
 export interface AccuracyMountDeps {
   authenticate: RequestHandler;
   /** The Hub pool (the app's own database), read live per request. */
-  hub: () => Queryable;
+  hub: () => LockablePool;
   /** Everything the checks read; built per run so pools that fail over are re-read. */
   checkDeps: () => AccuracyDeps;
   env: NodeJS.ProcessEnv;
@@ -204,18 +247,7 @@ export function mountAccuracyCheck(app: Express, deps: AccuracyMountDeps) {
         return () => {};
       }
       const tick = async () => {
-        const q = deps.hub();
-        let got = false;
-        try {
-          const lock = await q.query(LOCK_SQL);
-          got = lock.rows[0]?.got === true;
-          if (!got) return;
-          await runner.report(true);
-        } catch (err) {
-          console.warn(`[ACCURACY] hourly run failed: ${safeError(err)}`);
-        } finally {
-          if (got) await q.query(UNLOCK_SQL).catch(() => {});
-        }
+        await runUnderLock(deps.hub(), () => runner.report(true));
       };
       console.log('[ACCURACY] hourly run on: every screen number read twice, results in accuracy_check_results');
       const first = setTimeout(() => void tick(), 2 * 60_000);

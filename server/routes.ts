@@ -1791,14 +1791,8 @@ export async function registerRoutes(app: Express): Promise<Server> {
 
       const normalized = urgentCalls.map((c) => ({ ...normalizeCallLog(c), ...urgentFields(c) }));
 
-      function csvEscape(val: unknown): string {
-        if (val === null || val === undefined) return '';
-        const str = String(val);
-        if (str.includes(',') || str.includes('"') || str.includes('\n')) {
-          return '"' + str.replace(/"/g, '""') + '"';
-        }
-        return str;
-      }
+      // A cell a spreadsheet could run as a formula is written as text (csvCell.ts).
+      const { csvCell: csvEscape } = await import('./csvCell');
 
       function formatDurationCsv(seconds: unknown): string {
         if (!seconds) return '';
