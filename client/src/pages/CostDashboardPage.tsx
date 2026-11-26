@@ -49,6 +49,8 @@ interface OpenAIUsage {
 
 interface GrokUsage {
   tableExists: boolean
+  /** Per UTC day, runtime calls and how many are unreconciled; absent on an older server. */
+  callDays?: Array<{ day: string; calls: number; unreconciledCalls: number }>
   publishedCentsPerMinute: number
   days: Array<{
     day: string
@@ -212,9 +214,7 @@ export function CostDashboardPage() {
 
   // Which days are xAI's own figure and which are still the estimate, so no
   // total on this page presents an estimate as the bill.
-  const grokSummary = grokUsage?.tableExists
-    ? summarizeGrokCosts(grokUsage.days, getOpenAIDateParams().endDate)
-    : null
+  const grokSummary = grokUsage ? summarizeGrokCosts(grokUsage.days, grokUsage.callDays ?? []) : null
   const estimateNote = grokSummary ? headlineEstimateNote(grokSummary) : null
 
   const formatCurrency = (cents: number) => {
@@ -642,8 +642,8 @@ export function CostDashboardPage() {
                     <th className="py-2 pr-3 text-right">Minutes</th>
                     <th className="py-2 pr-3 text-right">xAI voice</th>
                     <th className="py-2 pr-3 text-right">Booked</th>
-                    <th className="py-2 pr-3 text-right" title="xAI's reported voice spend minus what the call rows carry, on a day that did not reconcile">Gap</th>
                     <th className="py-2 pr-3 text-right">¢/min</th>
+                    <th className="py-2 pr-3 text-right" title="xAI's reported voice spend minus what the call rows carry, on a day that did not reconcile">Gap</th>
                     <th className="py-2">Status</th>
                   </tr>
                 </thead>

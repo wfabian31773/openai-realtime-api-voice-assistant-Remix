@@ -20,6 +20,13 @@ export interface GrokDayRow {
   bookedDollars: number | null
 }
 
+/** Per UTC day, the runtime calls and how many still carry no reconciliation (from the call rows). */
+export interface GrokCallDay {
+  day: string
+  calls: number
+  unreconciledCalls: number
+}
+
 export type DayCostStatus =
   | { kind: 'reconciled' }
   /** Refused: the call rows carry the estimate. `gapDollars` is xAI minus booked. */
@@ -46,20 +53,17 @@ export interface GrokCostSummary {
   /** Estimated days whose xAI figure is not known, so the gap leaves them out. */
   estimatedDaysWithoutXai: number
   /**
-   * Days in the range with no row yet: from the first row on, up to the end of
-   * the range. The reconciler settles the previous UTC day, so today and
-   * usually yesterday are here; an older day here means it never ran.
+   * Days with runtime calls still unreconciled and no row in the day table.
+   * The reconciler settles the previous UTC day, so today is always here and
+   * yesterday usually is; an older day here means it never ran. Read from the
+   * call rows, so a range with calls and no day rows at all still shows, and
+   * a day before the table existed whose calls were reconciled one by one
+   * (2026-09-03..15, 0 unreconciled) does not.
    */
   notYetDays: string[]
 }
 
-const nextDay = (day: string) => {
-  const d = new Date(`${day}T00:00:00Z`)
-  d.setUTCDate(d.getUTCDate() + 1)
-  return d.toISOString().slice(0, 10)
-}
-
-export function summarizeGrokCosts(days: GrokDayRow[], endDate: string): GrokCostSummary {
+export function summarizeGrokCosts(days: GrokDayRow[], callDays: GrokCallDay[]): GrokCostSummary {
   let reconciledDays = 0
   let gapCents = 0
   let withoutXai = 0
@@ -74,14 +78,11 @@ export function summarizeGrokCosts(days: GrokDayRow[], endDate: string): GrokCos
     if (s.kind === 'estimated' && s.gapDollars != null) gapCents += cents(s.gapDollars)
     else withoutXai += 1
   }
-  const notYetDays: string[] = []
-  if (days.length > 0) {
-    const have = new Set(days.map((d) => d.day))
-    const first = [...have].sort()[0]
-    for (let day = first; day <= endDate; day = nextDay(day)) {
-      if (!have.has(day)) notYetDays.push(day)
-    }
-  }
+  const have = new Set(days.map((d) => d.day))
+  const notYetDays = callDays
+    .filter((c) => c.unreconciledCalls > 0 && !have.has(c.day))
+    .map((c) => c.day)
+    .sort()
   return { reconciledDays, estimatedDays, gapDollars: gapCents / 100, estimatedDaysWithoutXai: withoutXai, notYetDays }
 }
 
@@ -100,7 +101,7 @@ export function headlineEstimateNote(s: GrokCostSummary): string | null {
   }
   if (s.notYetDays.length > 0) {
     const n = s.notYetDays.length
-    parts.push(`${n} day${n === 1 ? '' : 's'} not settled yet (each UTC day is settled the night after)`)
+    parts.push(`${n} day${n === 1 ? '' : 's'} with calls not yet settled against xAI's bill (each UTC day is settled the night after)`)
   }
   return parts.length > 0 ? `Voice AI includes ${parts.join(', and ')}.` : null
 }

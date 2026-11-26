@@ -2684,8 +2684,32 @@ export async function registerRoutes(app: Express): Promise<Server> {
       } catch {
         tableExists = false;
       }
+      // Per UTC day, the runtime calls and how many still carry no
+      // reconciliation, read from the call rows themselves: a day with no row
+      // in the day table (today, or a day the reconciler never reached) is
+      // still an estimate, and a day before the table existed whose calls were
+      // reconciled one by one is not.
+      let callDays: Array<{ day: string; calls: number; unreconciledCalls: number }> = [];
+      try {
+        const r = await db.execute(sql`
+          SELECT created_at::date::text AS day, count(*)::int AS calls,
+                 count(*) FILTER (WHERE cost_reconciled_at IS NULL)::int AS unreconciled
+          FROM call_logs
+          WHERE voice_provider = 'grok'
+            AND created_at >= ${startDate}::date AND created_at < (${endDate}::date + 1)
+          GROUP BY 1 ORDER BY 1
+        `);
+        callDays = (((r as any).rows ?? r) as any[]).map((c) => ({
+          day: c.day,
+          calls: Number(c.calls),
+          unreconciledCalls: Number(c.unreconciled),
+        }));
+      } catch (err) {
+        console.warn('[grok-usage] could not read the per-day call counts:', err instanceof Error ? err.message : err);
+      }
       res.json({
         tableExists,
+        callDays,
         // The published rate the estimate uses, so the page can say how far a
         // day's derived rate sits from it without a second copy of the number.
         publishedCentsPerMinute: 8,
