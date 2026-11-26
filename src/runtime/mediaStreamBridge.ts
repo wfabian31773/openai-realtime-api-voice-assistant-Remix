@@ -1735,15 +1735,11 @@ export class VoiceCallBridge {
       current.text = current.text.slice(0, at);
       // The words before the tag are still the agent's and are still checked.
       if (current.text.trim()) this.checkGuardrails(current);
-      if (!current.text.trim()) {
-        current.audioOff = true;
-        // Audio held while the opening was "<" (below) was the markup's.
-        current.heldAudio = undefined;
-      }
+      // Audio held while the line was only "<" (below) stays unsent: a held
+      // line has no words before its tag, so it is cut here, and audioOff
+      // drops whatever was held (handleAudioDelta reads it first).
+      if (!current.text.trim()) current.audioOff = true;
       this.muteForMarkup(current, "stream");
-      // A line can only be held while it is nothing but the opening of a
-      // tag, so this never runs; it keeps the words' audio if it ever does.
-      this.releaseHeldAudio(current);
       return;
     }
     // A line whose text so far is only "<" (or "</") may be the start of a tag

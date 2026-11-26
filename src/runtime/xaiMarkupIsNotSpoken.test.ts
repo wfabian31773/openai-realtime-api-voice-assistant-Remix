@@ -762,12 +762,13 @@ describe("FIX 2: provider markup is not played or recorded", () => {
       const mediaBefore = h.media.length;
       hs.onAgentTranscriptDelta("<");
       hs.onAudioDelta(chunk("a"));
-      hs.onAgentTranscriptDelta("3 minutes away.");
-      expect(h.media.slice(mediaBefore)).toEqual([chunk("a")]);
       hs.onAudioDelta(chunk("b"));
+      hs.onAgentTranscriptDelta("3 minutes away.");
+      expect(h.media.slice(mediaBefore)).toEqual([chunk("a"), chunk("b")]);
+      hs.onAudioDelta(chunk("c"));
       hs.onAudioDone("<3 minutes away.");
       await h.finish();
-      expect(h.media.slice(mediaBefore)).toEqual([chunk("a"), chunk("b")]);
+      expect(h.media.slice(mediaBefore)).toEqual([chunk("a"), chunk("b"), chunk("c")]);
     });
 
     it("held audio is dropped when the completed transcript opens with markup", async () => {
