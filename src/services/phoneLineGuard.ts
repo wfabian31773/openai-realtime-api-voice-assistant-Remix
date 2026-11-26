@@ -27,12 +27,15 @@
  * a preview and a confirmation, is a separate decision left to him.
  *
  * `updatePhoneEndpointWebhook` (the admin-only update-webhook route, which
- * writes a URL the caller gives, and which no page calls) keeps working for
- * a number the runtime does not answer, and refuses any Twilio write on one
- * it does. The first version allowed a move to another `/voice/<lane>` URL;
- * three Codex rounds on #528 each found a destination that check let
- * through (a suffix, another host, a mistyped lane), so the dashboard no
- * longer repoints a runtime number at all.
+ * writes a URL the caller gives, and which no page or script calls) writes
+ * to Twilio only when the number has no Voice URL. Four Codex rounds on #528
+ * each found a URL that this module's copy of the server's routing read
+ * differently from the real router (a longer path, another host, a mistyped
+ * lane, a percent-encoded lane, a slash or case variant of the operator
+ * line's path). So no write decision rests on that copy any more: a number
+ * that has a Voice URL is not overwritten from the dashboard, whatever it
+ * points at. `classifyVoiceUrl` only words the refusal (and says whether
+ * the number has a Voice URL at all).
  */
 
 /** What a Voice URL is answered by. */
@@ -53,21 +56,24 @@ export interface VoiceUrlClass {
   lane?: string;
 }
 
-/** The operator line's inbound webhooks live under `/api/voice` but are
- * served by the runtime (server/index.ts lets them past the proxy). */
-const RUNTIME_PATHS_UNDER_API_VOICE = new Set([
-  '/api/voice/operator-line/inbound',
-]);
+/** The operator line's inbound webhook lives under `/api/voice` but is
+ * served by the runtime: server/index.ts lets this exact path past the proxy
+ * (case-sensitive, no trailing slash), so it is compared the same way. */
+const OPERATOR_INBOUND_PATH = '/api/voice/operator-line/inbound';
 
-function pathOf(url: string): string | null {
+function rawPathOf(url: string): string | null {
   try {
-    // Express matches routes case-insensitively and accepts ONE optional
-    // trailing slash (`/voice/records/` routes, `/voice/records//` does not;
-    // checked on Express 5), so the classification does the same.
-    return new URL(url).pathname.toLowerCase().replace(/\/$/, '') || '/';
+    return new URL(url).pathname;
   } catch {
     return null;
   }
+}
+
+/** Express matches `/voice/:slug` case-insensitively and accepts ONE optional
+ * trailing slash (`/voice/records/` routes, `/voice/records//` does not;
+ * checked on Express 5). */
+function foldedPath(raw: string): string {
+  return raw.toLowerCase().replace(/\/$/, '') || '/';
 }
 
 /** Single-segment `/voice/<x>` paths the runtime mounts that are not a
@@ -79,32 +85,28 @@ const NOT_A_LANE = new Set(['health', 'outbound', 'stream']);
  * The lane a number's Voice URL reaches on the runtime, or null. Only
  * `POST /voice/:slug` (one segment) and the operator line's inbound webhook
  * take a new call; `/voice/<slug>/after`, the outbound dialler's callbacks
- * and anything longer are continuations or 404s. Codex on #528: a loose
- * match let a runtime number be moved to `/voice/records/incoming` (P1), and
- * read a broken `/voice/records/typo` as a working line an admin could not
- * repair (P2).
+ * and anything longer are continuations or 404s.
  *
- * Used only to read what a number points at NOW, never to approve a write,
- * so the slug is not checked against the registered lanes and the host is
- * not read: a number on any `/voice/<slug>` is treated as a runtime line and
- * protected.
+ * This words a refusal; it decides nothing. It does not decode a
+ * percent-encoded lane, check the slug against the registered lanes, or read
+ * the host, and none of that can move a line, because a number with a Voice
+ * URL is refused whatever this answers.
  */
-function runtimeLaneOf(path: string): string | null {
-  if (RUNTIME_PATHS_UNDER_API_VOICE.has(path)) return 'operator-line';
-  const lane = /^\/voice\/([a-z0-9][a-z0-9-]*)$/.exec(path);
+function runtimeLaneOf(raw: string): string | null {
+  if (raw === OPERATOR_INBOUND_PATH) return 'operator-line';
+  const lane = /^\/voice\/([a-z0-9][a-z0-9-]*)$/.exec(foldedPath(raw));
   return lane && !NOT_A_LANE.has(lane[1]) ? lane[1] : null;
 }
 
-/** Classify a Voice URL by its path. The host is deliberately not read: a
- * number pointed at the runtime on a workspace host is still a runtime line,
- * and moving it to the old core is still moving it to the retired pipeline. */
+/** Say what answers a Voice URL, by its path, for the refusal's wording. */
 export function classifyVoiceUrl(url: string | null | undefined): VoiceUrlClass {
   const trimmed = (url ?? '').trim();
   if (!trimmed) return { kind: 'none' };
-  const path = pathOf(trimmed);
-  if (path === null) return { kind: 'other' };
-  const lane = runtimeLaneOf(path);
+  const raw = rawPathOf(trimmed);
+  if (raw === null) return { kind: 'other' };
+  const lane = runtimeLaneOf(raw);
   if (lane) return { kind: 'runtime', lane };
+  const path = foldedPath(raw);
   if (path === '/api/voice' || path.startsWith('/api/voice/')) return { kind: 'retired' };
   return { kind: 'other' };
 }
@@ -210,8 +212,9 @@ export function configureForAgentRefusal(
 }
 
 /**
- * For a write of a URL the caller chose (update-webhook): a number answered
- * by the runtime is never repointed from the dashboard, whatever the target.
+ * For a write of a URL the caller chose (update-webhook): the dashboard
+ * writes a Voice URL only onto a number that has none. A number that answers
+ * calls, or points at a broken URL, is repointed in the Twilio console.
  * Returns null when the write may go ahead.
  */
 export function webhookWriteRefusal(
@@ -228,11 +231,14 @@ export function webhookWriteRefusal(
     );
   }
   const now = classifyVoiceUrl(current.url);
-  if (now.kind !== 'runtime') return null;
+  if (now.kind === 'none') return null;
+  const where =
+    now.kind === 'runtime'
+      ? `${phoneNumber} is answered by the voice runtime (lane "${now.lane}", ${current.url}).`
+      : `${phoneNumber} already has a Voice URL (${current.url}).`;
   return new PhoneLineRefusal(
-    'runtime_line',
-    `${phoneNumber} is answered by the voice runtime (lane "${now.lane}", ${current.url}). ` +
-      `A number the runtime answers is not repointed from the dashboard. ${NOT_CHANGED} ${WHERE_TO_REPOINT}`,
+    now.kind === 'runtime' ? 'runtime_line' : 'live_line',
+    `${where} The dashboard writes a Voice URL only onto a number that has none. ${NOT_CHANGED} ${WHERE_TO_REPOINT}`,
     current.url,
     target,
   );

@@ -173,7 +173,7 @@ class TwilioPhoneManagementService {
     }
 
     if (options?.updateTwilio) {
-      // A number answered by the voice runtime is never repointed from here
+      // A number that already has a Voice URL is never repointed from here
       // (src/services/phoneLineGuard.ts); that is done in the Twilio console,
       // and moving a live line is Wayne's decision. The stored
       // voiceWebhookUrl is not trusted for this: the Hub's copy was nine
