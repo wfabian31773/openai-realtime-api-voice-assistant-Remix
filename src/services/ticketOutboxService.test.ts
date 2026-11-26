@@ -91,7 +91,8 @@ vi.mock('../../server/services/ticketingApiClient', () => ({
     r?.outcome === 'unavailable' || r?.success === false,
 }));
 
-const { TicketOutboxService, wrapCreateTicketPayload, afterRefusal } = await import('./ticketOutboxService');
+const { TicketOutboxService, wrapCreateTicketPayload, afterRefusal, routingFieldRefused, heldRoutingExitNote } =
+  await import('./ticketOutboxService');
 
 describe('checking whether an outbox payload was refused', () => {
   it.each([
@@ -818,5 +819,117 @@ describe('v205: a refused replay sends its fallback once before dead-lettering',
     expect(afterRefusal({ kind: 'create_ticket_v1', params: NAMELESS_RECORDS, refusalFallback: { description: NAMELESS_RECORDS.description } }))
       .toBeUndefined();
     expect(afterRefusal({ ...NAMELESS_RECORDS })).toBeUndefined();
+  });
+});
+
+
+/**
+ * v277: A HELD OPTICAL OR SURGERY REQUEST REFUSED ON ITS REPLAY FOR ITS ROUTING
+ * FIELD TAKES THE APP'S UNASSIGNED EXIT. The whole chain, through the real
+ * surgery tool, is in aHeldRequestTakesTheRoutingExit.test.ts; these pin the
+ * outbox's own rule.
+ */
+const HELD_SURGERY = {
+  departmentId: 2,
+  requestTypeId: 8,
+  requestReasonId: 18,
+  patientFirstName: 'Testa',
+  patientLastName: 'Lake',
+  patientPhone: '5555550100',
+  description: 'Wants to know when the cataract surgery is scheduled.',
+  priority: 'medium' as const,
+  callData: { agentUsed: 'surgery', callSid: 'CA0001' },
+  idempotencyKey: 'call-CA0001',
+};
+const SURGEON_400 = { success: false, statusCode: 400, error: 'Missing required information: surgeon. Surgery tickets are assigned by surgeon.' };
+
+describe('v277: a held request refused on its replay for its routing field', () => {
+  beforeEach(() => {
+    createTicket.mockReset();
+    createTicket.mockResolvedValue({ success: true, ticketNumber: 'VA-52100', ticketId: 9001 });
+  });
+  const held = (params: Record<string, unknown> = HELD_SURGERY) =>
+    wrapCreateTicketPayload(params as never, { routingExit: true });
+  const storedPayload = () => setPayloads.find((p) => p.status === 'pending' && 'payload' in p)?.payload;
+
+  it('stores the exit only on an Optical or Surgery payload that has not taken it', () => {
+    expect(held().refusalFallback).toEqual({ routingExit: true });
+    expect(held({ ...HELD_SURGERY, departmentId: 1 }).refusalFallback).toEqual({ routingExit: true });
+    expect(held({ ...HELD_SURGERY, departmentId: 3 })).not.toHaveProperty('refusalFallback');
+    expect(held({ ...HELD_SURGERY, departmentId: 9 })).not.toHaveProperty('refusalFallback');
+    expect(held({ ...HELD_SURGERY, routingAskExhausted: true })).not.toHaveProperty('refusalFallback');
+    expect(wrapCreateTicketPayload(HELD_SURGERY as never)).not.toHaveProperty('refusalFallback');
+    // Never on the params, which are what goes on the wire.
+    expect(held().params).toEqual(HELD_SURGERY);
+  });
+
+  it('keeps a description fallback beside it', () => {
+    expect(wrapCreateTicketPayload(HELD_SURGERY as never, { description: 'Other words.', routingExit: true }).refusalFallback)
+      .toEqual({ description: 'Other words.', routingExit: true });
+  });
+
+  it.each([
+    [2, 'Missing required information: surgeon', 'surgeon'],
+    [2, 'Missing required information: surgeon. Surgery tickets are assigned by surgeon.', 'surgeon'],
+    [1, 'Missing required information: office', 'office'],
+    [1, 'missing required information: location', 'office'],
+    [2, 'Missing required information: office', undefined],
+    [1, 'Missing required information: surgeon', undefined],
+    [3, 'Missing required information: surgeon', undefined],
+    [2, 'Missing required information: patientFirstName', undefined],
+    [2, 'The surgeon "Example" was not found in our system', undefined],
+    [2, undefined, undefined],
+    [undefined, 'Missing required information: surgeon', undefined],
+  ])('department %s, refusal %j, reads as the routing field %s', (dept, error, field) => {
+    expect(routingFieldRefused(dept as number | undefined, error as string | undefined)).toBe(field);
+  });
+
+  it('the replay sends the same payload with the exit and the staff note, on the same key', async () => {
+    createTicket.mockResolvedValueOnce(SURGEON_400).mockResolvedValueOnce({ success: true, ticketNumber: 'VA-90003' });
+    updateResults.push(entry(held()), [{ id: 'ob-1' }], () => entry(storedPayload()), undefined);
+
+    const res = await TicketOutboxService.attemptSend('ob-1');
+
+    expect(res.ticketNumber).toBe('VA-90003');
+    const [first, second] = createTicket.mock.calls.map((c) => c[0]);
+    expect(first.routingAskExhausted).toBeUndefined();
+    expect(second).toEqual({
+      ...HELD_SURGERY,
+      routingAskExhausted: true,
+      callData: { ...HELD_SURGERY.callData, transcript: heldRoutingExitNote('surgeon') },
+    });
+    expect(storedPayload()).not.toHaveProperty('refusalFallback');
+    // The reopen is the v205 statement: keyed on the id AND the 'sending' status.
+    expect(whereCols[1]).toEqual(expect.arrayContaining(['id', 'status']));
+  });
+
+  it('a send whose caller sees the answer never takes it: that refusal is the ask', async () => {
+    createTicket.mockResolvedValueOnce(SURGEON_400);
+    updateResults.push(entry(held()), undefined);
+
+    const res = await TicketOutboxService.attemptSend('ob-1', { liveCaller: true });
+
+    expect(createTicket).toHaveBeenCalledOnce();
+    expect(res.terminal).toBe(true);
+    expect(setPayloads.find((p) => p.status === 'dead_letter')?.refusalStatusCode).toBe(400);
+    expect(afterRefusal(held(), { error: SURGEON_400.error, liveCaller: true })).toBeUndefined();
+  });
+
+  it('the exit refused too is a dead letter, after exactly two POSTs', async () => {
+    createTicket.mockResolvedValue(SURGEON_400);
+    updateResults.push(entry(held()), [{ id: 'ob-1' }], () => entry(storedPayload()), undefined);
+
+    const res = await TicketOutboxService.attemptSend('ob-1');
+
+    expect(createTicket).toHaveBeenCalledTimes(2);
+    expect(res.terminal).toBe(true);
+  });
+
+  it('a refusal for another field falls through to a description fallback, as v205 did', () => {
+    const both = wrapCreateTicketPayload(HELD_SURGERY as never, { description: 'Other words.', routingExit: true });
+    const next = afterRefusal(both, { error: 'Missing required information: patientFirstName' });
+    expect(next?.params.description).toBe('Other words.');
+    expect(next?.params.routingAskExhausted).toBeUndefined();
+    expect(afterRefusal(held(), { error: 'Missing required information: patientFirstName' })).toBeUndefined();
   });
 });

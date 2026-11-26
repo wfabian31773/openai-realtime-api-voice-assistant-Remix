@@ -2251,9 +2251,22 @@ import { callEnvironment } from "./callRecord";
  * only under a name, with FLOOR_REQUEST_NOT_CONFIRMED_NOTE; a records request
  * is not read and files to Medical Records as before.
  * Above v275 (#524). No migration.
+ *
+ * v277 — A HELD OPTICAL OR SURGERY REQUEST REFUSED ON ITS REPLAY FOR THE
+ * OFFICE OR THE SURGEON IS FILED UNASSIGNED (2026-11-26). A queue filing whose
+ * create-ticket POST did not complete is held in the outbox and the caller is
+ * told it is logged; the worker's replay was then refused "Missing required
+ * information: surgeon" (or office) with nobody on the line to ask, and the row
+ * dead-lettered with no ticket (CA9f2717c562f8f8d72675faf5e05a52ea, 2026-10-30;
+ * CAb7e38750f96288150a675729d1de0d57, 2026-10-02). A first filing for
+ * department 1 or 2 now stores `refusalFallback.routingExit`, and only the
+ * worker's replay (never a send whose caller sees the answer) uses it, when
+ * the refusal names that department's routing field: the same payload with
+ * `routingAskExhausted: true` and a staff line, on the same key, once.
+ * Above v276 (#526). No migration.
  */
 export const VOICE_RUNTIME_DEPLOY_MARKER =
-  "voice-runtime-v276-the-after-hours-floor-files-only-an-identified-request-20261126";
+  "voice-runtime-v277-a-held-request-takes-the-routing-exit-20261126";
 
 /**
  * The date the marker was set, parsed out of the marker itself so anyone can

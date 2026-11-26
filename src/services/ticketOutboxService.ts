@@ -48,7 +48,7 @@ const SENDING_LEASE_TIMEOUT_MS = 120_000;
  * The discriminator lives inside the jsonb payload rather than in a new column
  * so that no migration stands between this and a deploy.
  */
-import { isTerminalRefusal } from './terminalRefusal';
+import { isTerminalRefusal, refusedFieldNamed } from './terminalRefusal';
 
 export const CREATE_TICKET_PAYLOAD_KIND = 'create_ticket_v1';
 
@@ -70,7 +70,80 @@ export const CREATE_TICKET_PAYLOAD_KIND = 'create_ticket_v1';
  * never reaches the wire and no migration stands between it and a deploy.
  */
 export interface RefusalFallback {
-  description: string;
+  description?: string;
+  /**
+   * v277: an Optical or Surgery request held here may take the app's
+   * unassigned exit if its replay is refused for the office or the surgeon.
+   * See `routingFieldRefused`.
+   */
+  routingExit?: true;
+}
+
+/**
+ * v277: A HELD OPTICAL OR SURGERY REQUEST REFUSED ON ITS REPLAY FOR THE OFFICE
+ * OR THE SURGEON IS FILED UNASSIGNED, NOT LOST.
+ *
+ * The four queue tools persist their payload here before they POST it. When
+ * that POST does not complete (a timeout, an outage, a 5xx), the tool tells the
+ * caller the request is logged and the worker replays it later. Optical (1)
+ * routes by office and Surgery (2) by surgeon, and create-ticket refuses either
+ * with neither ("Missing required information: surgeon"). On the call that
+ * refusal is a question the agent puts to the caller. On a replay nobody is
+ * there to answer it, and the row dead-lettered with no ticket.
+ *
+ * MEASURED, Hub `ticket_outbox`, every row to 2026-11-26: 2 held requests were
+ * refused on their replay for their routing field, both Surgery, both with no
+ * ticket of any provenance (CAb7e38750f96288150a675729d1de0d57 on 2026-10-02,
+ * CA9f2717c562f8f8d72675faf5e05a52ea on 2026-10-30). The other 5 dead letters
+ * with a refusal status were refused on the call itself, where the tool asks.
+ *
+ * The exit is the app's own (`routingAskExhausted`, operator ruling
+ * 2026-09-02, honoured for departments 1 and 2). The app still derives the
+ * office or surgeon from the patient's record before it takes the exit, so the
+ * flag can only turn this refusal into an unassigned ticket; it cannot cost a
+ * routable ticket its routing. The teardown filers send the same flag for the
+ * same reason (`TEARDOWN_UNASSIGNED_EXIT_DEPARTMENTS`, v92).
+ *
+ * Used only on the worker's replay, never on a send whose caller sees the
+ * answer (`liveCaller`): there the refusal is the tool's ask (v81).
+ */
+export const ROUTING_FIELD_BY_DEPARTMENT: ReadonlyMap<number, { field: 'office' | 'surgeon'; refusedAs: readonly string[] }> =
+  new Map([
+    [1, { field: 'office', refusedAs: ['office', 'location'] }],
+    [2, { field: 'surgeon', refusedAs: ['surgeon'] }],
+  ]);
+
+/** The routing field a refusal named, when it is this department's own. */
+export function routingFieldRefused(departmentId: number | undefined, error?: string): 'office' | 'surgeon' | undefined {
+  const routing = departmentId === undefined ? undefined : ROUTING_FIELD_BY_DEPARTMENT.get(departmentId);
+  const named = refusedFieldNamed(error);
+  return routing && named && routing.refusedAs.includes(named) ? routing.field : undefined;
+}
+
+/** Staff-only, on `callData.transcript`. Never the description, which is an SMS body. */
+export function heldRoutingExitNote(field: 'office' | 'surgeon'): string {
+  const which = field === 'surgeon' ? 'a surgeon' : 'an office';
+  return (
+    'HELD, THEN FILED UNASSIGNED: the ticket system did not take this request during the call ' +
+    `(a timeout or an outage), so it was held and sent later. It was then refused for want of ${which}, ` +
+    `and nobody was on the line to ask, so it was filed unassigned. Find the ${field} on the patient's ` +
+    'chart or in the call recording.'
+  );
+}
+
+/** A payload the routing exit can still help: its department routes by a field, and it has not taken the exit. */
+function routingExitCanApply(params: CreateTicketParams): boolean {
+  return ROUTING_FIELD_BY_DEPARTMENT.has(params.departmentId) && params.routingAskExhausted !== true;
+}
+
+function withRoutingExit(params: CreateTicketParams, field: 'office' | 'surgeon'): CreateTicketParams {
+  const note = heldRoutingExitNote(field);
+  const existing = params.callData?.transcript?.trim();
+  return {
+    ...params,
+    routingAskExhausted: true,
+    callData: { ...params.callData, transcript: existing ? `${existing}\n${note}` : note },
+  };
 }
 
 export interface CreateTicketOutboxPayload {
@@ -91,20 +164,37 @@ export type OutboxPayload = SyncAgentTicketParams | CreateTicketOutboxPayload;
 
 export function wrapCreateTicketPayload(
   params: CreateTicketParams,
-  refusalFallback?: RefusalFallback,
+  refusalFallback?: { description?: string; routingExit?: boolean },
 ): CreateTicketOutboxPayload {
-  const fallback = refusalFallback?.description?.trim() && refusalFallback.description !== params.description
-    ? { refusalFallback: { description: refusalFallback.description } }
-    : {};
-  return { kind: CREATE_TICKET_PAYLOAD_KIND, params, ...fallback };
+  const description = refusalFallback?.description?.trim() && refusalFallback.description !== params.description
+    ? refusalFallback.description
+    : undefined;
+  const routingExit = refusalFallback?.routingExit === true && routingExitCanApply(params);
+  const fallback: RefusalFallback = {
+    ...(description ? { description } : {}),
+    ...(routingExit ? { routingExit: true as const } : {}),
+  };
+  return { kind: CREATE_TICKET_PAYLOAD_KIND, params, ...(Object.keys(fallback).length ? { refusalFallback: fallback } : {}) };
 }
 
-/** The payload to send after a refusal, when this one carries a fallback. */
-export function afterRefusal(payload: unknown): CreateTicketOutboxPayload | undefined {
+/**
+ * The payload to send after a refusal, when this one carries a fallback. One
+ * more try at most: the payload returned carries no fallback, so a second
+ * refusal dead-letters.
+ */
+export function afterRefusal(
+  payload: unknown,
+  refusal: { error?: string; liveCaller?: boolean } = {},
+): CreateTicketOutboxPayload | undefined {
   if (!isCreateTicketPayload(payload)) return undefined;
-  const description = payload.refusalFallback?.description;
-  if (!description?.trim() || description === payload.params.description) return undefined;
-  return { kind: CREATE_TICKET_PAYLOAD_KIND, params: { ...payload.params, description } };
+  const { params, refusalFallback } = payload;
+  if (refusalFallback?.routingExit === true && !refusal.liveCaller && routingExitCanApply(params)) {
+    const field = routingFieldRefused(params.departmentId, refusal.error);
+    if (field) return { kind: CREATE_TICKET_PAYLOAD_KIND, params: withRoutingExit(params, field) };
+  }
+  const description = refusalFallback?.description;
+  if (!description?.trim() || description === params.description) return undefined;
+  return { kind: CREATE_TICKET_PAYLOAD_KIND, params: { ...params, description } };
 }
 
 export function isCreateTicketPayload(payload: unknown): payload is CreateTicketOutboxPayload {
@@ -481,16 +571,26 @@ export class TicketOutboxService {
          * ONE MORE TRY WITH THE FALLBACK, THEN THE DEAD LETTER (v205).
          *
          * Not a retry of the same bytes: the payload's own filer named the
-         * description to send after a refusal (`RefusalFallback`). It replaces
-         * the stored payload, which drops the fallback, so a second refusal
-         * dead-letters as before. Guarded on `sending`, the claim this send
-         * holds. Same idempotency key: the refusal stored none on the far side.
+         * description to send after a refusal (`RefusalFallback`), or, on an
+         * Optical or Surgery request refused on the worker's replay for its
+         * office or surgeon, the unassigned exit (v277). It replaces the stored
+         * payload, which drops the fallback, so a second refusal dead-letters
+         * as before. Guarded on `sending`, the claim this send holds. Same
+         * idempotency key: the refusal stored none on the far side.
          */
-        const next = afterRefusal(stored);
+        const next = afterRefusal(stored, { error, liveCaller: options.liveCaller });
         if (next) {
+          // Field names only: the app's own text can name the patient's office (v116).
+          const exit = next.params.routingAskExhausted === true && isCreateTicketPayload(stored)
+            && stored.params.routingAskExhausted !== true
+            ? routingFieldRefused(stored.params.departmentId, error)
+            : undefined;
           console.warn(
-            `[TICKET OUTBOX] ↻ REFUSED (HTTP ${response.statusCode}) — ${outboxId} carries a fallback ` +
-              'description; sending it once with that before dead-lettering',
+            exit
+              ? `[TICKET OUTBOX] ↻ REFUSED (HTTP ${response.statusCode}) for the ${exit} on a held request — ` +
+                  `${outboxId} sending it once with the unassigned exit before dead-lettering (v277)`
+              : `[TICKET OUTBOX] ↻ REFUSED (HTTP ${response.statusCode}) — ${outboxId} carries a fallback ` +
+                  'description; sending it once with that before dead-lettering',
           );
           const reopened = await db
             .update(ticketOutbox)
