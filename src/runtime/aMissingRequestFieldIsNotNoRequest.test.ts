@@ -73,7 +73,13 @@ describe('v277: the production asker reads only an explicit null as no request',
     expect(reading.kind).toBe('unavailable');
   });
 
-  for (const text of ['...', '!?', '--', '…', '12345']) {
+  it('a sentence the model quoted is read without its quotes (review of #532)', async () => {
+    replies.push(JSON.stringify({ request: '"Wants a refill of eye drops."' }));
+    const reading = await readTheRequest(TRANSCRIPT, askModelForTheRequest, []);
+    expect(reading).toEqual({ kind: 'request', sentence: 'Wants a refill of eye drops.' });
+  });
+
+  for (const text of ['...', '!?', '--', '…', '12345', "'", "''", '"', "' '", "' ' '"]) {
     it(`a first answer of only "${text}" reaches the reader as unavailable, never as none (review of #532)`, async () => {
       replies.push(JSON.stringify({ request: text }));
       const reading = await readTheRequest(TRANSCRIPT, askModelForTheRequest, []);
@@ -117,7 +123,7 @@ describe('v277: the second answer decides what the reader reads (review of #526)
     expect(reading).toEqual({ kind: 'request', sentence: 'Wants a refill of eye drops.' });
   });
 
-  for (const text of ['...', '!?', '--', '12345']) {
+  for (const text of ['...', '!?', '--', '12345', "'", "''", '"', "' '"]) {
     it(`a second answer of only "${text}" is still a request, never a retraction (review of #532)`, async () => {
       replies.push(JSON.stringify({ request: 'Mara Quill wants a refill.' }));
       replies.push(JSON.stringify({ request: text }));

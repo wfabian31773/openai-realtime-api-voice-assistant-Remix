@@ -354,7 +354,19 @@ function foldWords(s: string): string[] {
  * request back. It is the reader failing.
  */
 function carriesNoWords(s: string): boolean {
-  return foldWords(s).length === 0;
+  // The same cleanup `checkRequest` makes before it reads the words: a reply
+  // of only quotes or apostrophes ("'") folds to a word here and to nothing
+  // there (review of #532).
+  return !foldWords(cleanForCheck(s)).some((w) => /[a-z]/.test(w));
+}
+
+/** The cleanup `checkRequest` makes before it reads a sentence. */
+function cleanForCheck(raw: string | null | undefined): string {
+  return sanitizeForSms(String(raw ?? ""))
+    .value.replace(/\s+/g, " ")
+    .trim()
+    .replace(/^["']+|["']+$/g, "")
+    .trim();
 }
 
 /**
@@ -403,8 +415,7 @@ export function checkRequest(
   raw: string | null | undefined,
   heldNames: readonly string[] = [],
 ): { sentence: string } | { kind: UnusableKind } {
-  let s = sanitizeForSms(String(raw ?? "")).value.replace(/\s+/g, " ").trim();
-  s = s.replace(/^["']+|["']+$/g, "").trim();
+  const s = cleanForCheck(raw);
   if (SAYS_NOTHING_WAS_ASKED.test(s)) return { kind: "says_nothing" };
   if (/callback request taken/i.test(s)) return { kind: "placeholder" };
   if (foldWords(s).every((w) => CARRIES_NO_TOPIC.has(w))) return { kind: "no_topic" };
