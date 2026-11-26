@@ -43,6 +43,11 @@ export function clampEnvMs(
   min: number,
   max: number,
 ): number {
+  // A variable set to nothing is unset: Number("") is 0, which would read a
+  // blank RUNTIME_CONNECT_RETRIES as no retries and a blank
+  // RUNTIME_RECONNECT_MAX as one reconnect (Codex P2 on #522). An explicit
+  // "0" still means zero.
+  if (raw === undefined || raw.trim() === "") return fallback;
   const n = Number(raw);
   if (!Number.isFinite(n)) return fallback;
   return Math.min(max, Math.max(min, Math.round(n)));
